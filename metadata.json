@@ -1,0 +1,6 @@
+{
+  "name": "无障碍模拟手动助手",
+  "description": "基于 Android 16 无障碍服务的全能手动模拟器。支持 120Hz 高频极速自动点击、按键触发、滑动及文本自动填充，完美适配全面屏全屏绘制，零延迟免 Root 自动化助手。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

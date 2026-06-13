@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">模拟手动助手</string>
+    <string name="accessibility_service_label">模拟手动助手 - 自动化点击引擎</string>
+    <string name="accessibility_service_description">模拟手动极速助手，通过模拟物理点击、手势滑动和自动文本输入，免 Root 帮您实现高效的日常流转。支持 120Hz 高刷新率采样与全屏沉浸适配。</string>
+</resources>
