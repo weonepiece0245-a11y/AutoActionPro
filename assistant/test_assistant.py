@@ -6,6 +6,7 @@
 import importlib.util
 import os
 import sys
+import tempfile
 import types
 import unittest
 from types import SimpleNamespace
@@ -175,6 +176,54 @@ class ChatLoopTest(unittest.TestCase):
         self.run_chat(["Q1", "Q2", "/quit"], bot)
         self.assertEqual([m["role"] for m in bot.messages], ["user", "assistant"])
         self.assertEqual(bot.messages[0]["content"], "Q2")
+
+
+class LoadEnvFileTest(unittest.TestCase):
+    def load(self, content, encoding="utf-8"):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, ".env")
+            with open(path, "w", encoding=encoding) as f:
+                f.write(content)
+            app.load_env_file(path)
+
+    def test_parses_lines(self):
+        content = (
+            "# 注释\n"
+            "\n"
+            "ANTHROPIC_API_KEY=sk-test\n"
+            "export A = 'single'\n"
+            'B="double"\n'
+            "C=a=b\n"
+            "not a pair\n"
+        )
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.load(content)
+            self.assertEqual(os.environ["ANTHROPIC_API_KEY"], "sk-test")
+            self.assertEqual(os.environ["A"], "single")
+            self.assertEqual(os.environ["B"], "double")
+            self.assertEqual(os.environ["C"], "a=b")
+            self.assertEqual(len(os.environ), 4)
+
+    def test_handles_bom(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.load("ANTHROPIC_API_KEY=sk-bom\n", encoding="utf-8-sig")
+            self.assertEqual(os.environ["ANTHROPIC_API_KEY"], "sk-bom")
+
+    def test_environment_wins(self):
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "from-env"}, clear=True):
+            self.load("ANTHROPIC_API_KEY=from-file\n")
+            self.assertEqual(os.environ["ANTHROPIC_API_KEY"], "from-env")
+
+    def test_missing_file_is_ignored(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            app.load_env_file(os.path.join(tempfile.gettempdir(), "no-such-dir", ".env"))
+            self.assertEqual(dict(os.environ), {})
+
+    def test_default_path_is_next_to_script(self):
+        self.assertEqual(
+            app.DEFAULT_ENV_FILE,
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+        )
 
 
 if __name__ == "__main__":

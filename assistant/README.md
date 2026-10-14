@@ -12,13 +12,26 @@ pip install -r assistant/requirements.txt
 
 ## 设置 API Key
 
-先到 <https://console.anthropic.com/> 获取 API Key,再设置为环境变量:
+先到 <https://console.anthropic.com/> 获取 API Key,然后任选一种方式配置。
+
+**方式一(推荐):写在 .env 文件里**,只需设置一次:
+
+```bash
+copy assistant\.env.example assistant\.env      # Windows
+cp assistant/.env.example assistant/.env        # macOS / Linux
+```
+
+用记事本(或任意编辑器)打开 `assistant/.env`,把 `在这里填你的Key` 换成你的 Key,保存即可。`.env` 已被 `.gitignore` 忽略,不会被提交到 Git。
+
+**方式二:设置环境变量**
 
 ```bash
 export ANTHROPIC_API_KEY=你的Key          # macOS / Linux
 set ANTHROPIC_API_KEY=你的Key             # Windows CMD
 $env:ANTHROPIC_API_KEY="你的Key"          # Windows PowerShell
 ```
+
+两种方式都配置了时,以环境变量为准。如果想用别的位置的文件,可以加参数 `--env-file 路径`。
 
 ## 运行
 

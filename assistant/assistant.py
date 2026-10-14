@@ -1,13 +1,14 @@
 """AI 小助理:在终端里和 Claude 多轮对话。
 
 用法:
-    export ANTHROPIC_API_KEY=你的Key
+    在 assistant/.env 里写入 ANTHROPIC_API_KEY=你的Key(或设置同名环境变量)
     python assistant/assistant.py
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from typing import Callable
 
@@ -24,6 +25,32 @@ SYSTEM_PROMPT = (
 )
 
 HELP_TEXT = "命令:/clear 清空对话  /exit 退出"
+
+DEFAULT_ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+KEY_HINT = "请设置环境变量 ANTHROPIC_API_KEY,或在 assistant/.env 里写入 ANTHROPIC_API_KEY=你的Key。"
+
+
+def load_env_file(path: str) -> None:
+    """把 .env 文件里的 KEY=VALUE 读进环境变量;已设置的环境变量优先,不覆盖。"""
+    try:
+        # utf-8-sig 兼容 Windows 记事本保存时带的 BOM
+        with open(path, encoding="utf-8-sig") as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        return
+
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):]
+        key, value = line.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key:
+            os.environ.setdefault(key, value)
 
 
 class RefusalError(Exception):
@@ -112,7 +139,7 @@ def chat(assistant: Assistant) -> None:
         except RefusalError:
             print("\n抱歉,这个问题我无法回答,换个问题试试吧。")
         except anthropic.AuthenticationError:
-            print("\nAPI Key 无效或未设置,请先设置环境变量 ANTHROPIC_API_KEY。")
+            print(f"\nAPI Key 无效或未设置。{KEY_HINT}")
             return
         except anthropic.RateLimitError:
             print("\n请求太频繁了,请稍等片刻再试。")
@@ -131,12 +158,18 @@ def main(argv: list[str] | None = None) -> None:
         choices=["low", "medium", "high", "xhigh", "max"],
         help=f"思考深度,越高越仔细但越慢(默认 {DEFAULT_EFFORT})",
     )
+    parser.add_argument(
+        "--env-file",
+        default=DEFAULT_ENV_FILE,
+        help="存放 API Key 的 .env 文件(默认是本程序同目录下的 .env)",
+    )
     args = parser.parse_args(argv)
 
+    load_env_file(args.env_file)
     try:
         assistant = Assistant(model=args.model, effort=args.effort)
     except anthropic.AnthropicError:
-        print("未找到 API 凭据,请先设置环境变量 ANTHROPIC_API_KEY。", file=sys.stderr)
+        print(f"未找到 API 凭据。{KEY_HINT}", file=sys.stderr)
         sys.exit(1)
     chat(assistant)
 
