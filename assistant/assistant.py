@@ -27,7 +27,8 @@ SYSTEM_PROMPT = (
 HELP_TEXT = "命令:/clear 清空对话  /exit 退出"
 
 DEFAULT_ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-KEY_HINT = "请设置环境变量 ANTHROPIC_API_KEY,或在 assistant/.env 里写入 ANTHROPIC_API_KEY=你的Key。"
+PLACEHOLDER_KEY = "在这里填你的Key"  # 与 .env.example 中的占位符一致
+KEY_HINT ="请设置环境变量 ANTHROPIC_API_KEY,或在 assistant/.env 里写入 ANTHROPIC_API_KEY=你的Key。"
 
 
 def load_env_file(path: str) -> None:
@@ -166,6 +167,9 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     load_env_file(args.env_file)
+    if os.environ.get("ANTHROPIC_API_KEY") == PLACEHOLDER_KEY:
+        print(f"还没有填写 API Key。请打开 {args.env_file},把“{PLACEHOLDER_KEY}”换成你的 Key。", file=sys.stderr)
+        sys.exit(1)
     try:
         assistant = Assistant(model=args.model, effort=args.effort)
     except anthropic.AnthropicError:

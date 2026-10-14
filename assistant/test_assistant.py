@@ -219,6 +219,12 @@ class LoadEnvFileTest(unittest.TestCase):
             app.load_env_file(os.path.join(tempfile.gettempdir(), "no-such-dir", ".env"))
             self.assertEqual(dict(os.environ), {})
 
+    def test_placeholder_key_exits_with_hint(self):
+        example = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env.example")
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch("builtins.print"):
+            with self.assertRaises(SystemExit):
+                app.main(["--env-file", example])
+
     def test_default_path_is_next_to_script(self):
         self.assertEqual(
             app.DEFAULT_ENV_FILE,
