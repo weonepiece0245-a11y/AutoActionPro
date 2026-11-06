@@ -1,7 +1,8 @@
 """在手机上通过 Discord 私信和“星期五”说话。
 
-- 机器人只在私信里工作,只听配对过的主人一个人的话,其他人的消息一律忽略。
-- 第一次使用要配对:电脑上显示 6 位配对码,主人在 Discord 私信机器人发送这个码。
+- 机器人只在私信里工作,只听配对过的账号(可以是主人的几个号),其他人的消息一律忽略。
+- 第一次使用要配对:电脑上显示 6 位配对码,在 Discord 私信机器人发送这个码。
+  想再加一个号:在“星期五”窗口输入 /discord pair 生成新配对码(10 分钟有效、只能用一次)。
 - “星期五”需要用户确认的操作(执行命令、关程序、发邮件……)会发到 Discord 问主人,
   主人回复 y 才执行,2 分钟没回复算拒绝。
 
@@ -18,6 +19,7 @@ import queue
 import secrets
 import sys
 import threading
+import time
 import webbrowser
 from pathlib import Path
 from typing import Callable
@@ -70,63 +72,110 @@ class DiscordMessage:
 class DiscordGate:
     """决定一条私信该怎么处理:配对、忽略陌生人、回答确认、还是交给“星期五”。
 
+    可以配对多个账号(都是主人自己的号)。新的配对码只能在电脑上生成,
+    第一次没有任何账号时会自动生成一个;之后用 /discord pair 生成,10 分钟内有效、只能用一次。
     和 discord.py 无关,方便测试。send(channel, text) 用来回消息。
     """
 
-    def __init__(self, state_file: str | os.PathLike, events: queue.Queue, send, on_status: StatusFn = print) -> None:
+    PAIR_MINUTES = 10
+
+    def __init__(self, state_file: str | os.PathLike, events: queue.Queue, send, on_status: StatusFn = print,
+                 clock: Callable[[], float] = time.monotonic) -> None:
         self.state_file = Path(state_file)
         self.events = events
         self.send = send
         self.on_status = on_status
-        self.owner_id = self._load_owner()
-        self.pair_code = None if self.owner_id else f"{secrets.randbelow(10 ** 6):06d}"
+        self.clock = clock
+        self.owners: dict[int, str] = self._load_owners()
+        self.pair_code: str | None = None
+        self.pair_expires: float | None = None
+        if not self.owners:
+            self.pair_code = self._code()  # 第一次:一直有效,直到配对成功
         self.answers: queue.Queue = queue.Queue()
-        self.waiting = False
+        self.waiting_for: int | None = None
 
-    def _load_owner(self) -> int | None:
+    @staticmethod
+    def _code() -> str:
+        return f"{secrets.randbelow(10 ** 6):06d}"
+
+    def _load_owners(self) -> dict[int, str]:
         try:
-            owner = json.loads(self.state_file.read_text(encoding="utf-8")).get("owner_id")
-        except (OSError, ValueError, AttributeError):
-            return None
-        return int(owner) if isinstance(owner, (int, str)) and str(owner).isdigit() else None
+            data = json.loads(self.state_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        owners = {}
+        for item in data.get("owners", []):
+            if isinstance(item, dict) and str(item.get("id", "")).isdigit():
+                owners[int(item["id"])] = str(item.get("name", ""))
+        old = data.get("owner_id")  # 旧版只存一个主人
+        if str(old or "").isdigit():
+            owners.setdefault(int(old), str(data.get("owner_name", "")))
+        return owners
 
-    def _save_owner(self, owner_id: int, name: str) -> None:
-        self.state_file.write_text(json.dumps({"owner_id": owner_id, "owner_name": name}, ensure_ascii=False),
-                                   encoding="utf-8")
+    def _save_owners(self) -> None:
+        data = {"owners": [{"id": i, "name": n} for i, n in self.owners.items()]}
+        self.state_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    # ---- 电脑上的管理命令 ----
+    def new_pair_code(self) -> str:
+        self.pair_code = self._code()
+        self.pair_expires = self.clock() + self.PAIR_MINUTES * 60
+        return self.pair_code
+
+    def owner_list(self) -> list[str]:
+        return [f"{n}. {name or '(未知名字)'}(id {i})" for n, (i, name) in enumerate(self.owners.items(), 1)]
+
+    def remove_owner(self, key: str) -> list[str]:
+        key = key.strip()
+        items = list(self.owners.items())
+        if key.isdigit() and 1 <= int(key) <= len(items):
+            targets = [items[int(key) - 1]]
+        else:
+            targets = [(i, n) for i, n in items if key and (key in n or key == str(i))]
+        for owner_id, _ in targets:
+            del self.owners[owner_id]
+        if targets:
+            self._save_owners()
+        return [name or str(i) for i, name in targets]
+
+    def _pair_code_valid(self) -> bool:
+        return self.pair_code is not None and (self.pair_expires is None or self.clock() <= self.pair_expires)
+
+    # ---- 收到私信 ----
     def handle(self, author_id: int, author_name: str, is_dm: bool, text: str, channel) -> None:
         if not is_dm:
             return
         text = (text or "").strip()
-        if self.owner_id is None:
-            if text == self.pair_code:
-                self.owner_id = author_id
-                self.pair_code = None
-                self._save_owner(author_id, author_name)
-                self.on_status(f"已和 Discord 用户 {author_name} 配对,以后只听 TA 的消息")
-                self.send(channel, "配对成功!以后在这里私信我就行,我只听你一个人的。")
-            else:
+        if author_id not in self.owners:
+            if self._pair_code_valid() and text == self.pair_code:
+                self.owners[author_id] = author_name
+                self.pair_code = self.pair_expires = None
+                self._save_owners()
+                self.on_status(f"已和 Discord 账号 {author_name} 配对(现在共 {len(self.owners)} 个账号)")
+                self.send(channel, "配对成功!以后在这里私信我就行。")
+            elif not self.owners:
                 self.send(channel, "还没有配对。请发送“星期五”电脑窗口里显示的 6 位配对码。")
-            return
-        if author_id != self.owner_id:
-            self.on_status(f"有陌生人({author_name})私信了机器人,已忽略")
+            else:
+                self.on_status(f"有没配对的账号({author_name})私信了机器人,已忽略")
             return
         if not text:
             return
-        if self.waiting:
+        if self.waiting_for == author_id:
             self.answers.put(text)
             return
         self.events.put(("discord", DiscordMessage(
             text,
             reply=lambda answer: self.send(channel, answer),
-            ask=lambda question: self.ask(channel, question),
+            ask=lambda question: self.ask(channel, question, author_id),
         )))
 
-    def ask(self, channel, question: str, timeout: float = ASK_TIMEOUT) -> bool:
-        """在 Discord 上请主人确认,等主人回复;超时算拒绝。"""
+    def ask(self, channel, question: str, author_id: int | None = None, timeout: float = ASK_TIMEOUT) -> bool:
+        """在 Discord 上请发消息的那个账号确认,等它回复;超时算拒绝。"""
         while not self.answers.empty():
             self.answers.get_nowait()
-        self.waiting = True
+        self.waiting_for = author_id
         try:
             self.send(channel, f"⚠ {question}\n回复 y 允许,回复其他内容就是拒绝({int(timeout)} 秒内不回复也算拒绝)。")
             try:
@@ -135,7 +184,7 @@ class DiscordGate:
                 self.send(channel, "没有收到回复,已取消这个操作。")
                 return False
         finally:
-            self.waiting = False
+            self.waiting_for = None
         return answer.strip().lower() in YES
 
 

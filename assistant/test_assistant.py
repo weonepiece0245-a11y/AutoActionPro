@@ -2605,55 +2605,119 @@ class DiscordHelpersTest(TempDirTest):
 
 
 class DiscordGateTest(TempDirTest):
-    def make(self):
+    def make(self, clock=None):
         self.sent = []
         self.events = queue.Queue()
         self.statuses = []
+        self.now = [1000.0]
         return dmod.DiscordGate(Path(self.tmp, "discord.json"), self.events,
-                                lambda channel, text: self.sent.append((channel, text)), self.statuses.append)
+                                lambda channel, text: self.sent.append((channel, text)), self.statuses.append,
+                                clock=lambda: self.now[0])
 
-    def test_pairing(self):
+    def paired(self, *owners):
+        Path(self.tmp, "discord.json").write_text(json.dumps({"owners": [{"id": i, "name": n} for i, n in owners]}))
+        return self.make()
+
+    def test_first_pairing(self):
         gate = self.make()
         code = gate.pair_code
         self.assertRegex(code, r"^\d{6}$")
         gate.handle(42, "me", True, "你好", "dm")
         self.assertIn("配对码", self.sent[-1][1])
         gate.handle(42, "me", True, code, "dm")
-        self.assertEqual(gate.owner_id, 42)
+        self.assertEqual(gate.owners, {42: "me"})
         self.assertIn("配对成功", self.sent[-1][1])
-        self.assertIsNone(self.make().pair_code)  # 重新打开也记得主人
+        self.assertIsNone(gate.pair_code)
+        reopened = self.make()
+        self.assertEqual(reopened.owners, {42: "me"})  # 重新打开也记得
+        self.assertIsNone(reopened.pair_code)
         self.assertTrue(self.events.empty())
 
-    def test_only_owner_in_dms_reaches_friday(self):
-        Path(self.tmp, "discord.json").write_text('{"owner_id": 42}')
-        gate = self.make()
+    def test_adding_second_account_needs_code_from_computer(self):
+        gate = self.paired((42, "main"))
+        gate.handle(77, "alt", True, "123456", "dm")  # 没有生成配对码时乱猜没用
+        self.assertNotIn(77, gate.owners)
+        self.assertEqual(self.sent, [])  # 已经有主人后,不回陌生人
+        code = gate.new_pair_code()
+        gate.handle(77, "alt", True, code, "dm")
+        self.assertEqual(gate.owners, {42: "main", 77: "alt"})
+        gate.handle(88, "stranger", True, code, "dm")  # 只能用一次
+        self.assertNotIn(88, gate.owners)
+        self.assertEqual(self.make().owners, {42: "main", 77: "alt"})
+
+    def test_pair_code_expires(self):
+        gate = self.paired((42, "main"))
+        code = gate.new_pair_code()
+        self.now[0] += 11 * 60
+        gate.handle(77, "alt", True, code, "dm")
+        self.assertNotIn(77, gate.owners)
+
+    def test_both_accounts_reach_friday_and_strangers_are_ignored(self):
+        gate = self.paired((42, "main"), (77, "alt"))
         gate.handle(99, "stranger", True, "帮我关机", "dm")
-        gate.handle(42, "me", False, "在群里说的话", "channel")
+        gate.handle(42, "main", False, "在群里说的话", "channel")
         self.assertTrue(self.events.empty())
-        self.assertEqual(self.sent, [])
         self.assertIn("stranger", self.statuses[0])
-        gate.handle(42, "me", True, "  明天天气怎么样 ", "dm")
-        kind, message = self.events.get_nowait()
-        self.assertEqual((kind, message.text), ("discord", "明天天气怎么样"))
-        message.reply("晴天")
-        self.assertEqual(self.sent[-1], ("dm", "晴天"))
+        gate.handle(42, "main", True, "  明天天气怎么样 ", "dm-main")
+        gate.handle(77, "alt", True, "放首歌", "dm-alt")
+        first, second = self.events.get_nowait()[1], self.events.get_nowait()[1]
+        self.assertEqual((first.text, second.text), ("明天天气怎么样", "放首歌"))
+        second.reply("好的")
+        self.assertEqual(self.sent[-1], ("dm-alt", "好的"))  # 回到发消息的那个号
 
-    def test_ask_waits_for_owner_reply(self):
-        Path(self.tmp, "discord.json").write_text('{"owner_id": 42}')
-        gate = self.make()
-        threading.Timer(0.05, lambda: gate.handle(42, "me", True, "Y", "dm")).start()
-        self.assertTrue(gate.ask("dm", "星期五请求关机", timeout=2))
+    def test_remove_owner(self):
+        gate = self.paired((42, "main"), (77, "alt"))
+        self.assertEqual(gate.owner_list(), ["1. main(id 42)", "2. alt(id 77)"])
+        self.assertEqual(gate.remove_owner("2"), ["alt"])
+        self.assertEqual(gate.remove_owner("不存在"), [])
+        self.assertEqual(self.make().owners, {42: "main"})
+
+    def test_reads_old_single_owner_file(self):
+        Path(self.tmp, "discord.json").write_text('{"owner_id": 42, "owner_name": "me"}')
+        self.assertEqual(self.make().owners, {42: "me"})
+
+    def test_ask_waits_for_the_same_account(self):
+        gate = self.paired((42, "main"), (77, "alt"))
+
+        def replies():
+            gate.handle(77, "alt", True, "y", "dm-alt")  # 别的号回 y 不算,当成新消息
+            gate.handle(42, "main", True, "Y", "dm-main")
+
+        threading.Timer(0.05, replies).start()
+        self.assertTrue(gate.ask("dm-main", "星期五请求关机", 42, timeout=2))
         self.assertIn("回复 y 允许", self.sent[0][1])
-        self.assertTrue(self.events.empty())  # 回答没有被当成新问题
-        threading.Timer(0.05, lambda: gate.handle(42, "me", True, "不要", "dm")).start()
-        self.assertFalse(gate.ask("dm", "星期五请求关机", timeout=2))
+        self.assertEqual(self.events.get_nowait()[1].text, "y")
+        self.assertTrue(self.events.empty())
+        threading.Timer(0.05, lambda: gate.handle(42, "main", True, "不要", "dm-main")).start()
+        self.assertFalse(gate.ask("dm-main", "星期五请求关机", 42, timeout=2))
 
     def test_ask_times_out_as_refusal(self):
-        Path(self.tmp, "discord.json").write_text('{"owner_id": 42}')
-        gate = self.make()
-        self.assertFalse(gate.ask("dm", "星期五请求关机", timeout=0.05))
+        gate = self.paired((42, "main"))
+        self.assertFalse(gate.ask("dm", "星期五请求关机", 42, timeout=0.05))
         self.assertIn("已取消", self.sent[-1][1])
-        self.assertFalse(gate.waiting)
+        self.assertIsNone(gate.waiting_for)
+
+
+class DiscordCommandTest(TempDirTest):
+    def run_commands(self, inputs, discord):
+        bot = app.Assistant(client=FakeClient())
+        with mock.patch("builtins.input", side_effect=inputs + ["/exit"]), mock.patch("builtins.print") as fake_print:
+            app.chat(bot, None, None, queue.Queue(), discord)
+        return "\n".join(str(c.args[0]) for c in fake_print.call_args_list if c.args)
+
+    def test_discord_commands(self):
+        Path(self.tmp, "d.json").write_text(json.dumps({"owners": [{"id": 42, "name": "main"}, {"id": 77, "name": "alt"}]}))
+        gate = dmod.DiscordGate(Path(self.tmp, "d.json"), queue.Queue(), lambda c, t: None, lambda t: None)
+        printed = self.run_commands(["/discord", "/discord pair", "/discord remove 2", "/discord remove"],
+                                    SimpleNamespace(gate=gate))
+        self.assertIn("1. main(id 42)", printed)
+        self.assertIn(f"新的配对码:{gate.pair_code}", printed)
+        self.assertIn("已移除:alt", printed)
+        self.assertIn("用法:/discord remove", printed)
+        self.assertEqual(gate.owners, {42: "main"})
+
+    def test_without_discord(self):
+        self.assertIn("discord-setup", self.run_commands(["/discord"], None))
 
 
 class DiscordChatTest(TempDirTest):
@@ -2705,9 +2769,11 @@ class DiscordChatTest(TempDirTest):
         for token, expected in (("", 0), (FAKE_TOKEN, 1)):
             with mock.patch.dict(os.environ, {**env, "FRIDAY_DISCORD_TOKEN": token}, clear=True), \
                     mock.patch.object(app, "Assistant"), mock.patch.object(app, "ReminderScheduler"), \
-                    mock.patch.object(app, "DiscordBridge") as bridge, mock.patch.object(app, "chat"):
+                    mock.patch.object(app, "DiscordBridge") as bridge, mock.patch.object(app, "chat") as chat, \
+                    mock.patch("builtins.print"):
                 app.main(["--persona", "friday", "--env-file", os.devnull])
             self.assertEqual(bridge.return_value.start.call_count, expected)
+            self.assertIs(chat.call_args.args[4], bridge.return_value if expected else None)
         self.assertEqual(bridge.call_args.args[0], FAKE_TOKEN)
         self.assertEqual(str(bridge.call_args.args[2]), os.path.join(self.tmp, "friday_discord.json"))
 

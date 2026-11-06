@@ -518,8 +518,33 @@ def handle_reminder(item: dict, assistant: Assistant, persona: Persona, voice) -
     return True
 
 
-def handle_command(question: str, assistant: Assistant) -> bool:
-    """处理 /memory /forget /todo /remind 这些本地命令;不是命令时返回 False。"""
+def handle_discord_command(question: str, discord) -> None:
+    """/discord:查看配对的账号;/discord pair:生成新配对码;/discord remove 编号:移除账号。"""
+    if discord is None:
+        print("还没有设置 Discord 机器人。双击 discord-setup.bat 设置。")
+        return
+    gate = discord.gate
+    parts = question.split(maxsplit=2)
+    if len(parts) >= 2 and parts[1] == "pair":
+        code = gate.new_pair_code()
+        print(f"新的配对码:{code}(10 分钟内有效,只能用一次)。用要添加的 Discord 账号私信机器人发送这个码。")
+    elif len(parts) >= 2 and parts[1] == "remove":
+        if len(parts) < 3:
+            print("用法:/discord remove 编号,例如 /discord remove 2(编号用 /discord 查看)")
+            return
+        removed = gate.remove_owner(parts[2])
+        print("已移除:" + "、".join(removed) if removed else "没有找到这个账号。")
+    else:
+        owners = gate.owner_list()
+        print("\n".join(["已配对的 Discord 账号:"] + [f"  {o}" for o in owners]) if owners else "还没有配对任何账号。")
+        print("  /discord pair 添加一个新账号    /discord remove 编号 移除账号")
+
+
+def handle_command(question: str, assistant: Assistant, discord=None) -> bool:
+    """处理 /memory /forget /todo /remind /discord 这些本地命令;不是命令时返回 False。"""
+    if question.split()[0] == "/discord":
+        handle_discord_command(question, discord)
+        return True
     toolbox = assistant.toolbox
     if toolbox is None:
         return False
@@ -551,7 +576,8 @@ def handle_command(question: str, assistant: Assistant) -> bool:
     return False
 
 
-def chat(assistant: Assistant, persona: Persona | None = None, voice=None, events: queue.Queue | None = None) -> None:
+def chat(assistant: Assistant, persona: Persona | None = None, voice=None, events: queue.Queue | None = None,
+         discord=None) -> None:
     """终端聊天循环。
 
     voice 不为 None 时开启语音:回车说话,回答会被读出来。
@@ -621,7 +647,7 @@ def chat(assistant: Assistant, persona: Persona | None = None, voice=None, event
         if question == "/clear":
             assistant.reset()
             print("对话已清空。")
-        elif not handle_command(question, assistant):
+        elif not handle_command(question, assistant, discord):
             if not answer(assistant, persona, question, voice):
                 return
             screen = getattr(assistant.toolbox, "screen", None)
@@ -757,11 +783,14 @@ def main(argv: list[str] | None = None) -> None:
     events: queue.Queue = queue.Queue()
     if persona.toolbox is not None and persona.toolbox.reminders is not None:
         ReminderScheduler(persona.toolbox.reminders, events).start()
+    discord = None
     discord_token = os.environ.get("FRIDAY_DISCORD_TOKEN", "").strip()
     if args.persona == "friday" and discord_token:
         data_dir = os.path.dirname(os.path.abspath(persona.toolbox.memory.path))
-        DiscordBridge(discord_token, events, os.path.join(data_dir, "friday_discord.json"), print_status).start()
-    chat(assistant, persona, voice, events)
+        discord = DiscordBridge(discord_token, events, os.path.join(data_dir, "friday_discord.json"), print_status)
+        discord.start()
+        print("手机 Discord:输入 /discord 查看已配对的账号,/discord pair 添加新账号")
+    chat(assistant, persona, voice, events, discord)
 
 
 if __name__ == "__main__":
