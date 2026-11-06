@@ -2698,6 +2698,24 @@ class DiscordGateTest(TempDirTest):
         self.assertIsNone(gate.waiting_for)
 
 
+class StatusEventTest(unittest.TestCase):
+    def test_background_status_is_printed_by_chat_loop(self):
+        events = queue.Queue()
+        events.put(("status", "已和 Discord 账号 alt 配对"))
+        gate = threading.Event()
+
+        def slow_input(prompt=""):
+            gate.wait(2)
+            return "/exit"
+
+        bot = app.Assistant(client=FakeClient())
+        with mock.patch("builtins.input", side_effect=slow_input), \
+                mock.patch("builtins.print", side_effect=lambda *a, **k: gate.set()) as fake_print:
+            app.chat(bot, None, None, events)
+        printed = [str(c.args[0]) for c in fake_print.call_args_list if c.args]
+        self.assertIn("\n  〔已和 Discord 账号 alt 配对〕", printed)
+
+
 class DiscordCommandTest(TempDirTest):
     def run_commands(self, inputs, discord):
         bot = app.Assistant(client=FakeClient())

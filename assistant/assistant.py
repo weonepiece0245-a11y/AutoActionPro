@@ -606,6 +606,10 @@ def chat(assistant: Assistant, persona: Persona | None = None, voice=None, event
             print(f"\n{persona.farewell}")
             say(voice, persona.farewell)
             return
+        if kind == "status":  # 后台(Discord 等)的提示,由这里统一打印,不会插进正在输入的那一行
+            print_status(payload)
+            print(prompt, end="", flush=True)
+            continue
         if kind in ("reminder", "discord"):
             if kind == "reminder":
                 ok = handle_reminder(payload, assistant, persona, voice)
@@ -787,7 +791,8 @@ def main(argv: list[str] | None = None) -> None:
     discord_token = os.environ.get("FRIDAY_DISCORD_TOKEN", "").strip()
     if args.persona == "friday" and discord_token:
         data_dir = os.path.dirname(os.path.abspath(persona.toolbox.memory.path))
-        discord = DiscordBridge(discord_token, events, os.path.join(data_dir, "friday_discord.json"), print_status)
+        discord = DiscordBridge(discord_token, events, os.path.join(data_dir, "friday_discord.json"),
+                                lambda text: events.put(("status", text)))
         discord.start()
         print("手机 Discord:输入 /discord 查看已配对的账号,/discord pair 添加新账号")
     chat(assistant, persona, voice, events, discord)
