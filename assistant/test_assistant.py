@@ -201,6 +201,7 @@ class FridayPersonaTest(TempDirTest):
     def test_system_prompt_has_name_memories_and_computer(self):
         system = self.make("队长", facts=["用户喜欢喝美式"]).system()
         self.assertIn("称呼用户为“队长”", system)
+        self.assertIn("Markdown 不会被渲染", system)
         self.assertIn("- 用户喜欢喝美式", system)
         self.assertIn(self.tmp, system)
 
@@ -314,7 +315,9 @@ class ToolLoopTest(TempDirTest):
 
     def test_pause_turn_is_resent_without_new_user_message(self):
         search = SimpleNamespace(type="server_tool_use", name="web_search", input={"query": "天气"}, id="s1")
-        client = FakeClient(FakeStream([], stop_reason="pause_turn", blocks=[search]), FakeStream(["晴"]))
+        # 服务端筛选搜索结果时的 code_execution 不显示给用户
+        code = SimpleNamespace(type="server_tool_use", name="code_execution", input={"code": "x"}, id="s2")
+        client = FakeClient(FakeStream([], stop_reason="pause_turn", blocks=[code, search]), FakeStream(["晴"]))
         bot = app.Assistant(client=client, toolbox=self.make_toolbox())
         statuses = []
         self.assertEqual(bot.ask("天气?", lambda t: None, statuses.append), "晴")

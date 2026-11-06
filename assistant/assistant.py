@@ -54,6 +54,8 @@ FRIDAY_PROMPT = """你是“星期五”,{call_me}的私人 AI 助手。
 回答先给结论,再补充必要的细节;能列步骤就列步骤;
 发现风险、遗漏或更好的做法时主动提醒,并给出下一步建议。
 请用用户使用的语言回答;不确定的事情直接说明,不要编造。
+你的回答显示在纯文本的终端窗口里,Markdown 不会被渲染:不要用 ** 加粗、# 标题、表格和代码块标记;
+需要分点时用“- ”或“1. ”开头的普通行,需要强调时直接用文字说明。
 
 ## 了解{call_me}
 你会长期陪伴{call_me},要越来越懂对方:
@@ -289,10 +291,11 @@ class Assistant:
 
     @staticmethod
     def _report_server_tool(block, on_status) -> None:
-        if getattr(block, "type", None) != "server_tool_use":
+        # 只报告搜索和读网页;搜索时服务端还会用 code_execution 在后台筛选结果,不用显示
+        if getattr(block, "type", None) != "server_tool_use" or block.name not in SERVER_TOOL_LABELS:
             return
-        label, key = SERVER_TOOL_LABELS.get(block.name, (block.name, None))
-        value = block.input.get(key) if key and isinstance(block.input, dict) else None
+        label, key = SERVER_TOOL_LABELS[block.name]
+        value = block.input.get(key) if isinstance(block.input, dict) else None
         on_status(f"{label}:{value}" if value else label)
 
     def reset(self) -> None:
