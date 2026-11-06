@@ -12,13 +12,24 @@ from __future__ import annotations
 import argparse
 import datetime
 import os
+import queue
 import sys
+import threading
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 import anthropic
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from friday_daily import (  # noqa: E402
+    Computer,
+    ReminderScheduler,
+    Reminders,
+    Todos,
+    describe_reminder,
+    describe_todo,
+    notify_popup,
+)
 from friday_tools import SERVER_TOOL_LABELS, Memory, Toolbox  # noqa: E402
 
 DEFAULT_MODEL = "claude-opus-5-5"
@@ -34,7 +45,10 @@ SYSTEM_PROMPT = (
 )
 
 HELP_TEXT = "命令:/clear 清空对话  /exit 退出"
-FRIDAY_HELP_TEXT = "命令:/memory 看看我记得什么  /forget 关键词 删除记忆  /clear 开始新话题  /exit 退出"
+FRIDAY_HELP_TEXT = (
+    "命令:/memory 我记得什么  /forget 关键词 删除记忆  /todo 待办清单  /remind 提醒列表\n"
+    "      /clear 开始新话题  /exit 退出"
+)
 VOICE_HELP_TEXT = "语音模式:按回车开始说话,说完停顿一会儿或再按一次回车结束;也可以照常打字。说“退出”或“再见”结束。"
 VOICE_EXIT_WORDS = ("退出", "退出程序", "再见", "拜拜")
 
@@ -69,6 +83,11 @@ FRIDAY_PROMPT = """你是“星期五”,{call_me}的私人 AI 助手。
 - 需要最新信息(新闻、天气、价格、资料)时用 web_search 搜索,用 web_fetch 读网页。
 - 在{call_me}的电脑上用 run_command 执行命令,用 read_file / write_file 读写文件。{computer}。
 - 执行命令和写文件前{call_me}会逐一确认;如果被拒绝,换个办法或说明还需要什么。
+- 调音量、切歌、暂停、锁屏、截图、读写剪贴板、打开程序和网址,用 computer 工具直接做,不用确认。
+- 用 reminder 设提醒和定时任务(比如“半小时后提醒我喝水”“每天早上 9 点给我做个早报”),
+  用 todo 管理待办清单。提醒只在星期五开着时才会响,第一次设提醒时顺便告诉{call_me}这一点。
+- 消息以“[定时任务]”开头时,是之前设好的任务到点了,{call_me}可能不在电脑前:
+  直接把事情做完,结果说得简短清楚;需要确认的操作不能做,留到{call_me}回来再说。
 - 能直接办到的事就直接办,办完简要汇报结果;做不到的事坦白说,并给出替代方案。
 
 {voice}## 我记得的事
@@ -359,36 +378,172 @@ def say(voice, text: str) -> None:
         print(f"(朗读失败:{e})")
 
 
-def chat(assistant: Assistant, persona: Persona | None = None, voice=None) -> None:
-    """终端聊天循环。voice 不为 None 时开启语音:回车说话,回答会被读出来。"""
+class InputReader:
+    """在后台线程里读用户输入。
+
+    这样等待输入时,聊天线程还能处理到点的提醒。只有在聊天线程调用 request()
+    之后才读下一行,所以不会和确认操作时的 input() 抢输入。
+    """
+
+    def __init__(self, events: queue.Queue) -> None:
+        self.events = events
+        self.prompt = ""
+        self._ready = threading.Event()
+        threading.Thread(target=self._run, daemon=True, name="friday-input").start()
+
+    def request(self, prompt: str) -> None:
+        self.prompt = prompt
+        self._ready.set()
+
+    def _run(self) -> None:
+        while True:
+            self._ready.wait()
+            self._ready.clear()
+            try:
+                line = input(self.prompt)
+            except BaseException:  # EOF、Ctrl+C 或其他输入错误都当作退出
+                self.events.put(("eof", None))
+                return
+            self.events.put(("user", line))
+
+
+def next_event(events: queue.Queue):
+    # 带超时地等待,Ctrl+C 才能及时生效
+    while True:
+        try:
+            return events.get(timeout=0.2)
+        except queue.Empty:
+            continue
+
+
+def answer(assistant: Assistant, persona: Persona, question: str, voice) -> bool:
+    """让助手回答一个问题并读出来。返回 False 表示应当退出(API Key 无效)。"""
+    print(f"\n{persona.name}:", end="", flush=True)
+    try:
+        text = assistant.ask(question, print_text, print_status)
+        print()
+        say(voice, text)
+    except KeyboardInterrupt:
+        print("\n(已中断本次回答)")
+    except RefusalError:
+        print("\n抱歉,这个问题我无法回答,换个问题试试吧。")
+    except IncompleteAnswerError as e:
+        print(f"\n这次没能完成:{e}。可以把任务拆小一点再试。")
+    except anthropic.AuthenticationError:
+        print(f"\nAPI Key 无效或未设置。{KEY_HINT}")
+        return False
+    except anthropic.RateLimitError:
+        print("\n请求太频繁了,请稍等片刻再试。")
+    except anthropic.APIStatusError as e:
+        print(f"\n服务出错(HTTP {e.status_code}):{e.message}")
+    except anthropic.APIConnectionError:
+        print("\n网络连接失败,请检查网络后重试。")
+    except ValueError:
+        # 流式工具参数完全无法解析时 SDK 抛出 ValueError
+        print("\n这次的工具调用出了点问题,请再说一次。")
+    return True
+
+
+def handle_reminder(item: dict, assistant: Assistant, persona: Persona, voice) -> bool:
+    """处理一个到点的提醒:弹窗、打印、读出来;定时任务则让助手去执行。"""
+    missed = f"(原定 {item['time'][11:]},星期五当时没开)" if item.get("missed") else ""
+    print(f"\n\n  ⏰ {item['time'][11:]} {item['message']}{missed}")
+    if item.get("kind") == "task":
+        toolbox = assistant.toolbox
+        if toolbox is not None:
+            toolbox.unattended = True
+        try:
+            return answer(assistant, persona, f"[定时任务]{missed}{item['message']}", voice)
+        finally:
+            if toolbox is not None:
+                toolbox.unattended = False
+    notify_popup(f"{persona.name}提醒", item["message"])
+    say(voice, f"提醒你:{item['message']}")
+    return True
+
+
+def handle_command(question: str, assistant: Assistant) -> bool:
+    """处理 /memory /forget /todo /remind 这些本地命令;不是命令时返回 False。"""
+    toolbox = assistant.toolbox
+    if toolbox is None:
+        return False
+    if question == "/memory":
+        show_memory(toolbox)
+        return True
+    if question.startswith("/forget"):
+        keyword = question[len("/forget"):].strip()
+        if not keyword:
+            print("用法:/forget 关键词,例如 /forget 咖啡")
+            return True
+        removed = toolbox.memory.forget(keyword)
+        print("已忘掉:" + ";".join(removed) if removed else f"记忆里没有包含“{keyword}”的内容。")
+        return True
+    if question == "/todo" and toolbox.todos is not None:
+        items = toolbox.todos.pending()
+        print("\n".join(["待办清单:"] + [f"  {describe_todo(i)}" for i in items]) if items else "待办清单是空的。")
+        return True
+    if question == "/remind" and toolbox.reminders is not None:
+        items = toolbox.reminders.upcoming()
+        print("\n".join(["提醒:"] + [f"  {describe_reminder(i)}" for i in items]) if items else "没有提醒。")
+        return True
+    return False
+
+
+def chat(assistant: Assistant, persona: Persona | None = None, voice=None, events: queue.Queue | None = None) -> None:
+    """终端聊天循环。
+
+    voice 不为 None 时开启语音:回车说话,回答会被读出来。
+    events 是事件队列,提醒线程会把到点的提醒放进来。
+    """
     if persona is None:
         persona = default_persona()
-    toolbox = assistant.toolbox
+    if events is None:
+        events = queue.Queue()
     print(persona.greeting)
     print(persona.help_text)
     if voice is not None:
         print(VOICE_HELP_TEXT)
         say(voice, persona.greeting)
+
+    prompt = "\n你(回车说话):" if voice is not None else "\n你:"
+    reader = InputReader(events)
+    reader.request(prompt)
     while True:
         try:
-            question = input("\n你(回车说话):" if voice is not None else "\n你:").strip()
-            spoken = False
-            if not question and voice is not None:
-                question = voice.listen(print_status) or ""
-                if not question:
-                    print("  没听清,再说一次?")
-                    continue
-                spoken = True
-                print(f"你(语音):{question}")
-        except (EOFError, KeyboardInterrupt):
+            kind, payload = next_event(events)
+        except KeyboardInterrupt:
+            kind, payload = "eof", None
+
+        if kind == "eof":
             print(f"\n{persona.farewell}")
             say(voice, persona.farewell)
             return
-        except Exception as e:  # 麦克风或语音识别出错时退回打字
-            print(f"\n  语音识别出错:{e}\n  这次可以先打字。")
+        if kind == "reminder":
+            if not handle_reminder(payload, assistant, persona, voice):
+                return
+            print(prompt, end="", flush=True)  # 输入线程还在等这一行,重新显示提示
             continue
 
+        question = payload.strip()
+        spoken = False
+        if not question and voice is not None:
+            try:
+                question = voice.listen(print_status) or ""
+            except KeyboardInterrupt:
+                question = ""
+            except Exception as e:  # 麦克风或语音识别出错时退回打字
+                print(f"\n  语音识别出错:{e}\n  这次可以先打字。")
+                reader.request(prompt)
+                continue
+            if not question:
+                print("  没听清,再说一次?")
+                reader.request(prompt)
+                continue
+            spoken = True
+            print(f"你(语音):{question}")
+
         if not question:
+            reader.request(prompt)
             continue
         if question in ("/exit", "/quit") or (spoken and is_voice_exit(question)):
             print(persona.farewell)
@@ -397,42 +552,10 @@ def chat(assistant: Assistant, persona: Persona | None = None, voice=None) -> No
         if question == "/clear":
             assistant.reset()
             print("对话已清空。")
-            continue
-        if toolbox is not None and question == "/memory":
-            show_memory(toolbox)
-            continue
-        if toolbox is not None and question.startswith("/forget"):
-            keyword = question[len("/forget"):].strip()
-            if not keyword:
-                print("用法:/forget 关键词,例如 /forget 咖啡")
-                continue
-            removed = toolbox.memory.forget(keyword)
-            print("已忘掉:" + ";".join(removed) if removed else f"记忆里没有包含“{keyword}”的内容。")
-            continue
-
-        print(f"\n{persona.name}:", end="", flush=True)
-        try:
-            answer = assistant.ask(question, print_text, print_status)
-            print()
-            say(voice, answer)
-        except KeyboardInterrupt:
-            print("\n(已中断本次回答)")
-        except RefusalError:
-            print("\n抱歉,这个问题我无法回答,换个问题试试吧。")
-        except IncompleteAnswerError as e:
-            print(f"\n这次没能完成:{e}。可以把任务拆小一点再试。")
-        except anthropic.AuthenticationError:
-            print(f"\nAPI Key 无效或未设置。{KEY_HINT}")
-            return
-        except anthropic.RateLimitError:
-            print("\n请求太频繁了,请稍等片刻再试。")
-        except anthropic.APIStatusError as e:
-            print(f"\n服务出错(HTTP {e.status_code}):{e.message}")
-        except anthropic.APIConnectionError:
-            print("\n网络连接失败,请检查网络后重试。")
-        except ValueError:
-            # 流式工具参数完全无法解析时 SDK 抛出 ValueError
-            print("\n这次的工具调用出了点问题,请再说一次。")
+        elif not handle_command(question, assistant):
+            if not answer(assistant, persona, question, voice):
+                return
+        reader.request(prompt)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -508,8 +631,17 @@ def main(argv: list[str] | None = None) -> None:
     if args.persona == "friday":
         call_me = args.call_me or os.environ.get("FRIDAY_CALL_ME") or DEFAULT_CALL_ME
         memory_file = args.memory_file or os.environ.get("FRIDAY_MEMORY_FILE") or DEFAULT_MEMORY_FILE
+        data_dir = os.path.dirname(os.path.abspath(memory_file))
         workdir = os.path.expanduser(args.workdir) if args.workdir else None
-        toolbox = Toolbox(Memory(memory_file), ConsoleApprover(), workdir=workdir, web=not args.no_web)
+        toolbox = Toolbox(
+            Memory(memory_file),
+            ConsoleApprover(),
+            workdir=workdir,
+            web=not args.no_web,
+            reminders=Reminders(os.path.join(data_dir, "friday_reminders.json")),
+            todos=Todos(os.path.join(data_dir, "friday_todos.json")),
+            computer=Computer(),
+        )
         persona = friday_persona(call_me, toolbox, voice=args.voice)
     else:
         persona = default_persona()
@@ -536,7 +668,10 @@ def main(argv: list[str] | None = None) -> None:
     except anthropic.AnthropicError:
         print(f"未找到 API 凭据。{KEY_HINT}", file=sys.stderr)
         sys.exit(1)
-    chat(assistant, persona, voice)
+    events: queue.Queue = queue.Queue()
+    if persona.toolbox is not None and persona.toolbox.reminders is not None:
+        ReminderScheduler(persona.toolbox.reminders, events).start()
+    chat(assistant, persona, voice, events)
 
 
 if __name__ == "__main__":

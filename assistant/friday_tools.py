@@ -15,6 +15,17 @@ import subprocess
 from pathlib import Path
 from typing import Callable
 
+from friday_daily import (
+    COMPUTER_ACTIONS,
+    KINDS,
+    REPEATS,
+    Computer,
+    Reminders,
+    Todos,
+    describe_reminder,
+    describe_todo,
+)
+
 MAX_FACTS = 300
 MAX_FACT_CHARS = 500
 MAX_OUTPUT_CHARS = 20000
@@ -181,9 +192,75 @@ CLIENT_TOOLS = [
     },
 ]
 
+REMINDER_TOOL = {
+    "name": "reminder",
+    "description": (
+        "设置、查看、取消提醒和定时任务。用户说“X 分钟后提醒我…”“明天 8 点叫我…”“每天早上 9 点跟我汇报…”时调用。"
+        "kind=notify 是到点弹窗并读出提醒;kind=task 是到点后由你执行一个任务(比如查天气、读待办、做早报),"
+        "执行时用户可能不在电脑前。时间根据用户消息开头的当前时间换算成具体的本地时间。"
+        "提醒只在星期五程序开着时才会响(最小化也可以),设置后要告诉用户这一点。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["add", "list", "cancel"]},
+            "time": {"type": "string", "description": "add 必填:本地时间,格式 YYYY-MM-DD HH:MM"},
+            "message": {
+                "type": "string",
+                "description": "add 必填。notify:到点要说的提醒;task:到点后你要做的事,写清楚,例如“查吉隆坡今天天气,列出今天的待办,简短地道早安”",
+            },
+            "kind": {"type": "string", "enum": list(KINDS), "description": "默认 notify"},
+            "repeat": {"type": "string", "enum": list(REPEATS), "description": "默认 none(只响一次)"},
+            "key": {"type": "string", "description": "cancel 必填:提醒编号(如 3)或关键词"},
+        },
+        "required": ["action"],
+    },
+}
+
+TODO_TOOL = {
+    "name": "todo",
+    "description": (
+        "管理用户的待办清单:add 添加,list 查看,done 标记完成,delete 删除,clear_done 清掉已完成的。"
+        "用户说“记一下要…”“我还有什么没做”“…做完了”时调用。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["add", "list", "done", "delete", "clear_done"]},
+            "text": {"type": "string", "description": "add 必填:待办内容"},
+            "due": {"type": "string", "description": "add 可选:截止时间,如 2026-11-10"},
+            "key": {"type": "string", "description": "done / delete 必填:待办编号(如 2)或关键词"},
+            "include_done": {"type": "boolean", "description": "list 时是否也列出已完成的,默认 false"},
+        },
+        "required": ["action"],
+    },
+}
+
+COMPUTER_TOOL = {
+    "name": "computer",
+    "description": (
+        "直接操作用户的 Windows 电脑,不需要用户确认:"
+        + ";".join(f"{k}={v}" for k, v in COMPUTER_ACTIONS.items())
+        + "。这些操作优先用这个工具,不要用 run_command。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": list(COMPUTER_ACTIONS)},
+            "value": {"type": "string", "description": "部分操作需要:百分比、文字、程序名或网址"},
+        },
+        "required": ["action"],
+    },
+}
+
 # 请求是流式的,让较长的工具参数(例如文件内容)边生成边传输;参数在执行前会自己校验
-for _tool in CLIENT_TOOLS:
+for _tool in CLIENT_TOOLS + [REMINDER_TOOL, TODO_TOOL, COMPUTER_TOOL]:
     _tool["eager_input_streaming"] = True
+
+UNATTENDED_REFUSAL = (
+    "现在是定时任务,用户可能不在电脑前,不能执行需要用户确认的操作。"
+    "请在回答里说明想做什么,等用户回来再确认。"
+)
 
 SERVER_TOOL_LABELS = {"web_search": ("搜索", "query"), "web_fetch": ("读取网页", "url")}
 
@@ -197,21 +274,42 @@ class Toolbox:
         approve: Approver,
         workdir: str | os.PathLike | None = None,
         web: bool = True,
+        reminders: Reminders | None = None,
+        todos: Todos | None = None,
+        computer: Computer | None = None,
     ) -> None:
         self.memory = memory
         self.approve = approve
         self.workdir = Path(workdir) if workdir is not None else Path.home()
         self.web = web
+        self.reminders = reminders
+        self.todos = todos
+        self.computer = computer
+        self.unattended = False  # 定时任务执行期间为 True:需要确认的操作一律不做
         self._handlers = {
             "remember": self._remember,
             "forget": self._forget,
             "run_command": self._run_command,
             "read_file": self._read_file,
             "write_file": self._write_file,
+            "reminder": self._reminder,
+            "todo": self._todo,
+            "computer": self._computer,
         }
+        self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
 
     def definitions(self) -> list[dict]:
-        return (SERVER_TOOLS if self.web else []) + CLIENT_TOOLS
+        tools = (SERVER_TOOLS if self.web else []) + CLIENT_TOOLS
+        if self.reminders is not None:
+            tools = tools + [REMINDER_TOOL]
+        if self.todos is not None:
+            tools = tools + [TODO_TOOL]
+        if self.computer is not None and self.computer.available:
+            tools = tools + [COMPUTER_TOOL]
+        return tools
+
+    def _approved(self, action: str) -> bool:
+        return not self.unattended and self.approve(action)
 
     def describe(self) -> str:
         return describe_computer(self.workdir)
@@ -220,11 +318,11 @@ class Toolbox:
         """执行一个 tool_use 块,返回对应的 tool_result。"""
         result = {"type": "tool_result", "tool_use_id": block.id}
         handler = self._handlers.get(block.name)
-        if handler is None:
+        spec = self._specs.get(block.name)
+        if handler is None or spec is None:
             return {**result, "content": f"没有名为 {block.name} 的工具", "is_error": True}
 
         args = block.input
-        spec = next(t for t in CLIENT_TOOLS if t["name"] == block.name)["input_schema"]
         if not isinstance(args, dict) or not all(isinstance(args.get(k), str) for k in spec["required"]):
             bad = json.dumps(args, ensure_ascii=False, default=str)
             return {**result, "content": json.dumps({"INVALID_JSON": bad}, ensure_ascii=False), "is_error": True}
@@ -258,7 +356,9 @@ class Toolbox:
 
     def _run_command(self, args, on_status):
         command = args["command"]
-        if not self.approve(f"执行命令:{command}\n  目的:{args['reason']}"):
+        if self.unattended:
+            return UNATTENDED_REFUSAL, True
+        if not self._approved(f"执行命令:{command}\n  目的:{args['reason']}"):
             return "用户没有允许执行这条命令。", True
         on_status(f"执行命令:{command}")
         try:
@@ -289,9 +389,66 @@ class Toolbox:
     def _write_file(self, args, on_status):
         path = self._resolve(args["path"])
         action = "覆盖文件" if path.exists() else "新建文件"
-        if not self.approve(f"{action}:{path}({len(args['content'])} 个字符)"):
+        if self.unattended:
+            return UNATTENDED_REFUSAL, True
+        if not self._approved(f"{action}:{path}({len(args['content'])} 个字符)"):
             return "用户没有允许写入这个文件。", True
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(args["content"], encoding="utf-8")
         on_status(f"已保存:{path}")
         return f"已写入 {path}", False
+
+    @staticmethod
+    def _need(args: dict, *names: str) -> None:
+        missing = [n for n in names if not (isinstance(args.get(n), str) and args[n].strip())]
+        if missing:
+            raise ValueError(f"缺少参数:{'、'.join(missing)}")
+
+    def _reminder(self, args, on_status):
+        action = args["action"]
+        if action == "add":
+            self._need(args, "time", "message")
+            item = self.reminders.add(
+                args["time"], args["message"], args.get("kind") or "notify", args.get("repeat") or "none"
+            )
+            on_status(f"已设提醒:{describe_reminder(item)}")
+            return f"已设置:{describe_reminder(item)}。提醒只在星期五开着时才会响。", False
+        if action == "list":
+            items = self.reminders.upcoming()
+            return ("现在的提醒:\n" + "\n".join(describe_reminder(i) for i in items)) if items else "没有提醒", False
+        if action == "cancel":
+            self._need(args, "key")
+            removed = self.reminders.cancel(args["key"])
+            if not removed:
+                return f"没有找到“{args['key']}”对应的提醒", True
+            on_status("已取消提醒:" + ";".join(i["message"] for i in removed))
+            return "已取消:" + ";".join(describe_reminder(i) for i in removed), False
+        raise ValueError(f"不支持的 action:{action}")
+
+    def _todo(self, args, on_status):
+        action = args["action"]
+        if action == "add":
+            self._need(args, "text")
+            item = self.todos.add(args["text"], args.get("due"))
+            on_status(f"已加待办:{item['text']}")
+            return f"已添加:{describe_todo(item)}", False
+        if action == "list":
+            items = self.todos.items if args.get("include_done") else self.todos.pending()
+            return ("待办清单:\n" + "\n".join(describe_todo(i) for i in items)) if items else "待办清单是空的", False
+        if action in ("done", "delete"):
+            self._need(args, "key")
+            found = self.todos.complete(args["key"]) if action == "done" else self.todos.delete(args["key"])
+            if not found:
+                return f"没有找到“{args['key']}”对应的待办", True
+            verb = "完成了" if action == "done" else "删掉了"
+            on_status(f"待办{verb}:" + ";".join(i["text"] for i in found))
+            return f"已{verb}:" + ";".join(describe_todo(i) for i in found), False
+        if action == "clear_done":
+            return f"清掉了 {self.todos.clear_done()} 条已完成的待办", False
+        raise ValueError(f"不支持的 action:{action}")
+
+    def _computer(self, args, on_status):
+        action = args["action"]
+        result = self.computer.do(action, args.get("value") or "")
+        on_status(result if action != "read_clipboard" else "读取了剪贴板")
+        return result, False

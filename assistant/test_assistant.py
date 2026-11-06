@@ -7,8 +7,10 @@ import array
 import datetime
 import importlib.util
 import os
+import queue
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from types import SimpleNamespace
@@ -59,6 +61,7 @@ _spec.loader.exec_module(app)
 
 
 tools = sys.modules["friday_tools"]  # assistant.py 加载时已导入
+daily = sys.modules["friday_daily"]
 import voice  # noqa: E402  assistant.py 已把所在目录加入 sys.path
 
 
@@ -1307,6 +1310,367 @@ class VoiceModuleTest(unittest.TestCase):
                 path = voice.ensure_vosk_model(d, on_status=lambda t: None)
             download.assert_not_called()
             self.assertEqual(path, os.path.join(d, voice.VOSK_MODEL_NAME))
+
+
+class FixedClock:
+    def __init__(self, text):
+        self.now = datetime.datetime.strptime(text, "%Y-%m-%d %H:%M")
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, **kwargs):
+        self.now += datetime.timedelta(**kwargs)
+
+
+class RemindersTest(TempDirTest):
+    def make(self, now="2026-11-07 08:00"):  # 2026-11-07 是星期六
+        self.clock = FixedClock(now)
+        return daily.Reminders(os.path.join(self.tmp, "r.json"), clock=self.clock)
+
+    def test_one_off_reminder_fires_once(self):
+        reminders = self.make()
+        item = reminders.add("2026-11-07 08:30", "  喝  水 ")
+        self.assertEqual((item["id"], item["message"], item["kind"], item["repeat"]), (1, "喝 水", "notify", "none"))
+        self.assertEqual(reminders.pop_due(), [])
+        self.clock.advance(minutes=30)
+        due = reminders.pop_due()
+        self.assertEqual([d["message"] for d in due], ["喝 水"])
+        self.assertFalse(due[0]["missed"])
+        self.assertEqual(reminders.upcoming(), [])
+        self.assertEqual(daily.Reminders(reminders.path).items, [])  # 已保存到文件
+
+    def test_daily_reminder_moves_to_next_day(self):
+        reminders = self.make()
+        reminders.add("2026-11-07 09:00", "早报", kind="task", repeat="daily")
+        self.clock.advance(hours=1)
+        self.assertEqual(len(reminders.pop_due()), 1)
+        self.assertEqual(reminders.upcoming()[0]["time"], "2026-11-08 09:00")
+
+    def test_weekdays_skip_weekend(self):
+        reminders = self.make()
+        item = reminders.add("2026-11-07 09:00", "上班打卡", repeat="weekdays")  # 星期六 -> 顺延到星期一
+        self.assertEqual(item["time"], "2026-11-09 09:00")
+        self.clock.now = datetime.datetime(2026, 11, 13, 9, 0)  # 星期五
+        reminders.items[0]["time"] = "2026-11-13 09:00"
+        reminders.pop_due()
+        self.assertEqual(reminders.upcoming()[0]["time"], "2026-11-16 09:00")  # 下个星期一
+
+    def test_weekly(self):
+        self.assertEqual(
+            daily.next_occurrence(datetime.datetime(2026, 11, 7, 20, 0), "weekly", datetime.datetime(2026, 11, 7, 20, 1)),
+            datetime.datetime(2026, 11, 14, 20, 0),
+        )
+
+    def test_past_time_is_rejected_unless_repeating(self):
+        reminders = self.make()
+        with self.assertRaises(ValueError):
+            reminders.add("2026-11-07 07:00", "太晚了")
+        item = reminders.add("2026-11-07 07:00", "每天早上", repeat="daily")
+        self.assertEqual(item["time"], "2026-11-08 07:00")
+
+    def test_bad_input(self):
+        reminders = self.make()
+        for args in (("明天早上", "x"), ("2026-11-07 09:00", "  "), ("2026-11-07 09:00", "x", "alarm"),
+                     ("2026-11-07 09:00", "x", "notify", "hourly")):
+            with self.assertRaises(ValueError):
+                reminders.add(*args)
+
+    def test_time_formats(self):
+        self.assertEqual(daily.parse_time("2026/11/07 09:05"), datetime.datetime(2026, 11, 7, 9, 5))
+        self.assertEqual(daily.parse_time("2026-11-07T09:05:00"), datetime.datetime(2026, 11, 7, 9, 5))
+
+    def test_missed_one_off_still_fires_but_missed_repeats_are_skipped(self):
+        reminders = self.make()
+        reminders.add("2026-11-07 09:00", "交报告")
+        reminders.add("2026-11-07 09:00", "早报", kind="task", repeat="daily")
+        # 程序关了一整天,第二天中午才打开
+        clock = FixedClock("2026-11-08 12:00")
+        reopened = daily.Reminders(reminders.path, clock=clock)
+        due = reopened.pop_due()
+        self.assertEqual([(d["message"], d["missed"]) for d in due], [("交报告", True)])
+        self.assertEqual(reopened.upcoming()[0]["time"], "2026-11-09 09:00")
+
+    def test_cancel_by_id_or_keyword(self):
+        reminders = self.make()
+        reminders.add("2026-11-07 09:00", "喝水")
+        reminders.add("2026-11-07 10:00", "开会")
+        reminders.add("2026-11-07 11:00", "再喝水")
+        self.assertEqual([i["message"] for i in reminders.cancel("#2")], ["开会"])
+        self.assertEqual([i["message"] for i in reminders.cancel("喝水")], ["喝水", "再喝水"])
+        self.assertEqual(reminders.cancel("不存在"), [])
+        self.assertEqual(reminders.add("2026-11-07 12:00", "午饭")["id"], 1)
+
+    def test_describe(self):
+        reminders = self.make()
+        once = reminders.add("2026-11-07 09:00", "喝水")
+        daily_item = reminders.add("2026-11-07 09:00", "早报", kind="task", repeat="daily")
+        self.assertEqual(daily.describe_reminder(once), "#1 2026-11-07 09:00 [提醒] 喝水")
+        self.assertEqual(daily.describe_reminder(daily_item), "#2 每天 09:00(下次 2026-11-07 09:00) [定时任务] 早报")
+
+    def test_scheduler_puts_due_reminders_on_queue(self):
+        reminders = self.make()
+        reminders.add("2026-11-07 08:00", "现在")
+        events = queue.Queue()
+        scheduler = daily.ReminderScheduler(reminders, events, interval=0.01)
+        scheduler.start()
+        kind, item = events.get(timeout=2)
+        scheduler.stop()
+        self.assertEqual((kind, item["message"]), ("reminder", "现在"))
+
+
+class TodosTest(TempDirTest):
+    def make(self):
+        return daily.Todos(os.path.join(self.tmp, "t.json"), clock=FixedClock("2026-11-07 08:00"))
+
+    def test_add_complete_delete(self):
+        todos = self.make()
+        todos.add("买牛奶")
+        todos.add("交报告", due="2026-11-10")
+        todos.add("买面包")
+        self.assertEqual([i["text"] for i in todos.complete("2")], ["交报告"])
+        self.assertEqual([i["text"] for i in todos.pending()], ["买牛奶", "买面包"])
+        self.assertEqual(todos.complete("交报告"), [])  # 已经完成的不重复完成
+        self.assertEqual([i["text"] for i in todos.delete("买")], ["买牛奶", "买面包"])
+        self.assertEqual(todos.clear_done(), 1)
+        self.assertEqual(daily.Todos(todos.path).items, [])
+
+    def test_describe(self):
+        todos = self.make()
+        item = todos.add("交报告", due="周五")
+        self.assertEqual(daily.describe_todo(item), "□ #1 交报告(截止 周五)")
+        todos.complete("1")
+        self.assertEqual(daily.describe_todo(item), "✓ #1 交报告(截止 周五)")
+
+    def test_empty_text(self):
+        with self.assertRaises(ValueError):
+            self.make().add("  ")
+
+
+class FakePC:
+    def __init__(self, outputs=None):
+        self.calls = []
+        self.outputs = outputs or {}
+
+    def press(self, vk, times=1):
+        self.calls.append(("press", vk, times))
+
+    def lock(self):
+        self.calls.append(("lock",))
+
+    def powershell(self, script, stdin=None, env=None):
+        self.calls.append(("ps", script, stdin, env))
+        for key, value in self.outputs.items():
+            if key in script:
+                return value
+        return 0, ""
+
+    def open(self, target):
+        self.calls.append(("open", target))
+
+
+class ComputerTest(TempDirTest):
+    def make(self, **outputs):
+        self.pc = FakePC(outputs)
+        return daily.Computer(self.pc, pictures_dir=self.tmp, clock=FixedClock("2026-11-07 08:00"))
+
+    def test_volume(self):
+        pc = self.make()
+        self.assertEqual(pc.do("volume_up", "20"), "已调高音量约 20%")
+        self.assertEqual(pc.do("volume_down"), "已调低音量约 10%")
+        self.assertEqual(self.pc.calls, [("press", 0xAF, 10), ("press", 0xAE, 5)])
+
+    def test_media_and_lock(self):
+        pc = self.make()
+        pc.do("play_pause")
+        pc.do("next_track")
+        pc.do("lock_screen")
+        self.assertEqual(self.pc.calls, [("press", 0xB3, 1), ("press", 0xB0, 1), ("lock",)])
+
+    def test_screenshot_path(self):
+        result = self.make().do("screenshot")
+        expected = os.path.join(self.tmp, "截图_20261107_080000.png")
+        self.assertIn(expected, result)
+        self.assertEqual(self.pc.calls[0][3], {"FRIDAY_SHOT_PATH": expected})
+
+    def test_clipboard(self):
+        pc = self.make(**{"Get-Clipboard": (0, "复制的文字")})
+        self.assertIn("复制的文字", pc.do("read_clipboard"))
+        pc.do("write_clipboard", "要复制的\"内容\"")
+        self.assertEqual(self.pc.calls[-1][2], "要复制的\"内容\"")  # 通过标准输入传,不拼进命令
+
+    def test_open_app(self):
+        pc = self.make(**{"Get-StartApps": (0, "Discord")})
+        self.assertEqual(pc.do("open_app", "discord"), "已打开 Discord")
+        self.assertEqual(self.pc.calls[0][3], {"FRIDAY_APP_NAME": "discord"})
+        not_found = self.make(**{"Get-StartApps": (3, "")})
+        self.assertIn("没有找到", not_found.do("open_app", "不存在的程序"))
+
+    def test_open_url_only_http(self):
+        pc = self.make()
+        pc.do("open_url", "https://example.com")
+        self.assertEqual(self.pc.calls, [("open", "https://example.com")])
+        with self.assertRaises(ValueError):
+            pc.do("open_url", "C:\\Windows\\System32\\cmd.exe")
+
+    def test_unknown_action_and_non_windows(self):
+        with self.assertRaises(ValueError):
+            self.make().do("format_disk")
+        with mock.patch.object(daily.os, "name", "posix"):
+            computer = daily.Computer()
+            self.assertFalse(computer.available)
+            with self.assertRaises(RuntimeError):
+                computer.do("mute")
+
+
+class DailyToolsTest(TempDirTest):
+    def make_toolbox(self, approve=lambda action: True, facts=()):
+        self.clock = FixedClock("2026-11-07 08:00")
+        self.pc = FakePC()
+        return tools.Toolbox(
+            tools.Memory(os.path.join(self.tmp, "memory.json")),
+            approve,
+            workdir=self.tmp,
+            reminders=daily.Reminders(os.path.join(self.tmp, "r.json"), clock=self.clock),
+            todos=daily.Todos(os.path.join(self.tmp, "t.json"), clock=self.clock),
+            computer=daily.Computer(self.pc, pictures_dir=self.tmp),
+        )
+
+    def run_tool(self, toolbox, name, tool_input):
+        statuses = []
+        return toolbox.run(tool_use(name, tool_input), statuses.append), statuses
+
+    def test_tools_are_offered(self):
+        names = [t["name"] for t in self.make_toolbox().definitions()]
+        self.assertEqual(names[-3:], ["reminder", "todo", "computer"])
+        plain = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m2.json")), lambda a: True, workdir=self.tmp)
+        self.assertNotIn("reminder", [t["name"] for t in plain.definitions()])
+        result, _ = self.run_tool(plain, "reminder", {"action": "list"})
+        self.assertTrue(result["is_error"])
+
+    def test_reminder_tool(self):
+        toolbox = self.make_toolbox()
+        result, statuses = self.run_tool(
+            toolbox, "reminder", {"action": "add", "time": "2026-11-07 09:00", "message": "早报", "kind": "task", "repeat": "daily"}
+        )
+        self.assertNotIn("is_error", result)
+        self.assertIn("只在星期五开着时才会响", result["content"])
+        self.assertIn("已设提醒", statuses[0])
+        result, _ = self.run_tool(toolbox, "reminder", {"action": "list"})
+        self.assertIn("每天 09:00", result["content"])
+        result, _ = self.run_tool(toolbox, "reminder", {"action": "cancel", "key": "早报"})
+        self.assertIn("已取消", result["content"])
+        result, _ = self.run_tool(toolbox, "reminder", {"action": "add", "message": "缺时间"})
+        self.assertTrue(result["is_error"])
+        self.assertIn("time", result["content"])
+
+    def test_todo_tool(self):
+        toolbox = self.make_toolbox()
+        self.run_tool(toolbox, "todo", {"action": "add", "text": "买牛奶"})
+        result, statuses = self.run_tool(toolbox, "todo", {"action": "done", "key": "牛奶"})
+        self.assertIn("已完成了", result["content"])
+        result, _ = self.run_tool(toolbox, "todo", {"action": "list"})
+        self.assertEqual(result["content"], "待办清单是空的")
+        result, _ = self.run_tool(toolbox, "todo", {"action": "list", "include_done": True})
+        self.assertIn("✓ #1 买牛奶", result["content"])
+
+    def test_computer_tool_needs_no_approval(self):
+        approve = mock.Mock(return_value=False)
+        toolbox = self.make_toolbox(approve)
+        result, statuses = self.run_tool(toolbox, "computer", {"action": "mute"})
+        self.assertEqual(result["content"], "已切换静音")
+        approve.assert_not_called()
+
+    def test_unattended_refuses_actions_that_need_approval(self):
+        approve = mock.Mock(return_value=True)
+        toolbox = self.make_toolbox(approve)
+        toolbox.unattended = True
+        for name, tool_input in (("run_command", {"command": "echo hi", "reason": "x"}),
+                                 ("write_file", {"path": "a.txt", "content": "x"})):
+            result, _ = self.run_tool(toolbox, name, tool_input)
+            self.assertTrue(result["is_error"])
+            self.assertIn("定时任务", result["content"])
+        approve.assert_not_called()
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "a.txt")))
+
+
+class ReminderChatTest(DailyToolsTest):
+    def chat_with_events(self, inputs, bot, events, persona=None):
+        with mock.patch("builtins.input", side_effect=inputs), \
+                mock.patch("builtins.print") as fake_print, \
+                mock.patch.object(app, "notify_popup") as popup:
+            app.chat(bot, persona, None, events)
+        printed = [str(c.args[0]) for c in fake_print.call_args_list if c.args]
+        return printed, popup
+
+    def test_notify_reminder_pops_up_while_waiting_for_input(self):
+        events = queue.Queue()
+        events.put(("reminder", {"time": "2026-11-07 08:30", "message": "喝水", "kind": "notify", "missed": False}))
+        gate = threading.Event()
+
+        def slow_input(prompt=""):
+            gate.wait(2)  # 用户还没打字时提醒到点
+            return "/exit"
+
+        bot = app.Assistant(client=FakeClient())
+        with mock.patch("builtins.input", side_effect=slow_input), \
+                mock.patch("builtins.print") as fake_print, \
+                mock.patch.object(app, "notify_popup", side_effect=lambda *a: gate.set()) as popup:
+            app.chat(bot, None, None, events)
+        printed = [str(c.args[0]) for c in fake_print.call_args_list if c.args]
+        self.assertIn("\n\n  ⏰ 08:30 喝水", printed)
+        popup.assert_called_once_with("助理提醒", "喝水")
+
+    def test_task_reminder_runs_unattended(self):
+        toolbox = self.make_toolbox(approve=mock.Mock(return_value=True))
+        seen = {}
+
+        class Recording(FakeClient):
+            def _stream(self, **kwargs):
+                seen["unattended"] = toolbox.unattended
+                return super()._stream(**kwargs)
+
+        client = Recording(FakeStream(["早上好,今天晴"]))
+        persona = app.friday_persona("老板", toolbox)
+        bot = app.Assistant(client=client, system=persona.system, context=persona.context, toolbox=toolbox)
+        events = queue.Queue()
+        events.put(("reminder", {"time": "2026-11-07 09:00", "message": "做早报", "kind": "task", "missed": True}))
+        printed, popup = self.chat_with_events(["/exit"], bot, events, persona)
+
+        question = client.calls[0]["messages"][0]["content"][1]["text"]
+        self.assertEqual(question, "[定时任务](原定 09:00,星期五当时没开)做早报")
+        self.assertTrue(seen["unattended"])
+        self.assertFalse(toolbox.unattended)  # 做完恢复
+        popup.assert_not_called()
+
+    def test_todo_and_remind_commands(self):
+        toolbox = self.make_toolbox()
+        toolbox.todos.add("买牛奶")
+        toolbox.reminders.add("2026-11-07 09:00", "喝水")
+        bot = app.Assistant(client=FakeClient(), toolbox=toolbox)
+        printed, _ = self.chat_with_events(["/todo", "/remind", "/exit"], bot, queue.Queue())
+        self.assertIn("待办清单:\n  □ #1 买牛奶", printed)
+        self.assertIn("提醒:\n  #1 2026-11-07 09:00 [提醒] 喝水", printed)
+
+    def test_ctrl_c_while_waiting_exits(self):
+        bot = app.Assistant(client=FakeClient())
+        with mock.patch("builtins.input", side_effect=KeyboardInterrupt), mock.patch("builtins.print") as fake_print:
+            app.chat(bot)
+        printed = [str(c.args[0]) for c in fake_print.call_args_list if c.args]
+        self.assertEqual(printed[-1], "\n再见!")
+
+    def test_main_sets_up_daily_tools_next_to_memory(self):
+        env = {"ANTHROPIC_API_KEY": "sk-test", "FRIDAY_MEMORY_FILE": os.path.join(self.tmp, "m.json")}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(app, "Assistant"), \
+                mock.patch.object(app, "ReminderScheduler") as scheduler, \
+                mock.patch.object(app, "chat") as chat:
+            app.main(["--persona", "friday", "--env-file", os.devnull])
+        toolbox = chat.call_args.args[1].toolbox
+        self.assertEqual(str(toolbox.reminders.path), os.path.join(self.tmp, "friday_reminders.json"))
+        self.assertEqual(str(toolbox.todos.path), os.path.join(self.tmp, "friday_todos.json"))
+        scheduler.return_value.start.assert_called_once()
+        self.assertIs(scheduler.call_args.args[1], chat.call_args.args[3])
 
 
 if __name__ == "__main__":
