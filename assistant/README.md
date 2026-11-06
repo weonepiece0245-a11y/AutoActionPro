@@ -93,6 +93,28 @@
 
 提醒和待办保存在 `assistant/friday_reminders.json`、`assistant/friday_todos.json`(和记忆文件放在同一个文件夹,不会提交到 Git)。
 
+### Google 日历和 Gmail
+
+授权一次之后,就可以跟“星期五”说:“我明天有什么安排”“周五下午三点加个看牙”“有没有重要的新邮件”“帮我回复这封邮件说好的”。每天的早报也会顺便讲今天的日程和未读邮件。
+
+- **发邮件、回邮件每次都要你确认**(就算选过“本次运行都允许”也一样),确认时会显示收件人、主题和正文;不确定的可以让它先存草稿。
+- 邀请别人参加活动、删除活动也会先问你。
+- 定时任务里只能看,不能发、不能删。
+- 邮件是别人写的,它只把内容转述给你,不会照着邮件里的要求去做事。
+
+**第一次设置(大约 15 分钟,只需要做一次):**
+
+1. 打开 <https://console.cloud.google.com/>,用你的 Google 账号登录,新建一个项目(名字随便,比如 Friday)。
+2. 在顶部搜索框分别搜索 **Gmail API** 和 **Google Calendar API**,各点进去按 **启用**。
+3. 左侧菜单进入 **Google Auth Platform**(或“API 和服务 → OAuth 同意屏幕”),按提示配置:应用名称随便填,用户类型选 **外部(External)**,联系邮箱填你自己的。
+4. 在 **目标对象(Audience)** 里把你自己的 Gmail 加为 **测试用户**;然后点 **发布应用(Publish app)** 改成“正式版”,这样授权不会每 7 天过期一次。(如果发布后登录时被拦住,就保持“测试”状态,只是每 7 天要重新双击一次 `google-login.bat`。)
+5. 进入 **客户端(Clients)**,创建 OAuth 客户端,类型选 **桌面应用(Desktop app)**,创建后点 **下载 JSON**。
+6. 把下载的文件改名为 `credentials.json`,放进 `assistant` 文件夹。
+7. 双击 `assistant\google-login.bat`,浏览器会打开 Google 登录页。因为这个应用是你自己建的、没给 Google 审核,会看到“Google 尚未验证此应用”,点 **继续**(或“高级 → 转至 Friday”),再勾选允许。
+8. 窗口里显示出你最近的日程和邮件,就说明成功了。之后打开“星期五”就能用。
+
+`credentials.json` 和授权后生成的 `google_token.json` 相当于钥匙,不要发给别人(已被 `.gitignore` 忽略,不会提交到 Git)。想取消授权,删掉 `google_token.json`,并在 <https://myaccount.google.com/permissions> 里移除这个应用。
+
 ### 语音对话
 
 双击 `assistant\friday-voice.bat` 就能用嘴和“星期五”聊天,它的回答会读出来。第一次运行会自动安装语音相关的依赖。
