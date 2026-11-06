@@ -475,6 +475,19 @@ def main(argv: list[str] | None = None) -> None:
         "也可在 .env 里设置 FRIDAY_STT",
     )
     parser.add_argument(
+        "--tts",
+        default=None,
+        choices=("edge", "system"),
+        help="朗读用的声音:edge 微软在线神经网络语音(默认,更自然,需要联网),system 系统自带语音(离线)。"
+        "也可在 .env 里设置 FRIDAY_TTS",
+    )
+    parser.add_argument(
+        "--tts-voice",
+        default=None,
+        help="在线语音的声音:xiaoxiao(默认)、xiaoyi、yunxi、yunjian、yunyang、hsiaochen,"
+        "或完整名称如 zh-CN-XiaoxiaoNeural。也可在 .env 里设置 FRIDAY_TTS_VOICE",
+    )
+    parser.add_argument(
         "--env-file",
         default=DEFAULT_ENV_FILE,
         help="存放 API Key 的 .env 文件(默认是本程序同目录下的 .env)",
@@ -501,7 +514,7 @@ def main(argv: list[str] | None = None) -> None:
 
         stt = args.stt or os.environ.get("FRIDAY_STT") or "google"
         try:
-            voice = create_voice(stt, print_status)
+            voice = create_voice(stt, print_status, tts=args.tts, edge_voice=args.tts_voice)
         except VoiceUnavailable as e:
             print(f"无法开启语音:{e}", file=sys.stderr)
             sys.exit(1)

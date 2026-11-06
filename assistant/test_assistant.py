@@ -644,7 +644,17 @@ class VoiceChatTest(unittest.TestCase):
                 mock.patch.object(voice, "create_voice", return_value="VOICE") as create:
             app.main(["--voice", "--env-file", os.devnull])
         self.assertEqual(create.call_args.args[0], "vosk")
+        self.assertEqual(create.call_args.kwargs, {"tts": None, "edge_voice": None})
         self.assertEqual(chat.call_args.args[2], "VOICE")
+
+    def test_main_passes_tts_options(self):
+        env = {"ANTHROPIC_API_KEY": "sk-test"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(app, "Assistant"), \
+                mock.patch.object(app, "chat"), \
+                mock.patch.object(voice, "create_voice", return_value="VOICE") as create:
+            app.main(["--voice", "--tts", "system", "--tts-voice", "yunxi", "--env-file", os.devnull])
+        self.assertEqual(create.call_args.kwargs, {"tts": "system", "edge_voice": "yunxi"})
 
     def test_main_exits_when_voice_unavailable(self):
         env = {"ANTHROPIC_API_KEY": "sk-test"}
@@ -900,30 +910,172 @@ class WindowsSpeakerTest(unittest.TestCase):
             with self.assertRaises(voice.VoiceUnavailable):
                 voice.WindowsSpeaker()
 
-    def test_make_speaker_uses_sapi_on_windows(self):
+    def test_system_speaker_uses_sapi_on_windows(self):
         with mock.patch.object(voice.os, "name", "nt"), \
                 mock.patch.object(voice, "WindowsSpeaker", return_value="sapi"), \
                 mock.patch.object(voice, "Speaker", return_value="pyttsx3"):
-            self.assertEqual(voice.make_speaker(), "sapi")
+            self.assertEqual(voice.make_system_speaker(), "sapi")
+            self.assertEqual(voice.make_speaker("system"), "sapi")
         with mock.patch.object(voice.os, "name", "posix"), \
                 mock.patch.object(voice, "WindowsSpeaker", return_value="sapi"), \
                 mock.patch.object(voice, "Speaker", return_value="pyttsx3"):
-            self.assertEqual(voice.make_speaker(), "pyttsx3")
+            self.assertEqual(voice.make_system_speaker(), "pyttsx3")
 
-    def test_self_test_reports_missing_chinese_voice(self):
+    def test_self_test_tries_both_voices_and_microphone(self):
         speaker = SimpleNamespace(
             voice_names=["Microsoft Zira"], voice_name="Microsoft Zira", has_chinese_voice=False, speak=mock.Mock()
         )
+        edge = SimpleNamespace(voice_name="zh-CN-XiaoxiaoNeural(微软 Edge 在线语音)", speak=mock.Mock())
         listener = SimpleNamespace(listen=lambda on_status: "你好")
-        with mock.patch.object(voice, "make_speaker", return_value=speaker), \
+        with mock.patch.object(voice, "make_system_speaker", return_value=speaker), \
+                mock.patch.object(voice, "EdgeSpeaker", return_value=edge), \
                 mock.patch.object(voice, "Listener", return_value=listener), \
                 mock.patch("builtins.print") as fake_print:
             self.assertEqual(voice.self_test(), 0)
         printed = "\n".join(str(c.args[0]) for c in fake_print.call_args_list if c.args)
         self.assertIn("Microsoft Zira", printed)
         self.assertIn("没有找到中文朗读语音", printed)
+        self.assertIn("XiaoxiaoNeural", printed)
         self.assertIn("识别结果:你好", printed)
         speaker.speak.assert_called_once()
+        edge.speak.assert_called_once()
+
+    def test_self_test_survives_broken_online_voice(self):
+        speaker = SimpleNamespace(voice_names=[], voice_name="(无)", has_chinese_voice=True, speak=mock.Mock())
+        with mock.patch.object(voice, "make_system_speaker", return_value=speaker), \
+                mock.patch.object(voice, "EdgeSpeaker", side_effect=voice.VoiceUnavailable("缺依赖")), \
+                mock.patch.object(voice, "Listener", return_value=SimpleNamespace(listen=lambda s: None)), \
+                mock.patch("builtins.print") as fake_print:
+            self.assertEqual(voice.self_test(), 0)
+        printed = "\n".join(str(c.args[0]) for c in fake_print.call_args_list if c.args)
+        self.assertIn("在线语音不可用", printed)
+
+
+class FakeCommunicate:
+    """假的 edge_tts.Communicate:把要读的文字和声音记下来,写一个假的 MP3。"""
+
+    calls = []
+    fail_with = None
+
+    def __init__(self, text, voice):
+        FakeCommunicate.calls.append((text, voice))
+        self.text = text
+
+    async def save(self, path):
+        if FakeCommunicate.fail_with is not None:
+            raise FakeCommunicate.fail_with
+        with open(path, "wb") as f:
+            f.write(b"ID3fake-mp3")
+
+
+def fake_edge_tts():
+    FakeCommunicate.calls = []
+    FakeCommunicate.fail_with = None
+    module = types.ModuleType("edge_tts")
+    module.Communicate = FakeCommunicate
+    return module
+
+
+class EdgeSpeakerTest(unittest.TestCase):
+    def make(self, **kwargs):
+        played = []
+
+        def player(path):
+            with open(path, "rb") as f:
+                played.append((path, f.read()))
+
+        with mock.patch.dict(sys.modules, {"edge_tts": fake_edge_tts()}):
+            speaker = voice.EdgeSpeaker(player=player, on_status=kwargs.pop("on_status", lambda t: None), **kwargs)
+        return speaker, played
+
+    def test_reads_with_xiaoxiao_and_cleans_up(self):
+        speaker, played = self.make()
+        speaker.speak("**你好**,老板")
+        self.assertEqual(FakeCommunicate.calls, [("你好,老板", "zh-CN-XiaoxiaoNeural")])
+        path, data = played[0]
+        self.assertEqual(data, b"ID3fake-mp3")
+        self.assertFalse(os.path.exists(path))  # 临时文件已删除
+        self.assertTrue(speaker.has_chinese_voice)
+
+    def test_short_voice_names(self):
+        self.assertEqual(voice.resolve_edge_voice("Yunxi"), "zh-CN-YunxiNeural")
+        self.assertEqual(voice.resolve_edge_voice(None), voice.DEFAULT_EDGE_VOICE)
+        self.assertEqual(voice.resolve_edge_voice(" zh-CN-YunyangNeural "), "zh-CN-YunyangNeural")
+        speaker, _ = self.make(voice="yunjian")
+        self.assertEqual(speaker.voice, "zh-CN-YunjianNeural")
+
+    def test_falls_back_to_system_voice_when_offline(self):
+        fallback = SimpleNamespace(speak=mock.Mock())
+        statuses = []
+        speaker, played = self.make(fallback=lambda: fallback, on_status=statuses.append)
+        FakeCommunicate.fail_with = OSError("网络不通")
+        speaker.speak("第一句")
+        speaker.speak("第二句")
+        self.assertEqual(played, [])
+        self.assertEqual([c.args[0] for c in fallback.speak.call_args_list], ["第一句", "第二句"])
+        self.assertEqual(len(statuses), 1)  # 只提示一次
+        self.assertIn("网络不通", statuses[0])
+
+    def test_error_without_fallback_is_raised(self):
+        speaker, _ = self.make(fallback=None)
+        FakeCommunicate.fail_with = OSError("网络不通")
+        with self.assertRaises(OSError):
+            speaker.speak("你好")
+
+    def test_empty_text_is_not_read(self):
+        speaker, played = self.make()
+        speaker.speak("** **")
+        self.assertEqual((FakeCommunicate.calls, played), ([], []))
+
+    def test_missing_edge_tts_falls_back_to_system_voice(self):
+        statuses = []
+        with mock.patch.dict(sys.modules, {"edge_tts": None}), \
+                mock.patch.object(voice, "make_system_speaker", return_value="system"):
+            self.assertEqual(voice.make_speaker("edge", on_status=statuses.append), "system")
+        self.assertIn("改用系统自带的语音", statuses[0])
+
+    def test_make_speaker_reads_env(self):
+        env = {"FRIDAY_TTS": "edge", "FRIDAY_TTS_VOICE": "yunxi"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(voice, "EdgeSpeaker") as edge:
+            voice.make_speaker()
+        self.assertEqual(edge.call_args.args[0], "yunxi")
+        self.assertIs(edge.call_args.kwargs["fallback"], voice.make_system_speaker)
+
+
+class FakeWinmm:
+    """假的 winmm.mciSendStringW:播放两次查询后结束。"""
+
+    def __init__(self):
+        self.commands = []
+        self.mode_queries = 0
+
+    def mciSendStringW(self, command, buf, size, hwnd):
+        self.commands.append(command)
+        if buf is not None:
+            if command.endswith(" length"):
+                buf.value = "1200"
+            elif command.endswith(" mode"):
+                self.mode_queries += 1
+                buf.value = "playing" if self.mode_queries < 2 else "stopped"
+        return 0
+
+
+class PlayMp3Test(unittest.TestCase):
+    def test_windows_mci_plays_until_stopped_and_closes(self):
+        winmm = FakeWinmm()
+        with mock.patch.object(voice.time, "sleep"):
+            voice._play_mp3_windows(r"C:\Temp\friday 1.mp3", winmm)
+        self.assertEqual(winmm.commands[0], 'open "C:\\Temp\\friday 1.mp3" type mpegvideo alias friday_tts')
+        self.assertIn("play friday_tts", winmm.commands)
+        self.assertEqual(winmm.mode_queries, 2)
+        self.assertEqual(winmm.commands[-1], "close friday_tts")
+
+    def test_windows_mci_error_still_closes(self):
+        winmm = FakeWinmm()
+        winmm.mciSendStringW = mock.Mock(side_effect=lambda cmd, buf, size, hwnd: 263 if cmd.startswith("play") else 0)
+        with self.assertRaises(RuntimeError):
+            voice._play_mp3_windows("a.mp3", winmm)
+        self.assertEqual(winmm.mciSendStringW.call_args.args[0], "close friday_tts")
 
 
 class VoiceModuleTest(unittest.TestCase):

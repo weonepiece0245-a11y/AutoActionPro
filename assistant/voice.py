@@ -3,7 +3,8 @@
 依赖(见 requirements-voice.txt):
     SpeechRecognition + sounddevice  录音、自动判断一句话说完
                                  (sounddevice 自带录音组件,任何 Python 版本都不用编译)
-    pywin32 (Windows)            朗读:直接调用 Windows 自带的语音引擎 SAPI(离线)
+    edge-tts                     朗读(默认):微软 Edge“大声朗读”的神经网络语音,自然好听,需要联网
+    pywin32 (Windows)            朗读:Windows 自带的语音引擎 SAPI(离线,也是联网失败时的备用)
     pyttsx3 (macOS / Linux)      朗读:系统自带的语音(离线)
     vosk                         可选的离线语音识别
 
@@ -14,9 +15,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
+import shutil
+import subprocess
+import tempfile
+import time
 import urllib.request
 import zipfile
 from typing import Callable
@@ -44,8 +50,28 @@ NO_CHINESE_VOICE_HINT = (
 )
 
 
+# 微软 Edge 在线语音:简称 -> (语音名, 说明)
+EDGE_VOICES = {
+    "xiaoxiao": ("zh-CN-XiaoxiaoNeural", "晓晓,女声,温暖自然(默认)"),
+    "xiaoyi": ("zh-CN-XiaoyiNeural", "晓伊,女声,活泼"),
+    "yunxi": ("zh-CN-YunxiNeural", "云希,男声,阳光"),
+    "yunjian": ("zh-CN-YunjianNeural", "云健,男声,沉稳"),
+    "yunyang": ("zh-CN-YunyangNeural", "云扬,男声,新闻播报风格"),
+    "hsiaochen": ("zh-TW-HsiaoChenNeural", "晓臻,台湾女声"),
+}
+DEFAULT_EDGE_VOICE = EDGE_VOICES["xiaoxiao"][0]
+
+
 class VoiceUnavailable(Exception):
     """缺少依赖或设备,无法使用语音。"""
+
+
+def resolve_edge_voice(name: str | None) -> str:
+    """把 xiaoxiao 这样的简称换成完整语音名;完整名称原样返回。"""
+    if not name:
+        return DEFAULT_EDGE_VOICE
+    entry = EDGE_VOICES.get(name.strip().lower())
+    return entry[0] if entry else name.strip()
 
 
 def clean_for_speech(text: str) -> str:
@@ -323,36 +349,175 @@ class VoiceIO:
         self.speaker.speak(text)
 
 
-def make_speaker():
+def _play_mp3_windows(path: str, winmm=None) -> None:
+    """用 Windows 自带的媒体接口(MCI)播放 MP3,不需要额外安装播放器。"""
+    import ctypes
+
+    if winmm is None:
+        winmm = ctypes.windll.winmm
+    alias = "friday_tts"
+
+    def mci(command: str) -> str:
+        buf = ctypes.create_unicode_buffer(128)
+        error = winmm.mciSendStringW(command, buf, 127, None)
+        if error:
+            raise RuntimeError(f"播放失败(MCI 错误 {error}):{command}")
+        return buf.value
+
+    mci(f'open "{path}" type mpegvideo alias {alias}')
+    try:
+        mci(f"set {alias} time format milliseconds")
+        length_ms = int(mci(f"status {alias} length") or 0)
+        mci(f"play {alias}")
+        deadline = time.monotonic() + length_ms / 1000 + 10
+        # 分段等待播放结束,这样按 Ctrl+C 能立刻停下
+        while time.monotonic() < deadline and mci(f"status {alias} mode") in ("playing", "seeking", "not ready"):
+            time.sleep(0.1)
+    finally:
+        winmm.mciSendStringW(f"close {alias}", None, 0, None)
+
+
+def _find_mp3_player() -> list[str] | None:
+    for command in (["afplay"], ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"], ["mpg123", "-q"]):
+        if shutil.which(command[0]):
+            return command
+    return None
+
+
+def play_mp3(path: str) -> None:
+    if os.name == "nt":
+        _play_mp3_windows(path)
+        return
+    player = _find_mp3_player()
+    if player is None:
+        raise RuntimeError("没有找到能播放 MP3 的程序(afplay / ffplay / mpg123)")
+    subprocess.run(player + [path], check=True)
+
+
+class EdgeSpeaker:
+    """用微软 Edge“大声朗读”的神经网络语音朗读,声音自然,需要联网。
+
+    联网失败时自动改用系统自带的语音读这一句,不会没有声音。
+    """
+
+    def __init__(
+        self,
+        voice: str = DEFAULT_EDGE_VOICE,
+        fallback: Callable[[], object] | None = None,
+        on_status: StatusFn = print,
+        player: Callable[[str], None] = play_mp3,
+    ) -> None:
+        try:
+            import edge_tts
+        except ImportError as e:
+            raise VoiceUnavailable(INSTALL_HINT) from e
+        if os.name != "nt" and player is play_mp3 and _find_mp3_player() is None:
+            raise VoiceUnavailable("没有找到能播放 MP3 的程序,请安装 ffmpeg 或 mpg123")
+        self.edge_tts = edge_tts
+        self.voice = resolve_edge_voice(voice)
+        self.voice_name = f"{self.voice}(微软 Edge 在线语音)"
+        self.voice_names = [f"{name} - {desc}" for name, desc in EDGE_VOICES.values()]
+        self.has_chinese_voice = self.voice.lower().startswith("zh-")
+        self._fallback_factory = fallback
+        self._fallback = None
+        self._warned = False
+        self.on_status = on_status
+        self.player = player
+
+    def speak(self, text: str) -> None:
+        text = clean_for_speech(text)
+        if not text:
+            return
+        fd, path = tempfile.mkstemp(prefix="friday_", suffix=".mp3")
+        os.close(fd)
+        try:
+            try:
+                asyncio.run(self.edge_tts.Communicate(text, self.voice).save(path))
+                if os.path.getsize(path) == 0:
+                    raise RuntimeError("没有收到语音数据")
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                self._speak_with_fallback(text, e)
+                return
+            self.player(path)
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    def _speak_with_fallback(self, text: str, error: Exception) -> None:
+        if not self._warned:
+            self.on_status(f"在线语音暂时不可用({type(error).__name__}: {error}),先用系统自带的语音朗读。")
+            self._warned = True
+        if self._fallback is None and self._fallback_factory is not None:
+            self._fallback = self._fallback_factory()
+        if self._fallback is None:
+            raise error
+        self._fallback.speak(text)
+
+
+def make_system_speaker():
     return WindowsSpeaker() if os.name == "nt" else Speaker()
 
 
-def create_voice(engine: str = "google", on_status: StatusFn = print) -> VoiceIO:
-    speaker = make_speaker()
+def make_speaker(tts: str | None = None, edge_voice: str | None = None, on_status: StatusFn = print):
+    """tts:edge(默认,在线神经网络语音)或 system(系统自带语音,离线)。"""
+    tts = tts or os.environ.get("FRIDAY_TTS") or "edge"
+    if tts == "system":
+        return make_system_speaker()
+    try:
+        return EdgeSpeaker(
+            edge_voice or os.environ.get("FRIDAY_TTS_VOICE") or DEFAULT_EDGE_VOICE,
+            fallback=make_system_speaker,
+            on_status=on_status,
+        )
+    except VoiceUnavailable as e:
+        on_status(f"无法使用在线语音({e}),改用系统自带的语音。")
+        return make_system_speaker()
+
+
+def create_voice(
+    engine: str = "google",
+    on_status: StatusFn = print,
+    tts: str | None = None,
+    edge_voice: str | None = None,
+) -> VoiceIO:
+    speaker = make_speaker(tts, edge_voice, on_status)
     if not speaker.has_chinese_voice:
         on_status(NO_CHINESE_VOICE_HINT)
     return VoiceIO(Listener(engine, on_status), speaker)
 
 
 def self_test() -> int:
-    """检查朗读和麦克风:列出系统语音、读一句测试语,再录一句话。"""
-    print("== 1. 朗读测试 ==")
+    """检查朗读和麦克风:分别试读系统语音和在线语音,再录一句话。"""
+    print("== 1. 系统语音(离线)==")
     try:
-        speaker = make_speaker()
+        speaker = make_system_speaker()
+        print("系统里的朗读语音:")
+        for name in speaker.voice_names or ["(一个都没有)"]:
+            print(f"  - {name}")
+        print(f"正在使用:{speaker.voice_name}")
+        if not speaker.has_chinese_voice:
+            print(NO_CHINESE_VOICE_HINT)
+        print("现在会读一句:“你好,我是星期五,这是系统自带的声音。”")
+        speaker.speak("你好,我是星期五,这是系统自带的声音。")
+        print("读完了。")
     except VoiceUnavailable as e:
-        print(f"朗读不可用:{e}")
-        return 1
-    print("系统里的朗读语音:")
-    for name in speaker.voice_names or ["(一个都没有)"]:
-        print(f"  - {name}")
-    print(f"正在使用:{speaker.voice_name}")
-    if not speaker.has_chinese_voice:
-        print(NO_CHINESE_VOICE_HINT)
-    print("现在会读一句:“你好,我是星期五,能听到我说话吗?”")
-    speaker.speak("你好,我是星期五,能听到我说话吗?")
-    print("读完了。如果没听到声音,请检查音量和默认的扬声器/耳机。")
+        print(f"系统语音不可用:{e}")
 
-    print("\n== 2. 麦克风测试 ==")
+    print("\n== 2. 在线语音(更自然)==")
+    try:
+        edge = EdgeSpeaker(fallback=None)
+        print(f"正在使用:{edge.voice_name}")
+        print("现在会读一句:“你好,我是星期五,这是更自然的在线声音。”")
+        edge.speak("你好,我是星期五,这是更自然的在线声音。")
+        print("读完了。如果没听到声音,请检查音量和默认的扬声器/耳机。")
+    except Exception as e:
+        print(f"在线语音不可用:{type(e).__name__}: {e}")
+
+    print("\n== 3. 麦克风测试 ==")
     try:
         listener = Listener("google", print)
         text = listener.listen(print)

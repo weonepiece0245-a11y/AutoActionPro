@@ -65,9 +65,24 @@
 
 如果识别时提示“在线语音识别连接失败”,在 `assistant/.env` 里加一行 `FRIDAY_STT=vosk` 改用离线识别。
 
-**朗读**用的是系统自带的语音(Windows 上直接调用系统的 SAPI 语音引擎),不需要联网。如果提示“没有找到中文朗读语音”,在 Windows 的“设置 → 时间和语言 → 语音 → 管理语音”里添加“中文(简体)”即可。
+**朗读的声音**默认是微软 Edge“大声朗读”同款的神经网络语音“晓晓”,听起来很自然,需要联网;万一连不上,会自动改用系统自带的语音读,不会没声音。
 
-**没声音或听不到我说话?** 双击 `assistant\voice-test.bat` 做个检查:它会列出系统里的朗读语音、读一句测试语,再录一句话看能不能识别。
+想换个声音,在 `assistant/.env` 里加一行 `FRIDAY_TTS_VOICE=名字`(或运行时加 `--tts-voice 名字`):
+
+| 名字 | 声音 |
+|---|---|
+| `xiaoxiao`(默认) | 晓晓,女声,温暖自然 |
+| `xiaoyi` | 晓伊,女声,活泼 |
+| `yunxi` | 云希,男声,阳光 |
+| `yunjian` | 云健,男声,沉稳 |
+| `yunyang` | 云扬,男声,新闻播报风格 |
+| `hsiaochen` | 晓臻,台湾女声 |
+
+不想联网朗读,写 `FRIDAY_TTS=system`(或加 `--tts system`),改用系统自带的语音(离线)。系统语音没有中文时,在 Windows 的“设置 → 时间和语言 → 语音 → 管理语音 → 添加语音”里添加“中文(简体,中国)”。
+
+在线语音用的是 Edge 浏览器朗读功能背后的免费接口,不是正式的付费服务,将来有可能失效;失效时会自动改用系统语音。
+
+**没声音或听不到我说话?** 双击 `assistant\voice-test.bat` 做个检查:它会列出系统里的朗读语音,分别用系统语音和在线语音各读一句,再录一句话看能不能识别。
 
 命令行用法:`python assistant/assistant.py --persona friday --voice`(普通小助理也可以加 `--voice`)。手动安装语音依赖:`python -m pip install -r assistant/requirements-voice.txt`。
 
