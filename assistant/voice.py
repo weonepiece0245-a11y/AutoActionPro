@@ -1,7 +1,8 @@
 """语音对话:用麦克风说话,助手把回答读出来。
 
 依赖(见 requirements-voice.txt):
-    SpeechRecognition + PyAudio  录音、自动判断一句话说完
+    SpeechRecognition + sounddevice  录音、自动判断一句话说完
+                                 (sounddevice 自带录音组件,任何 Python 版本都不用编译)
     pyttsx3                      朗读,使用系统自带的语音(离线)
     vosk                         可选的离线语音识别
 
@@ -111,6 +112,51 @@ def ensure_vosk_model(model_dir: str = DEFAULT_MODEL_DIR, on_status: StatusFn = 
     return path
 
 
+def make_microphone(sr, sample_rate: int = 16000, chunk_size: int = 1024):
+    """用 sounddevice 录音的麦克风,可以直接交给 SpeechRecognition 使用。
+
+    SpeechRecognition 自带的 Microphone 依赖 PyAudio,而 PyAudio 在较新的 Python 上
+    没有现成的安装包,需要编译。这里实现同样的接口:进入 with 时打开录音流,
+    stream.read(n) 返回 n 帧 16 位单声道音频。
+    """
+    import sounddevice as sd
+
+    class _Reader:
+        def __init__(self, raw_stream) -> None:
+            self.raw_stream = raw_stream
+
+        def read(self, frames: int) -> bytes:
+            data, _overflowed = self.raw_stream.read(frames)
+            return bytes(data)
+
+    class SoundDeviceMicrophone(sr.AudioSource):
+        def __init__(self) -> None:
+            self.SAMPLE_RATE = sample_rate
+            self.SAMPLE_WIDTH = 2  # 16 位
+            self.CHUNK = chunk_size
+            self.stream = None
+            self._raw = None
+
+        def __enter__(self):
+            self._raw = sd.RawInputStream(
+                samplerate=self.SAMPLE_RATE, channels=1, dtype="int16", blocksize=self.CHUNK
+            )
+            self._raw.start()
+            self.stream = _Reader(self._raw)
+            return self
+
+        def __exit__(self, *exc):
+            try:
+                self._raw.stop()
+                self._raw.close()
+            finally:
+                self._raw = None
+                self.stream = None
+            return False
+
+    return SoundDeviceMicrophone()
+
+
 class Listener:
     """从麦克风录一句话并转成文字。"""
 
@@ -124,13 +170,18 @@ class Listener:
         self.recognizer = sr.Recognizer()
         self.recognizer.pause_threshold = 1.0  # 停顿 1 秒算一句话说完
         try:
-            self.microphone = sr.Microphone(sample_rate=16000)
+            self.microphone = make_microphone(sr)
+        except ImportError as e:
+            raise VoiceUnavailable(INSTALL_HINT) from e
+        try:
             with self.microphone as source:
                 on_status("正在适应环境噪音,请保持安静 1 秒……")
                 self.recognizer.adjust_for_ambient_noise(source, duration=1)
-        except (OSError, AttributeError) as e:
-            # 没装 PyAudio 时 SpeechRecognition 抛 AttributeError,没有麦克风时抛 OSError
-            raise VoiceUnavailable(f"无法打开麦克风:{e}。请检查麦克风是否连接,或{INSTALL_HINT}") from e
+        except Exception as e:  # 没有麦克风、麦克风被占用或没有权限
+            raise VoiceUnavailable(
+                f"无法打开麦克风:{e}。请检查麦克风是否插好,"
+                "以及 Windows“设置 → 隐私和安全性 → 麦克风”里是否允许桌面应用使用麦克风"
+            ) from e
 
         self._vosk = None
         if engine == "vosk":

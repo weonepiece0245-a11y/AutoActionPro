@@ -695,21 +695,14 @@ class FakeSR(types.ModuleType):
         self.results = list(results)
         fake = self
 
-        class Microphone:
-            def __init__(self, sample_rate=None):
-                self.sample_rate = sample_rate
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                return False
+        class AudioSource:
+            pass
 
         class Recognizer:
             pause_threshold = 0.8
 
             def adjust_for_ambient_noise(self, source, duration=1):
-                pass
+                fake.calibrated_with = source.stream.read(source.CHUNK)
 
             def listen(self, source, timeout=None, phrase_time_limit=None):
                 item = fake.results.pop(0)
@@ -723,8 +716,37 @@ class FakeSR(types.ModuleType):
                     raise audio
                 return audio
 
-        self.Microphone = Microphone
+        self.AudioSource = AudioSource
         self.Recognizer = Recognizer
+
+
+class FakeRawInputStream:
+    """假的 sounddevice.RawInputStream,read 返回全零的音频。"""
+
+    instances = []
+
+    def __init__(self, samplerate, channels, dtype, blocksize):
+        self.args = (samplerate, channels, dtype, blocksize)
+        self.started = self.closed = False
+        FakeRawInputStream.instances.append(self)
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+    def read(self, frames):
+        return bytearray(frames * 2), False
+
+
+def fake_sounddevice(stream_cls=FakeRawInputStream):
+    module = types.ModuleType("sounddevice")
+    module.RawInputStream = stream_cls
+    return module
 
 
 class FakeEngine:
@@ -784,7 +806,7 @@ class VoiceModuleTest(unittest.TestCase):
 
     def test_listener_google(self):
         sr = FakeSR(["你好星期五", FakeSR.WaitTimeoutError(), FakeSR.UnknownValueError()])
-        with mock.patch.dict(sys.modules, {"speech_recognition": sr}):
+        with mock.patch.dict(sys.modules, {"speech_recognition": sr, "sounddevice": fake_sounddevice()}):
             listener = voice.Listener("google", on_status=lambda t: None)
             self.assertEqual(listener.listen(lambda t: None), "你好星期五")
             self.assertEqual(sr.language, "zh-CN")
@@ -793,20 +815,36 @@ class VoiceModuleTest(unittest.TestCase):
 
     def test_listener_network_error_suggests_vosk(self):
         sr = FakeSR([FakeSR.RequestError("连不上")])
-        with mock.patch.dict(sys.modules, {"speech_recognition": sr}):
+        with mock.patch.dict(sys.modules, {"speech_recognition": sr, "sounddevice": fake_sounddevice()}):
             listener = voice.Listener("google", on_status=lambda t: None)
             with self.assertRaises(voice.VoiceUnavailable) as ctx:
                 listener.listen(lambda t: None)
         self.assertIn("--stt vosk", str(ctx.exception))
 
-    def test_microphone_unavailable(self):
+    def test_microphone_records_16bit_mono_and_closes(self):
+        FakeRawInputStream.instances.clear()
         sr = FakeSR([])
+        with mock.patch.dict(sys.modules, {"speech_recognition": sr, "sounddevice": fake_sounddevice()}):
+            listener = voice.Listener("google", on_status=lambda t: None)
+        self.assertIsInstance(listener.microphone, sr.AudioSource)
+        self.assertEqual(sr.calibrated_with, bytes(1024 * 2))  # 校准时读到了一块音频
+        stream = FakeRawInputStream.instances[0]
+        self.assertEqual(stream.args, (16000, 1, "int16", 1024))
+        self.assertTrue(stream.started and stream.closed)
+        self.assertIsNone(listener.microphone.stream)
 
+    def test_microphone_unavailable(self):
         def broken(*a, **k):
-            raise AttributeError("Could not find PyAudio; check installation")
+            raise RuntimeError("Error querying device -1")
 
-        sr.Microphone = broken
-        with mock.patch.dict(sys.modules, {"speech_recognition": sr}):
+        modules = {"speech_recognition": FakeSR([]), "sounddevice": fake_sounddevice(broken)}
+        with mock.patch.dict(sys.modules, modules):
+            with self.assertRaises(voice.VoiceUnavailable) as ctx:
+                voice.Listener("google", on_status=lambda t: None)
+        self.assertIn("麦克风", str(ctx.exception))
+
+    def test_missing_sounddevice(self):
+        with mock.patch.dict(sys.modules, {"speech_recognition": FakeSR([]), "sounddevice": None}):
             with self.assertRaises(voice.VoiceUnavailable):
                 voice.Listener("google", on_status=lambda t: None)
 
