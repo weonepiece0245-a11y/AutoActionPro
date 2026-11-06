@@ -35,7 +35,7 @@ SYSTEM_PROMPT = (
 
 HELP_TEXT = "命令:/clear 清空对话  /exit 退出"
 FRIDAY_HELP_TEXT = "命令:/memory 看看我记得什么  /forget 关键词 删除记忆  /clear 开始新话题  /exit 退出"
-VOICE_HELP_TEXT = "语音模式:直接按回车开始说话,也可以照常打字;说“退出”或“再见”结束。"
+VOICE_HELP_TEXT = "语音模式:按回车开始说话,说完停顿一会儿或再按一次回车结束;也可以照常打字。说“退出”或“再见”结束。"
 VOICE_EXIT_WORDS = ("退出", "退出程序", "再见", "拜拜")
 
 DEFAULT_CALL_ME = "老板"
@@ -475,6 +475,12 @@ def main(argv: list[str] | None = None) -> None:
         "也可在 .env 里设置 FRIDAY_STT",
     )
     parser.add_argument(
+        "--pause",
+        type=float,
+        default=None,
+        help="语音模式下停顿几秒算一句话说完(默认 2 秒)。也可在 .env 里设置 FRIDAY_PAUSE",
+    )
+    parser.add_argument(
         "--tts",
         default=None,
         choices=("edge", "system"),
@@ -514,7 +520,7 @@ def main(argv: list[str] | None = None) -> None:
 
         stt = args.stt or os.environ.get("FRIDAY_STT") or "google"
         try:
-            voice = create_voice(stt, print_status, tts=args.tts, edge_voice=args.tts_voice)
+            voice = create_voice(stt, print_status, tts=args.tts, edge_voice=args.tts_voice, pause=args.pause)
         except VoiceUnavailable as e:
             print(f"无法开启语音:{e}", file=sys.stderr)
             sys.exit(1)

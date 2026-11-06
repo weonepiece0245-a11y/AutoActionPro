@@ -1,8 +1,8 @@
 """语音对话:用麦克风说话,助手把回答读出来。
 
 依赖(见 requirements-voice.txt):
-    SpeechRecognition + sounddevice  录音、自动判断一句话说完
-                                 (sounddevice 自带录音组件,任何 Python 版本都不用编译)
+    sounddevice                  录音(自带录音组件,任何 Python 版本都不用编译)
+    SpeechRecognition            在线语音识别
     edge-tts                     朗读(默认):微软 Edge“大声朗读”的神经网络语音,自然好听,需要联网
     pywin32 (Windows)            朗读:Windows 自带的语音引擎 SAPI(离线,也是联网失败时的备用)
     pyttsx3 (macOS / Linux)      朗读:系统自带的语音(离线)
@@ -15,8 +15,10 @@
 
 from __future__ import annotations
 
+import array
 import asyncio
 import json
+import math
 import os
 import re
 import shutil
@@ -34,7 +36,7 @@ VOSK_MODEL_NAME = "vosk-model-small-cn-0.22"
 VOSK_MODEL_URL = f"https://alphacephei.com/vosk/models/{VOSK_MODEL_NAME}.zip"
 DEFAULT_MODEL_DIR = os.path.join(SCRIPT_DIR, "models")
 
-LISTEN_TIMEOUT = 8  # 秒:这么久没开口就算没说话
+LISTEN_TIMEOUT = 10  # 秒:这么久没开口就算没说话
 PHRASE_LIMIT = 60  # 秒:一句话最长录多久
 
 INSTALL_HINT = "语音功能需要额外安装依赖:python -m pip install -r assistant/requirements-voice.txt"
@@ -224,76 +226,74 @@ def ensure_vosk_model(model_dir: str = DEFAULT_MODEL_DIR, on_status: StatusFn = 
     return path
 
 
-def make_microphone(sr, sample_rate: int = 16000, chunk_size: int = 1024):
-    """用 sounddevice 录音的麦克风,可以直接交给 SpeechRecognition 使用。
+SAMPLE_RATE = 16000
+CHUNK = 1024  # 每次读 1024 帧,约 0.064 秒
+CHUNK_SECONDS = CHUNK / SAMPLE_RATE
+DEFAULT_PAUSE = 2.0  # 秒:停顿这么久才算一句话说完
+CALIBRATE_SECONDS = 1.0
+PRE_ROLL_SECONDS = 0.4  # 开口前保留的一小段,避免吞掉第一个字
+START_RATIO = 2.5  # 音量超过环境噪音的这么多倍才算开口
+MIN_START_LEVEL = 120
+KEEP_RATIO = 0.5  # 说话中途音量只要高于开口门槛的一半,就不算停顿
 
-    SpeechRecognition 自带的 Microphone 依赖 PyAudio,而 PyAudio 在较新的 Python 上
-    没有现成的安装包,需要编译。这里实现同样的接口:进入 with 时打开录音流,
-    stream.read(n) 返回 n 帧 16 位单声道音频。
-    """
-    import sounddevice as sd
 
-    class _Reader:
-        def __init__(self, raw_stream) -> None:
-            self.raw_stream = raw_stream
+def rms(data: bytes) -> float:
+    """16 位单声道音频的音量(均方根)。"""
+    samples = array.array("h", data[: len(data) - len(data) % 2])
+    if not samples:
+        return 0.0
+    return math.sqrt(sum(x * x for x in samples) / len(samples))
 
-        def read(self, frames: int) -> bytes:
-            data, _overflowed = self.raw_stream.read(frames)
-            return bytes(data)
 
-    class SoundDeviceMicrophone(sr.AudioSource):
-        def __init__(self) -> None:
-            self.SAMPLE_RATE = sample_rate
-            self.SAMPLE_WIDTH = 2  # 16 位
-            self.CHUNK = chunk_size
-            self.stream = None
-            self._raw = None
+def enter_pressed() -> bool:
+    """录音时用户有没有按回车(只在 Windows 上检测)。"""
+    if os.name != "nt":
+        return False
+    import msvcrt
 
-        def __enter__(self):
-            self._raw = sd.RawInputStream(
-                samplerate=self.SAMPLE_RATE, channels=1, dtype="int16", blocksize=self.CHUNK
-            )
-            self._raw.start()
-            self.stream = _Reader(self._raw)
-            return self
-
-        def __exit__(self, *exc):
-            try:
-                self._raw.stop()
-                self._raw.close()
-            finally:
-                self._raw = None
-                self.stream = None
-            return False
-
-    return SoundDeviceMicrophone()
+    pressed = False
+    while msvcrt.kbhit():
+        if msvcrt.getwch() in ("\r", "\n"):
+            pressed = True
+    return pressed
 
 
 class Listener:
-    """从麦克风录一句话并转成文字。"""
+    """从麦克风录一句话并转成文字。
 
-    def __init__(self, engine: str = "google", on_status: StatusFn = print) -> None:
+    自己判断一句话什么时候说完:开口后,连续停顿 pause 秒(默认 2 秒)才结束;
+    说话中途声音变小不算停顿;Windows 上也可以按回车立刻结束。
+    """
+
+    def __init__(
+        self,
+        engine: str = "google",
+        on_status: StatusFn = print,
+        pause: float | None = None,
+        key_pressed: Callable[[], bool] = enter_pressed,
+    ) -> None:
         try:
+            import sounddevice
             import speech_recognition as sr
         except ImportError as e:
             raise VoiceUnavailable(INSTALL_HINT) from e
         self.sr = sr
+        self.sd = sounddevice
         self.engine = engine
         self.recognizer = sr.Recognizer()
-        self.recognizer.pause_threshold = 1.0  # 停顿 1 秒算一句话说完
+        self.key_pressed = key_pressed
+        self.pause = pause if pause else float(os.environ.get("FRIDAY_PAUSE") or DEFAULT_PAUSE)
+
         try:
-            self.microphone = make_microphone(sr)
-        except ImportError as e:
-            raise VoiceUnavailable(INSTALL_HINT) from e
-        try:
-            with self.microphone as source:
-                on_status("正在适应环境噪音,请保持安静 1 秒……")
-                self.recognizer.adjust_for_ambient_noise(source, duration=1)
+            on_status("正在适应环境噪音,请保持安静 1 秒……")
+            with self._open() as stream:
+                noise = [rms(self._read(stream)) for _ in range(round(CALIBRATE_SECONDS / CHUNK_SECONDS))]
         except Exception as e:  # 没有麦克风、麦克风被占用或没有权限
             raise VoiceUnavailable(
                 f"无法打开麦克风:{e}。请检查麦克风是否插好,"
                 "以及 Windows“设置 → 隐私和安全性 → 麦克风”里是否允许桌面应用使用麦克风"
             ) from e
+        self.noise = sum(noise) / len(noise) if noise else 0.0
 
         self._vosk = None
         if engine == "vosk":
@@ -304,20 +304,65 @@ class Listener:
             vosk.SetLogLevel(-1)
             self._vosk = vosk.Model(ensure_vosk_model(on_status=on_status))
 
+    @property
+    def start_level(self) -> float:
+        return max(self.noise * START_RATIO, MIN_START_LEVEL)
+
+    def _open(self):
+        return self.sd.RawInputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16", blocksize=CHUNK)
+
+    @staticmethod
+    def _read(stream) -> bytes:
+        data, _overflowed = stream.read(CHUNK)
+        return bytes(data)
+
+    def record(self, on_status: StatusFn = print) -> bytes | None:
+        """录一句话,返回 16kHz 16 位单声道的原始音频;一直没开口时返回 None。"""
+        hint = f"说完停顿 {self.pause:g} 秒" + (",或按回车结束" if os.name == "nt" else "")
+        on_status(f"我在听,请说话……({hint})")
+        wait_chunks = round(LISTEN_TIMEOUT / CHUNK_SECONDS)
+        pause_chunks = max(1, round(self.pause / CHUNK_SECONDS))
+        max_chunks = round(PHRASE_LIMIT / CHUNK_SECONDS)
+        pre_roll = max(1, round(PRE_ROLL_SECONDS / CHUNK_SECONDS))
+        self.key_pressed()  # 清掉之前残留的按键
+
+        with self._open() as stream:  # 进入 with 时开始录音,退出时停止
+            frames: list[bytes] = []
+            # 等待开口;等待期间顺便跟上环境噪音的变化
+            for _ in range(wait_chunks):
+                chunk = self._read(stream)
+                frames = (frames + [chunk])[-pre_roll:]
+                level = rms(chunk)
+                if level >= self.start_level:
+                    break
+                self.noise = self.noise * 0.95 + level * 0.05
+                if self.key_pressed():
+                    return None
+            else:
+                return None
+
+            keep_level = self.start_level * KEEP_RATIO
+            quiet = 0
+            while len(frames) < max_chunks:
+                chunk = self._read(stream)
+                frames.append(chunk)
+                quiet = quiet + 1 if rms(chunk) < keep_level else 0
+                if quiet >= pause_chunks or self.key_pressed():
+                    break
+        return b"".join(frames)
+
     def listen(self, on_status: StatusFn = print) -> str | None:
         """录一句话,返回识别出的文字;没听到或没听清时返回 None。"""
-        sr = self.sr
-        with self.microphone as source:
-            on_status("我在听,请说话……")
-            try:
-                audio = self.recognizer.listen(source, timeout=LISTEN_TIMEOUT, phrase_time_limit=PHRASE_LIMIT)
-            except sr.WaitTimeoutError:
-                return None
+        audio = self.record(on_status)
+        if not audio:
+            return None
         on_status("识别中……")
         if self._vosk is not None:
             return self._recognize_vosk(audio)
+        sr = self.sr
         try:
-            return self.recognizer.recognize_google(audio, language="zh-CN") or None
+            data = sr.AudioData(audio, SAMPLE_RATE, 2)
+            return self.recognizer.recognize_google(data, language="zh-CN") or None
         except sr.UnknownValueError:
             return None
         except sr.RequestError as e:
@@ -325,11 +370,11 @@ class Listener:
                 f"在线语音识别连接失败({e})。如果访问不了 Google,请改用离线识别:加参数 --stt vosk"
             ) from e
 
-    def _recognize_vosk(self, audio) -> str | None:
+    def _recognize_vosk(self, audio: bytes) -> str | None:
         import vosk
 
-        recognizer = vosk.KaldiRecognizer(self._vosk, 16000)
-        recognizer.AcceptWaveform(audio.get_raw_data(convert_rate=16000, convert_width=2))
+        recognizer = vosk.KaldiRecognizer(self._vosk, SAMPLE_RATE)
+        recognizer.AcceptWaveform(audio)
         text = json.loads(recognizer.FinalResult()).get("text", "")
         text = text.replace(" ", "")  # vosk 的中文结果字词之间带空格
         return text or None
@@ -483,11 +528,12 @@ def create_voice(
     on_status: StatusFn = print,
     tts: str | None = None,
     edge_voice: str | None = None,
+    pause: float | None = None,
 ) -> VoiceIO:
     speaker = make_speaker(tts, edge_voice, on_status)
     if not speaker.has_chinese_voice:
         on_status(NO_CHINESE_VOICE_HINT)
-    return VoiceIO(Listener(engine, on_status), speaker)
+    return VoiceIO(Listener(engine, on_status, pause=pause), speaker)
 
 
 def self_test() -> int:

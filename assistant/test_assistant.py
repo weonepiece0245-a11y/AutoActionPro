@@ -3,6 +3,7 @@
 运行:python -m unittest assistant/test_assistant.py
 """
 
+import array
 import datetime
 import importlib.util
 import os
@@ -644,7 +645,7 @@ class VoiceChatTest(unittest.TestCase):
                 mock.patch.object(voice, "create_voice", return_value="VOICE") as create:
             app.main(["--voice", "--env-file", os.devnull])
         self.assertEqual(create.call_args.args[0], "vosk")
-        self.assertEqual(create.call_args.kwargs, {"tts": None, "edge_voice": None})
+        self.assertEqual(create.call_args.kwargs, {"tts": None, "edge_voice": None, "pause": None})
         self.assertEqual(chat.call_args.args[2], "VOICE")
 
     def test_main_passes_tts_options(self):
@@ -653,8 +654,8 @@ class VoiceChatTest(unittest.TestCase):
                 mock.patch.object(app, "Assistant"), \
                 mock.patch.object(app, "chat"), \
                 mock.patch.object(voice, "create_voice", return_value="VOICE") as create:
-            app.main(["--voice", "--tts", "system", "--tts-voice", "yunxi", "--env-file", os.devnull])
-        self.assertEqual(create.call_args.kwargs, {"tts": "system", "edge_voice": "yunxi"})
+            app.main(["--voice", "--tts", "system", "--tts-voice", "yunxi", "--pause", "3", "--env-file", os.devnull])
+        self.assertEqual(create.call_args.kwargs, {"tts": "system", "edge_voice": "yunxi", "pause": 3.0})
 
     def test_main_exits_when_voice_unavailable(self):
         env = {"ANTHROPIC_API_KEY": "sk-test"}
@@ -689,10 +690,7 @@ class CleanForSpeechTest(unittest.TestCase):
 
 
 class FakeSR(types.ModuleType):
-    """假的 speech_recognition 模块。"""
-
-    class WaitTimeoutError(Exception):
-        pass
+    """假的 speech_recognition 模块:recognize_google 按顺序返回预设结果。"""
 
     class UnknownValueError(Exception):
         pass
@@ -700,63 +698,190 @@ class FakeSR(types.ModuleType):
     class RequestError(Exception):
         pass
 
-    def __init__(self, results):
+    def __init__(self, results=()):
         super().__init__("speech_recognition")
         self.results = list(results)
+        self.recognized = []
         fake = self
 
-        class AudioSource:
-            pass
+        class AudioData:
+            def __init__(self, frame_data, sample_rate, sample_width):
+                self.args = (frame_data, sample_rate, sample_width)
 
         class Recognizer:
-            pause_threshold = 0.8
-
-            def adjust_for_ambient_noise(self, source, duration=1):
-                fake.calibrated_with = source.stream.read(source.CHUNK)
-
-            def listen(self, source, timeout=None, phrase_time_limit=None):
-                item = fake.results.pop(0)
-                if isinstance(item, fake.WaitTimeoutError):
-                    raise item
-                return item  # 其他异常留到识别时抛出
-
             def recognize_google(self, audio, language=None):
-                fake.language = language
-                if isinstance(audio, Exception):
-                    raise audio
-                return audio
+                fake.recognized.append((audio.args, language))
+                item = fake.results.pop(0)
+                if isinstance(item, Exception):
+                    raise item
+                return item
 
-        self.AudioSource = AudioSource
+        self.AudioData = AudioData
         self.Recognizer = Recognizer
 
 
-class FakeRawInputStream:
-    """假的 sounddevice.RawInputStream,read 返回全零的音频。"""
+def tone(level, frames=1024):
+    """一块音量为 level 的 16 位音频(正负交替,均方根正好是 level)。"""
+    return array.array("h", [level, -level] * (frames // 2)).tobytes()
 
+
+class FakeRawInputStream:
+    """假的 sounddevice.RawInputStream:按 script 里的音量一块一块地返回音频,用完后是静音。"""
+
+    script = []
+    reads = 0
     instances = []
 
     def __init__(self, samplerate, channels, dtype, blocksize):
         self.args = (samplerate, channels, dtype, blocksize)
-        self.started = self.closed = False
+        self.active = self.closed = False
         FakeRawInputStream.instances.append(self)
 
-    def start(self):
-        self.started = True
+    def __enter__(self):
+        self.active = True
+        return self
 
-    def stop(self):
-        pass
-
-    def close(self):
+    def __exit__(self, *exc):
+        self.active = False
         self.closed = True
+        return False
 
     def read(self, frames):
-        return bytearray(frames * 2), False
+        assert self.active, "必须在 with 里读"
+        FakeRawInputStream.reads += 1
+        level = FakeRawInputStream.script.pop(0) if FakeRawInputStream.script else 0
+        return bytearray(tone(level, frames)), False
 
 
 def fake_sounddevice(stream_cls=FakeRawInputStream):
     module = types.ModuleType("sounddevice")
     module.RawInputStream = stream_cls
     return module
+
+
+CALIBRATION_CHUNKS = round(voice.CALIBRATE_SECONDS / voice.CHUNK_SECONDS)
+PAUSE_CHUNKS = round(voice.DEFAULT_PAUSE / voice.CHUNK_SECONDS)
+PRE_ROLL_CHUNKS = round(voice.PRE_ROLL_SECONDS / voice.CHUNK_SECONDS)
+CHUNK_BYTES = voice.CHUNK * 2
+
+
+class ListenerTest(unittest.TestCase):
+    def make(self, script, results=(), key_pressed=lambda: False, **kwargs):
+        FakeRawInputStream.script = [50] * CALIBRATION_CHUNKS + list(script)  # 先是 1 秒环境噪音
+        FakeRawInputStream.reads = 0
+        FakeRawInputStream.instances = []
+        self.sr = FakeSR(results)
+        modules = {"speech_recognition": self.sr, "sounddevice": fake_sounddevice()}
+        self.patcher = mock.patch.dict(sys.modules, modules)
+        self.patcher.start()
+        self.addCleanup(self.patcher.stop)
+        return voice.Listener("google", on_status=lambda t: None, key_pressed=key_pressed, **kwargs)
+
+    def test_short_pause_mid_sentence_does_not_cut_off(self):
+        # 3 块静音,说 10 块,中间想了 20 块(约 1.3 秒),又说 10 块,然后一直安静
+        listener = self.make([0] * 3 + [1000] * 10 + [30] * 20 + [1000] * 10, results=["今天天气怎么样"])
+        self.assertEqual(listener.listen(lambda t: None), "今天天气怎么样")
+
+        (audio, rate, width), language = self.sr.recognized[0]
+        self.assertEqual((rate, width, language), (16000, 2, "zh-CN"))
+        # 开口前保留的 3 块静音 + 两段话 + 中间停顿 + 结尾 2 秒静音
+        expected = 3 + 10 + 20 + 10 + PAUSE_CHUNKS
+        self.assertEqual(len(audio), expected * CHUNK_BYTES)
+        self.assertEqual(audio[3 * CHUNK_BYTES:4 * CHUNK_BYTES], tone(1000))  # 第一个字没被吞掉
+
+    def test_keeps_only_a_short_pre_roll(self):
+        listener = self.make([0] * 50 + [1000] * 5, results=["好"])
+        listener.listen(lambda t: None)
+        audio = self.sr.recognized[0][0][0]
+        self.assertEqual(len(audio), (PRE_ROLL_CHUNKS + 4 + PAUSE_CHUNKS) * CHUNK_BYTES)
+
+    def test_quieter_words_mid_sentence_still_count_as_speech(self):
+        # 说话声音变小(但高于开口门槛的一半)不算停顿
+        listener = self.make([1000] * 5 + [80] * 60 + [1000] * 5, results=["嗯"])
+        listener.listen(lambda t: None)
+        audio = self.sr.recognized[0][0][0]
+        self.assertEqual(len(audio), (5 + 60 + 5 + PAUSE_CHUNKS) * CHUNK_BYTES)
+
+    def test_enter_ends_recording_right_away(self):
+        def key():  # 开口后读到第 5 块时按了回车
+            return FakeRawInputStream.reads >= CALIBRATION_CHUNKS + 5
+
+        listener = self.make([1000] * 500, results=["说完了"], key_pressed=key)
+        self.assertEqual(listener.listen(lambda t: None), "说完了")
+        self.assertEqual(len(self.sr.recognized[0][0][0]), 5 * CHUNK_BYTES)
+
+    def test_enter_before_speaking_cancels(self):
+        listener = self.make([0] * 500, key_pressed=lambda: FakeRawInputStream.reads > CALIBRATION_CHUNKS + 2)
+        self.assertIsNone(listener.listen(lambda t: None))
+        self.assertEqual(self.sr.recognized, [])
+
+    def test_no_speech_times_out(self):
+        listener = self.make([])
+        self.assertIsNone(listener.listen(lambda t: None))
+        self.assertEqual(self.sr.recognized, [])
+        waited = FakeRawInputStream.reads - CALIBRATION_CHUNKS
+        self.assertEqual(waited, round(voice.LISTEN_TIMEOUT / voice.CHUNK_SECONDS))
+
+    def test_pause_setting(self):
+        with mock.patch.dict(os.environ, {"FRIDAY_PAUSE": "3.5"}):
+            self.assertEqual(self.make([]).pause, 3.5)
+            self.assertEqual(self.make([], pause=1.5).pause, 1.5)
+        listener = self.make([1000] * 3 + [0] * 30, results=["短"], pause=1.0)
+        listener.listen(lambda t: None)
+        audio = self.sr.recognized[0][0][0]
+        self.assertEqual(len(audio), (3 + round(1.0 / voice.CHUNK_SECONDS)) * CHUNK_BYTES)
+
+    def test_hint_mentions_pause(self):
+        listener = self.make([])
+        statuses = []
+        listener.listen(statuses.append)
+        self.assertIn("停顿 2 秒", statuses[0])
+
+    def test_calibration_and_stream_settings(self):
+        listener = self.make([])
+        self.assertAlmostEqual(listener.noise, 50)
+        self.assertEqual(listener.start_level, 125)  # 环境噪音 50 的 2.5 倍
+        stream = FakeRawInputStream.instances[0]
+        self.assertEqual(stream.args, (16000, 1, "int16", 1024))
+        self.assertTrue(stream.closed)
+
+    def test_start_level_has_a_floor_and_follows_noise(self):
+        listener = self.make([])
+        listener.noise = 10
+        self.assertEqual(listener.start_level, voice.MIN_START_LEVEL)  # 很安静时也不能太灵敏
+        listener.noise = 400
+        self.assertEqual(listener.start_level, 1000)  # 吵的地方要说大声一点才算开口
+
+    def test_not_understood(self):
+        listener = self.make([1000] * 3, results=[FakeSR.UnknownValueError()])
+        self.assertIsNone(listener.listen(lambda t: None))
+
+    def test_network_error_suggests_vosk(self):
+        listener = self.make([1000] * 3, results=[FakeSR.RequestError("连不上")])
+        with self.assertRaises(voice.VoiceUnavailable) as ctx:
+            listener.listen(lambda t: None)
+        self.assertIn("--stt vosk", str(ctx.exception))
+
+    def test_microphone_unavailable(self):
+        def broken(*a, **k):
+            raise RuntimeError("Error querying device -1")
+
+        modules = {"speech_recognition": FakeSR(), "sounddevice": fake_sounddevice(broken)}
+        with mock.patch.dict(sys.modules, modules):
+            with self.assertRaises(voice.VoiceUnavailable) as ctx:
+                voice.Listener("google", on_status=lambda t: None)
+        self.assertIn("麦克风", str(ctx.exception))
+
+    def test_missing_dependencies(self):
+        for missing in ("sounddevice", "speech_recognition"):
+            modules = {"speech_recognition": FakeSR(), "sounddevice": fake_sounddevice(), missing: None}
+            with mock.patch.dict(sys.modules, modules):
+                with self.assertRaises(voice.VoiceUnavailable):
+                    voice.Listener("google", on_status=lambda t: None)
+
+    def test_rms(self):
+        self.assertEqual(voice.rms(tone(1000)), 1000)
+        self.assertEqual(voice.rms(b""), 0)
 
 
 class FakeEngine:
@@ -1105,56 +1230,10 @@ class VoiceModuleTest(unittest.TestCase):
             self.assertFalse(voice.Speaker().has_chinese_voice)
         self.assertNotIn("voice", engine.props)
 
-    def test_missing_dependencies(self):
-        with mock.patch.dict(sys.modules, {"pyttsx3": None, "speech_recognition": None}):
+    def test_missing_pyttsx3(self):
+        with mock.patch.dict(sys.modules, {"pyttsx3": None}):
             with self.assertRaises(voice.VoiceUnavailable):
                 voice.Speaker()
-            with self.assertRaises(voice.VoiceUnavailable):
-                voice.Listener()
-
-    def test_listener_google(self):
-        sr = FakeSR(["你好星期五", FakeSR.WaitTimeoutError(), FakeSR.UnknownValueError()])
-        with mock.patch.dict(sys.modules, {"speech_recognition": sr, "sounddevice": fake_sounddevice()}):
-            listener = voice.Listener("google", on_status=lambda t: None)
-            self.assertEqual(listener.listen(lambda t: None), "你好星期五")
-            self.assertEqual(sr.language, "zh-CN")
-            self.assertIsNone(listener.listen(lambda t: None))  # 没开口
-            self.assertIsNone(listener.listen(lambda t: None))  # 没听清
-
-    def test_listener_network_error_suggests_vosk(self):
-        sr = FakeSR([FakeSR.RequestError("连不上")])
-        with mock.patch.dict(sys.modules, {"speech_recognition": sr, "sounddevice": fake_sounddevice()}):
-            listener = voice.Listener("google", on_status=lambda t: None)
-            with self.assertRaises(voice.VoiceUnavailable) as ctx:
-                listener.listen(lambda t: None)
-        self.assertIn("--stt vosk", str(ctx.exception))
-
-    def test_microphone_records_16bit_mono_and_closes(self):
-        FakeRawInputStream.instances.clear()
-        sr = FakeSR([])
-        with mock.patch.dict(sys.modules, {"speech_recognition": sr, "sounddevice": fake_sounddevice()}):
-            listener = voice.Listener("google", on_status=lambda t: None)
-        self.assertIsInstance(listener.microphone, sr.AudioSource)
-        self.assertEqual(sr.calibrated_with, bytes(1024 * 2))  # 校准时读到了一块音频
-        stream = FakeRawInputStream.instances[0]
-        self.assertEqual(stream.args, (16000, 1, "int16", 1024))
-        self.assertTrue(stream.started and stream.closed)
-        self.assertIsNone(listener.microphone.stream)
-
-    def test_microphone_unavailable(self):
-        def broken(*a, **k):
-            raise RuntimeError("Error querying device -1")
-
-        modules = {"speech_recognition": FakeSR([]), "sounddevice": fake_sounddevice(broken)}
-        with mock.patch.dict(sys.modules, modules):
-            with self.assertRaises(voice.VoiceUnavailable) as ctx:
-                voice.Listener("google", on_status=lambda t: None)
-        self.assertIn("麦克风", str(ctx.exception))
-
-    def test_missing_sounddevice(self):
-        with mock.patch.dict(sys.modules, {"speech_recognition": FakeSR([]), "sounddevice": None}):
-            with self.assertRaises(voice.VoiceUnavailable):
-                voice.Listener("google", on_status=lambda t: None)
 
     def test_vosk_model_already_downloaded(self):
         with tempfile.TemporaryDirectory() as d:
