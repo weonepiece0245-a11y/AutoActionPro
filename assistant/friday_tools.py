@@ -1,0 +1,297 @@
+"""“星期五”的能力:长期记忆、联网搜索、执行命令、读写文件。
+
+记忆保存在本地 JSON 文件里(默认 assistant/friday_memory.json,不会提交到 Git)。
+执行命令和写文件之前都会先征得用户同意。
+"""
+
+from __future__ import annotations
+
+import datetime
+import json
+import locale
+import os
+import platform
+import subprocess
+from pathlib import Path
+from typing import Callable
+
+MAX_FACTS = 300
+MAX_FACT_CHARS = 500
+MAX_OUTPUT_CHARS = 20000
+MAX_READ_CHARS = 100000
+COMMAND_TIMEOUT = 120  # 秒
+
+Approver = Callable[[str], bool]
+StatusFn = Callable[[str], None]
+
+
+class Memory:
+    """星期五对用户的长期记忆:一条条事实,保存在 JSON 文件里。"""
+
+    def __init__(self, path: str | os.PathLike) -> None:
+        self.path = Path(path)
+        self.facts: list[dict] = self._load()
+
+    def _load(self) -> list[dict]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return []
+        except (OSError, ValueError):
+            # 文件损坏时先备份,避免下次保存时把旧记忆覆盖掉
+            backup = self.path.with_name(self.path.name + ".broken")
+            try:
+                os.replace(self.path, backup)
+            except OSError:
+                pass
+            return []
+        facts = data.get("facts") if isinstance(data, dict) else None
+        if not isinstance(facts, list):
+            return []
+        return [f for f in facts if isinstance(f, dict) and isinstance(f.get("text"), str)]
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(json.dumps({"facts": self.facts}, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, self.path)  # 先写临时文件再替换,中途断电也不会写坏
+
+    def add(self, text: str, today: datetime.date | None = None) -> str:
+        text = " ".join(text.split())
+        if not text:
+            raise ValueError("要记住的内容是空的")
+        if len(text) > MAX_FACT_CHARS:
+            raise ValueError(f"单条记忆最多 {MAX_FACT_CHARS} 个字,请精简后再记")
+        if any(f["text"] == text for f in self.facts):
+            return f"已经记得了:{text}"
+        if len(self.facts) >= MAX_FACTS:
+            raise ValueError(f"记忆已满({MAX_FACTS} 条),请先用 forget 删掉过时的内容")
+        day = (today or datetime.date.today()).isoformat()
+        self.facts.append({"text": text, "added": day})
+        self.save()
+        return f"已记住:{text}"
+
+    def forget(self, keyword: str) -> list[str]:
+        keyword = keyword.strip()
+        if not keyword:
+            return []
+        removed = [f["text"] for f in self.facts if keyword in f["text"]]
+        if removed:
+            self.facts = [f for f in self.facts if keyword not in f["text"]]
+            self.save()
+        return removed
+
+    def as_prompt(self) -> str:
+        if not self.facts:
+            return "(还没有任何记忆。这是你们刚认识的时候,可以在合适时机自然地了解对方。)"
+        return "\n".join(f"- {f['text']}(记于 {f.get('added', '?')})" for f in self.facts)
+
+
+def _decode(data: bytes) -> str:
+    """命令输出可能是 UTF-8,也可能是系统编码(中文 Windows 上是 GBK)。"""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode(locale.getpreferredencoding(False), errors="replace")
+
+
+def _truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n……(内容太长,只保留了前 {limit} 个字符)"
+
+
+def describe_computer(workdir: Path) -> str:
+    system = platform.system() or "未知系统"
+    shell = "cmd.exe" if os.name == "nt" else os.environ.get("SHELL", "/bin/sh")
+    return f"{system} {platform.release()},命令通过 {shell} 执行,默认工作目录 {workdir}"
+
+
+SERVER_TOOLS = [
+    {"type": "web_search_20260209", "name": "web_search"},
+    {"type": "web_fetch_20260209", "name": "web_fetch"},
+]
+
+CLIENT_TOOLS = [
+    {
+        "name": "remember",
+        "description": (
+            "把关于用户的一条长期信息存进记忆,下次对话还能用上。"
+            "当用户透露了值得长期记住的事时就调用,不必等用户要求:"
+            "称呼、职业和工作内容、所在城市、家人和朋友、兴趣爱好、饮食和作息习惯、"
+            "喜欢的回答风格、长期目标、正在推进的项目、重要日期等。"
+            "每次只记一件事,用简短完整的一句话。"
+            "不要记密码、密钥、验证码、身份证号、银行卡号这类敏感信息,也不要记一次性的闲聊内容。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"fact": {"type": "string", "description": "要记住的一句话,例如“用户在上海做产品经理”"}},
+            "required": ["fact"],
+        },
+    },
+    {
+        "name": "forget",
+        "description": "删除记忆中包含某个关键词的条目。用户要求忘掉某件事,或某条记忆已经过时、有误时调用。",
+        "input_schema": {
+            "type": "object",
+            "properties": {"keyword": {"type": "string", "description": "要删除的记忆里包含的关键词"}},
+            "required": ["keyword"],
+        },
+    },
+    {
+        "name": "run_command",
+        "description": (
+            "在用户自己的电脑上执行一条终端命令并返回输出,例如查看文件、整理文件夹、运行脚本、"
+            "查询系统信息、打开程序或网页。每次执行前用户都会看到命令并决定是否允许。"
+            "命令要符合用户电脑的系统和 shell;不要执行删除重要数据、格式化磁盘之类不可逆的危险操作,"
+            "确实需要时先在回答里说明风险。需要交互输入的命令无法使用。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "要执行的完整命令"},
+                "reason": {"type": "string", "description": "用一句话告诉用户为什么要执行它"},
+            },
+            "required": ["command", "reason"],
+        },
+    },
+    {
+        "name": "read_file",
+        "description": "读取用户电脑上的一个文本文件。用户提到某个文件、让你看看它的内容时调用。相对路径相对于默认工作目录。",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "文件路径"}},
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "write_file",
+        "description": (
+            "在用户电脑上创建或覆盖一个文本文件,例如保存写好的文章、清单、脚本。"
+            "写入前用户会确认。相对路径相对于默认工作目录。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "文件路径"},
+                "content": {"type": "string", "description": "文件的完整内容"},
+            },
+            "required": ["path", "content"],
+        },
+    },
+]
+
+# 请求是流式的,让较长的工具参数(例如文件内容)边生成边传输;参数在执行前会自己校验
+for _tool in CLIENT_TOOLS:
+    _tool["eager_input_streaming"] = True
+
+SERVER_TOOL_LABELS = {"web_search": ("搜索", "query"), "web_fetch": ("读取网页", "url")}
+
+
+class Toolbox:
+    """定义星期五能用的工具,并负责执行用户电脑上的那部分。"""
+
+    def __init__(
+        self,
+        memory: Memory,
+        approve: Approver,
+        workdir: str | os.PathLike | None = None,
+        web: bool = True,
+    ) -> None:
+        self.memory = memory
+        self.approve = approve
+        self.workdir = Path(workdir) if workdir is not None else Path.home()
+        self.web = web
+        self._handlers = {
+            "remember": self._remember,
+            "forget": self._forget,
+            "run_command": self._run_command,
+            "read_file": self._read_file,
+            "write_file": self._write_file,
+        }
+
+    def definitions(self) -> list[dict]:
+        return (SERVER_TOOLS if self.web else []) + CLIENT_TOOLS
+
+    def describe(self) -> str:
+        return describe_computer(self.workdir)
+
+    def run(self, block, on_status: StatusFn) -> dict:
+        """执行一个 tool_use 块,返回对应的 tool_result。"""
+        result = {"type": "tool_result", "tool_use_id": block.id}
+        handler = self._handlers.get(block.name)
+        if handler is None:
+            return {**result, "content": f"没有名为 {block.name} 的工具", "is_error": True}
+
+        args = block.input
+        spec = next(t for t in CLIENT_TOOLS if t["name"] == block.name)["input_schema"]
+        if not isinstance(args, dict) or not all(isinstance(args.get(k), str) for k in spec["required"]):
+            bad = json.dumps(args, ensure_ascii=False, default=str)
+            return {**result, "content": json.dumps({"INVALID_JSON": bad}, ensure_ascii=False), "is_error": True}
+
+        try:
+            content, is_error = handler(args, on_status)
+        except Exception as e:  # 工具出错时把原因告诉模型,让它换个办法
+            content, is_error = f"出错了:{type(e).__name__}: {e}", True
+        result["content"] = content
+        if is_error:
+            result["is_error"] = True
+        return result
+
+    # ---- 各个工具 ----
+
+    def _remember(self, args, on_status):
+        message = self.memory.add(args["fact"])
+        on_status(f"记住了:{args['fact']}")
+        return message, False
+
+    def _forget(self, args, on_status):
+        removed = self.memory.forget(args["keyword"])
+        if not removed:
+            return f"记忆里没有包含“{args['keyword']}”的内容", False
+        on_status("忘掉了:" + ";".join(removed))
+        return "已删除:" + ";".join(removed), False
+
+    def _resolve(self, path: str) -> Path:
+        p = Path(os.path.expandvars(os.path.expanduser(path)))
+        return (p if p.is_absolute() else self.workdir / p).resolve()
+
+    def _run_command(self, args, on_status):
+        command = args["command"]
+        if not self.approve(f"执行命令:{command}\n  目的:{args['reason']}"):
+            return "用户没有允许执行这条命令。", True
+        on_status(f"执行命令:{command}")
+        try:
+            proc = subprocess.run(
+                command,
+                shell=True,
+                cwd=self.workdir,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=COMMAND_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            return f"命令超过 {COMMAND_TIMEOUT} 秒没有结束,已停止。", True
+        output = f"退出码:{proc.returncode}\n{_decode(proc.stdout)}"
+        stderr = _decode(proc.stderr)
+        if stderr.strip():
+            output += f"\n[错误输出]\n{stderr}"
+        return _truncate(output, MAX_OUTPUT_CHARS), proc.returncode != 0
+
+    def _read_file(self, args, on_status):
+        path = self._resolve(args["path"])
+        on_status(f"读取文件:{path}")
+        data = path.read_bytes()
+        if b"\0" in data[:8000]:
+            return f"{path} 看起来不是文本文件,无法直接读取。", True
+        return _truncate(_decode(data), MAX_READ_CHARS), False
+
+    def _write_file(self, args, on_status):
+        path = self._resolve(args["path"])
+        action = "覆盖文件" if path.exists() else "新建文件"
+        if not self.approve(f"{action}:{path}({len(args['content'])} 个字符)"):
+            return "用户没有允许写入这个文件。", True
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(args["content"], encoding="utf-8")
+        on_status(f"已保存:{path}")
+        return f"已写入 {path}", False

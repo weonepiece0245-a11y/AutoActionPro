@@ -20,3 +20,6 @@ debug.keystore
 # Python
 __pycache__/
 .venv/
+
+# 星期五的记忆(个人信息,不要提交)
+assistant/friday_memory.json*
