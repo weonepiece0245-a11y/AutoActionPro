@@ -67,6 +67,7 @@ tools = sys.modules["friday_tools"]  # assistant.py 加载时已导入
 daily = sys.modules["friday_daily"]
 pcmod = sys.modules["friday_pc"]
 gmod = sys.modules["friday_google"]
+dmod = sys.modules["friday_discord"]
 import voice  # noqa: E402  assistant.py 已把所在目录加入 sys.path
 
 
@@ -2562,6 +2563,153 @@ class ConsoleConfirmTest(unittest.TestCase):
         with mock.patch("builtins.input", side_effect=["n", "y"]), mock.patch("builtins.print"):
             self.assertFalse(approver.confirm("发送邮件"))
             self.assertTrue(approver.confirm("发送邮件"))
+
+
+FAKE_TOKEN = base64.b64encode(b"123456789012345678").decode().rstrip("=") + ".GaBcDe.secretpart_xyz"
+
+
+class DiscordHelpersTest(TempDirTest):
+    def test_split_message(self):
+        self.assertEqual(dmod.split_message("短"), ["短"])
+        long = "\n".join("第%d行" % i + "字" * 50 for i in range(100))
+        parts = dmod.split_message(long, limit=500)
+        self.assertTrue(all(len(p) <= 500 for p in parts))
+        self.assertEqual("\n".join(parts), long)  # 在换行处切开,内容不丢
+        self.assertEqual(dmod.split_message("x" * 1200, limit=500), ["x" * 500, "x" * 500, "x" * 200])
+
+    def test_bot_id_and_invite(self):
+        self.assertEqual(dmod.bot_id_from_token(FAKE_TOKEN), "123456789012345678")
+        self.assertIsNone(dmod.bot_id_from_token("not-a-token"))
+        self.assertIn("client_id=123456789012345678", dmod.invite_url("123456789012345678"))
+
+    def test_save_env_value_replaces_existing_line(self):
+        env = Path(self.tmp, ".env")
+        env.write_text("ANTHROPIC_API_KEY=sk-1\nFRIDAY_DISCORD_TOKEN=old\n", encoding="utf-8-sig")
+        dmod.save_env_value(env, "FRIDAY_DISCORD_TOKEN", "new")
+        self.assertEqual(env.read_text(encoding="utf-8"), "ANTHROPIC_API_KEY=sk-1\nFRIDAY_DISCORD_TOKEN=new\n")
+
+    def test_setup_saves_token_and_opens_invite(self):
+        Path(self.tmp, "friday_discord.json").write_text('{"owner_id": 1}')
+        opened = []
+        with mock.patch("builtins.print"):
+            code = dmod.setup(self.tmp, ask=lambda prompt: f'  "{FAKE_TOKEN}" ', open_url=opened.append)
+        self.assertEqual(code, 0)
+        self.assertIn(f"FRIDAY_DISCORD_TOKEN={FAKE_TOKEN}", Path(self.tmp, ".env").read_text(encoding="utf-8"))
+        self.assertIn("client_id=123456789012345678", opened[0])
+        self.assertFalse(Path(self.tmp, "friday_discord.json").exists())  # 换机器人要重新配对
+
+    def test_setup_rejects_bad_token(self):
+        with mock.patch("builtins.print"):
+            self.assertEqual(dmod.setup(self.tmp, ask=lambda p: "随便写的", open_url=lambda u: None), 1)
+        self.assertFalse(Path(self.tmp, ".env").exists())
+
+
+class DiscordGateTest(TempDirTest):
+    def make(self):
+        self.sent = []
+        self.events = queue.Queue()
+        self.statuses = []
+        return dmod.DiscordGate(Path(self.tmp, "discord.json"), self.events,
+                                lambda channel, text: self.sent.append((channel, text)), self.statuses.append)
+
+    def test_pairing(self):
+        gate = self.make()
+        code = gate.pair_code
+        self.assertRegex(code, r"^\d{6}$")
+        gate.handle(42, "me", True, "你好", "dm")
+        self.assertIn("配对码", self.sent[-1][1])
+        gate.handle(42, "me", True, code, "dm")
+        self.assertEqual(gate.owner_id, 42)
+        self.assertIn("配对成功", self.sent[-1][1])
+        self.assertIsNone(self.make().pair_code)  # 重新打开也记得主人
+        self.assertTrue(self.events.empty())
+
+    def test_only_owner_in_dms_reaches_friday(self):
+        Path(self.tmp, "discord.json").write_text('{"owner_id": 42}')
+        gate = self.make()
+        gate.handle(99, "stranger", True, "帮我关机", "dm")
+        gate.handle(42, "me", False, "在群里说的话", "channel")
+        self.assertTrue(self.events.empty())
+        self.assertEqual(self.sent, [])
+        self.assertIn("stranger", self.statuses[0])
+        gate.handle(42, "me", True, "  明天天气怎么样 ", "dm")
+        kind, message = self.events.get_nowait()
+        self.assertEqual((kind, message.text), ("discord", "明天天气怎么样"))
+        message.reply("晴天")
+        self.assertEqual(self.sent[-1], ("dm", "晴天"))
+
+    def test_ask_waits_for_owner_reply(self):
+        Path(self.tmp, "discord.json").write_text('{"owner_id": 42}')
+        gate = self.make()
+        threading.Timer(0.05, lambda: gate.handle(42, "me", True, "Y", "dm")).start()
+        self.assertTrue(gate.ask("dm", "星期五请求关机", timeout=2))
+        self.assertIn("回复 y 允许", self.sent[0][1])
+        self.assertTrue(self.events.empty())  # 回答没有被当成新问题
+        threading.Timer(0.05, lambda: gate.handle(42, "me", True, "不要", "dm")).start()
+        self.assertFalse(gate.ask("dm", "星期五请求关机", timeout=2))
+
+    def test_ask_times_out_as_refusal(self):
+        Path(self.tmp, "discord.json").write_text('{"owner_id": 42}')
+        gate = self.make()
+        self.assertFalse(gate.ask("dm", "星期五请求关机", timeout=0.05))
+        self.assertIn("已取消", self.sent[-1][1])
+        self.assertFalse(gate.waiting)
+
+
+class DiscordChatTest(TempDirTest):
+    def test_answer_goes_back_to_discord_and_approvals_go_remote(self):
+        approver = app.ConsoleApprover()
+        asked = []
+        toolbox = self.make_toolbox(approve=approver)
+        client = FakeClient(
+            FakeStream([], stop_reason="tool_use", blocks=[tool_use("run_command", {"command": "echo hi", "reason": "测试"})]),
+            FakeStream(["做好了"]),
+        )
+        bot = app.Assistant(client=client, toolbox=toolbox)
+        replies = []
+        message = dmod.DiscordMessage("帮我跑个命令", reply=replies.append,
+                                      ask=lambda q: asked.append(q) or False)
+        events = queue.Queue()
+        events.put(("discord", message))
+        voice_mock = FakeVoice()
+        with mock.patch("builtins.input", side_effect=["/exit"]), mock.patch("builtins.print"):
+            app.chat(bot, None, voice_mock, events)
+        self.assertEqual(replies, ["做好了"])
+        self.assertIn("echo hi", asked[0])  # 确认请求发到了 Discord,而不是在电脑上问
+        self.assertIsNone(approver.remote)  # 处理完恢复
+        self.assertEqual(client.calls[0]["messages"][0]["content"], "[来自手机 Discord]帮我跑个命令")
+        self.assertNotIn("做好了", voice_mock.spoken)  # 手机上的问答不在电脑上读出来
+
+    def test_errors_are_reported_to_discord(self):
+        client = FakeClient(FakeStream([], error=anthropic.APIConnectionError("断网")))
+        bot = app.Assistant(client=client)
+        replies = []
+        message = dmod.DiscordMessage("你好", reply=replies.append, ask=lambda q: False)
+        with mock.patch("builtins.print"):
+            self.assertTrue(app.handle_discord(message, bot, app.default_persona()))
+        self.assertIn("网络连接失败", replies[0])
+
+    def make_toolbox(self, approve):
+        return tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m.json")), approve, workdir=self.tmp)
+
+    def test_console_approver_routes_to_remote(self):
+        approver = app.ConsoleApprover()
+        approver.allow_all = True
+        approver.remote = mock.Mock(return_value=False)
+        self.assertFalse(approver("关机"))  # 远程时不受“本次都允许”影响
+        self.assertFalse(approver.confirm("发送邮件"))
+        self.assertIn("每次都要确认", approver.remote.call_args.args[0])
+
+    def test_main_starts_discord_only_with_token(self):
+        env = {"ANTHROPIC_API_KEY": "sk-test", "FRIDAY_MEMORY_FILE": os.path.join(self.tmp, "m.json")}
+        for token, expected in (("", 0), (FAKE_TOKEN, 1)):
+            with mock.patch.dict(os.environ, {**env, "FRIDAY_DISCORD_TOKEN": token}, clear=True), \
+                    mock.patch.object(app, "Assistant"), mock.patch.object(app, "ReminderScheduler"), \
+                    mock.patch.object(app, "DiscordBridge") as bridge, mock.patch.object(app, "chat"):
+                app.main(["--persona", "friday", "--env-file", os.devnull])
+            self.assertEqual(bridge.return_value.start.call_count, expected)
+        self.assertEqual(bridge.call_args.args[0], FAKE_TOKEN)
+        self.assertEqual(str(bridge.call_args.args[2]), os.path.join(self.tmp, "friday_discord.json"))
 
 
 if __name__ == "__main__":

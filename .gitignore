@@ -28,6 +28,7 @@ assistant/friday_todos.json*
 # Google 授权文件(含密钥,绝对不能提交)
 assistant/credentials.json
 assistant/google_token.json
+assistant/friday_discord.json
 
 # 离线语音识别模型(首次使用时自动下载)
 assistant/models/

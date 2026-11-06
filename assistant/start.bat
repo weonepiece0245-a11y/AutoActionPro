@@ -9,7 +9,7 @@ if not defined PY python --version >nul 2>nul && set "PY=python"
 if not defined PY goto no_python
 
 rem ---- 2. Install dependencies on first run ----
-%PY% -c "import anthropic, PIL, googleapiclient, google_auth_oauthlib" >nul 2>nul
+%PY% -c "import anthropic, PIL, googleapiclient, google_auth_oauthlib, discord" >nul 2>nul
 if not errorlevel 1 goto deps_ok
 echo First run: installing dependencies, please wait...
 %PY% -m pip install -r requirements.txt
