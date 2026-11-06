@@ -15,16 +15,8 @@ import subprocess
 from pathlib import Path
 from typing import Callable
 
-from friday_daily import (
-    COMPUTER_ACTIONS,
-    KINDS,
-    REPEATS,
-    Computer,
-    Reminders,
-    Todos,
-    describe_reminder,
-    describe_todo,
-)
+from friday_daily import KINDS, REPEATS, Reminders, Todos, describe_reminder, describe_todo
+from friday_pc import COMPUTER_ACTIONS, CONTROL_ACTIONS, Computer, NeedsUser, ScreenControl
 
 MAX_FACTS = 300
 MAX_FACT_CHARS = 500
@@ -239,22 +231,64 @@ TODO_TOOL = {
 COMPUTER_TOOL = {
     "name": "computer",
     "description": (
-        "直接操作用户的 Windows 电脑,不需要用户确认:"
+        "一句话就能完成的电脑操作(Windows)。标明“需要用户确认”的会先问用户,其余直接做:"
         + ";".join(f"{k}={v}" for k, v in COMPUTER_ACTIONS.items())
-        + "。这些操作优先用这个工具,不要用 run_command。"
+        + "。这些事优先用这个工具,不要用 run_command,也不要用鼠标键盘去点。"
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": list(COMPUTER_ACTIONS)},
-            "value": {"type": "string", "description": "部分操作需要:百分比、文字、程序名或网址"},
+            "value": {"type": "string", "description": "部分操作需要:百分比、文字、程序名、游戏名、路径、网址或分钟数"},
+            "ext": {"type": "string", "description": "find_files 可选:扩展名,如 pdf"},
+            "days": {"type": "integer", "description": "find_files 可选:只找最近几天修改过的"},
+        },
+        "required": ["action"],
+    },
+}
+
+SCREEN_TOOL = {
+    "name": "screen",
+    "description": (
+        "看用户主屏幕上现在显示的内容(截图给你看)。用户让你看屏幕、问屏幕上的报错/内容是什么意思,"
+        "或者在用 control 操作鼠标键盘前后需要看清界面时调用。不要在用户没要求时随便看。"
+    ),
+    "input_schema": {"type": "object", "properties": {}, "required": []},
+}
+
+CONTROL_TOOL = {
+    "name": "control",
+    "description": (
+        "控制用户的鼠标和键盘,用来完成必须在界面上点来点去才能做的事。规则:"
+        "1) 能用 computer 工具、命令或文件读写做到的,不要用鼠标键盘;"
+        "2) 先用 screen 看屏幕,坐标按最近一张截图的像素给出;做几步就再看一次确认结果;"
+        "3) 每个问题第一次接管会征求用户同意,reason 里写清楚要做什么;用户一动鼠标就会停止,停了要先问用户;"
+        "4) 点击“发送、提交、购买、付款、删除、确认订单”这类不能撤销的按钮,或按会关闭/删除东西的键时,irreversible 设为 true;"
+        "5) 绝不输入密码、验证码、银行卡等敏感信息,需要登录或付款时请用户自己来。"
+        "操作:" + ";".join(f"{k}={v}" for k, v in CONTROL_ACTIONS.items())
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": list(CONTROL_ACTIONS)},
+            "x": {"type": "number"},
+            "y": {"type": "number"},
+            "x2": {"type": "number", "description": "drag 的终点"},
+            "y2": {"type": "number", "description": "drag 的终点"},
+            "button": {"type": "string", "enum": ["left", "right", "middle"]},
+            "clicks": {"type": "integer", "description": "2 为双击"},
+            "text": {"type": "string", "description": "type 要输入的文字"},
+            "keys": {"type": "string", "description": "key 要按的键,如 enter、ctrl+v、alt+tab"},
+            "amount": {"type": "number", "description": "scroll 的格数,或 wait 的秒数"},
+            "irreversible": {"type": "boolean", "description": "这一步不能撤销时设为 true,会再请用户确认"},
+            "reason": {"type": "string", "description": "这一步(或整个操作)是为了什么,会给用户看"},
         },
         "required": ["action"],
     },
 }
 
 # 请求是流式的,让较长的工具参数(例如文件内容)边生成边传输;参数在执行前会自己校验
-for _tool in CLIENT_TOOLS + [REMINDER_TOOL, TODO_TOOL, COMPUTER_TOOL]:
+for _tool in CLIENT_TOOLS + [REMINDER_TOOL, TODO_TOOL, COMPUTER_TOOL, SCREEN_TOOL, CONTROL_TOOL]:
     _tool["eager_input_streaming"] = True
 
 UNATTENDED_REFUSAL = (
@@ -277,6 +311,7 @@ class Toolbox:
         reminders: Reminders | None = None,
         todos: Todos | None = None,
         computer: Computer | None = None,
+        screen: ScreenControl | None = None,
     ) -> None:
         self.memory = memory
         self.approve = approve
@@ -285,6 +320,7 @@ class Toolbox:
         self.reminders = reminders
         self.todos = todos
         self.computer = computer
+        self.screen = screen
         self.unattended = False  # 定时任务执行期间为 True:需要确认的操作一律不做
         self._handlers = {
             "remember": self._remember,
@@ -295,6 +331,8 @@ class Toolbox:
             "reminder": self._reminder,
             "todo": self._todo,
             "computer": self._computer,
+            "screen": self._screen,
+            "control": self._control,
         }
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
 
@@ -306,10 +344,19 @@ class Toolbox:
             tools = tools + [TODO_TOOL]
         if self.computer is not None and self.computer.available:
             tools = tools + [COMPUTER_TOOL]
+        if self.screen is not None and self.screen.available:
+            tools = tools + [SCREEN_TOOL, CONTROL_TOOL]
         return tools
 
+    def begin_turn(self) -> None:
+        """每个新问题开始时调用。"""
+        if self.screen is not None:
+            self.screen.begin_turn()
+
     def _approved(self, action: str) -> bool:
-        return not self.unattended and self.approve(action)
+        if self.unattended:
+            raise NeedsUser(UNATTENDED_REFUSAL)
+        return self.approve(action)
 
     def describe(self) -> str:
         return describe_computer(self.workdir)
@@ -329,6 +376,8 @@ class Toolbox:
 
         try:
             content, is_error = handler(args, on_status)
+        except NeedsUser as e:  # 用户拒绝或接管了,原话告诉模型
+            content, is_error = str(e), True
         except Exception as e:  # 工具出错时把原因告诉模型,让它换个办法
             content, is_error = f"出错了:{type(e).__name__}: {e}", True
         result["content"] = content
@@ -449,6 +498,27 @@ class Toolbox:
 
     def _computer(self, args, on_status):
         action = args["action"]
-        result = self.computer.do(action, args.get("value") or "")
-        on_status(result if action != "read_clipboard" else "读取了剪贴板")
+        days = args.get("days")
+        result = self.computer.do(
+            action,
+            str(args.get("value") or ""),
+            approve=self._approved,
+            ext=str(args.get("ext") or ""),
+            days=int(days) if isinstance(days, (int, float)) else 0,
+        )
+        quiet = action in ("read_clipboard", "system_status", "list_windows", "find_files", "audio_devices")
+        on_status(result if not quiet else f"电脑操作:{action}")
+        return result, False
+
+    def _screen(self, args, on_status):
+        if self.unattended:
+            return UNATTENDED_REFUSAL, True
+        on_status("看了一眼屏幕")
+        return self.screen.look(), False
+
+    def _control(self, args, on_status):
+        if self.unattended:
+            return UNATTENDED_REFUSAL, True
+        result = self.screen.act(args, self._approved)
+        on_status(result)
         return result, False

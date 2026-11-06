@@ -4,8 +4,10 @@
 """
 
 import array
+import base64
 import datetime
 import importlib.util
+import json
 import os
 import queue
 import sys
@@ -13,6 +15,7 @@ import tempfile
 import threading
 import types
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -62,6 +65,7 @@ _spec.loader.exec_module(app)
 
 tools = sys.modules["friday_tools"]  # assistant.py 加载时已导入
 daily = sys.modules["friday_daily"]
+pcmod = sys.modules["friday_pc"]
 import voice  # noqa: E402  assistant.py 已把所在目录加入 sys.path
 
 
@@ -1447,13 +1451,43 @@ class TodosTest(TempDirTest):
             self.make().add("  ")
 
 
+class FakeImage:
+    def __init__(self, size):
+        self.size = size
+        self.saved = []
+
+    def resize(self, size):
+        return FakeImage(size)
+
+    def convert(self, mode):
+        return self
+
+    def save(self, target, format=None, quality=None):
+        self.saved.append((target, format))
+        if hasattr(target, "write"):
+            target.write(b"JPEGDATA")
+
+
 class FakePC:
-    def __init__(self, outputs=None):
+    """假的 Windows:记录所有调用。"""
+
+    def __init__(self, outputs=None, folders=None, steam=None, windows=(), screen=(1920, 1080)):
         self.calls = []
         self.outputs = outputs or {}
+        self.folders = folders or {}
+        self.steam = steam
+        self._windows = list(windows)
+        self.screen = screen
+        self.pos = (0, 0)
 
     def press(self, vk, times=1):
         self.calls.append(("press", vk, times))
+
+    def hotkey(self, codes):
+        self.calls.append(("hotkey", codes))
+
+    def type_text(self, text):
+        self.calls.append(("type", text))
 
     def lock(self):
         self.calls.append(("lock",))
@@ -1462,17 +1496,57 @@ class FakePC:
         self.calls.append(("ps", script, stdin, env))
         for key, value in self.outputs.items():
             if key in script:
-                return value
+                return value(env) if callable(value) else value
         return 0, ""
+
+    def run(self, args):
+        self.calls.append(("run", args))
+        return self.outputs.get("run", (0, ""))
 
     def open(self, target):
         self.calls.append(("open", target))
 
+    def known_folder(self, name):
+        return Path(self.folders.get(name, f"/nonexistent/{name}"))
+
+    def steam_root(self):
+        return self.steam
+
+    def windows(self):
+        return self._windows
+
+    def focus(self, hwnd):
+        self.calls.append(("focus", hwnd))
+
+    def set_wallpaper(self, path):
+        self.calls.append(("wallpaper", path))
+
+    def grab_screen(self, all_screens=False):
+        self.calls.append(("grab", all_screens))
+        return FakeImage(self.screen)
+
+    def cursor(self):
+        return self.pos
+
+    def move(self, x, y):
+        self.pos = (x, y)
+        self.calls.append(("move", x, y))
+
+    def mouse_button(self, button, down):
+        self.calls.append(("button", button, down))
+
+    def scroll(self, clicks, horizontal=False):
+        self.calls.append(("scroll", clicks))
+
+    def sleep(self, seconds):
+        pass
+
 
 class ComputerTest(TempDirTest):
-    def make(self, **outputs):
-        self.pc = FakePC(outputs)
-        return daily.Computer(self.pc, pictures_dir=self.tmp, clock=FixedClock("2026-11-07 08:00"))
+    def make(self, **kwargs):
+        outputs = kwargs.pop("outputs", {})
+        self.pc = FakePC(outputs, **kwargs)
+        return pcmod.Computer(self.pc, pictures_dir=self.tmp, clock=FixedClock("2026-11-07 08:00"))
 
     def test_volume(self):
         pc = self.make()
@@ -1480,31 +1554,182 @@ class ComputerTest(TempDirTest):
         self.assertEqual(pc.do("volume_down"), "已调低音量约 10%")
         self.assertEqual(self.pc.calls, [("press", 0xAF, 10), ("press", 0xAE, 5)])
 
-    def test_media_and_lock(self):
+    def test_media_lock_and_desktop(self):
         pc = self.make()
         pc.do("play_pause")
         pc.do("next_track")
         pc.do("lock_screen")
-        self.assertEqual(self.pc.calls, [("press", 0xB3, 1), ("press", 0xB0, 1), ("lock",)])
+        pc.do("show_desktop")
+        self.assertEqual(self.pc.calls, [("press", 0xB3, 1), ("press", 0xB0, 1), ("lock",), ("hotkey", [0x5B, ord("D")])])
 
-    def test_screenshot_path(self):
+    def test_screenshot_saves_all_screens(self):
         result = self.make().do("screenshot")
-        expected = os.path.join(self.tmp, "截图_20261107_080000.png")
-        self.assertIn(expected, result)
-        self.assertEqual(self.pc.calls[0][3], {"FRIDAY_SHOT_PATH": expected})
+        self.assertIn(os.path.join(self.tmp, "截图_20261107_080000.png"), result)
+        self.assertEqual(self.pc.calls[0], ("grab", True))
 
     def test_clipboard(self):
-        pc = self.make(**{"Get-Clipboard": (0, "复制的文字")})
+        pc = self.make(outputs={"Get-Clipboard": (0, "复制的文字")})
         self.assertIn("复制的文字", pc.do("read_clipboard"))
-        pc.do("write_clipboard", "要复制的\"内容\"")
-        self.assertEqual(self.pc.calls[-1][2], "要复制的\"内容\"")  # 通过标准输入传,不拼进命令
+        pc.do("write_clipboard", '要复制的"内容"')
+        self.assertEqual(self.pc.calls[-1][2], '要复制的"内容"')  # 通过标准输入传,不拼进命令
 
     def test_open_app(self):
-        pc = self.make(**{"Get-StartApps": (0, "Discord")})
+        pc = self.make(outputs={"Get-StartApps": (0, "Discord")})
         self.assertEqual(pc.do("open_app", "discord"), "已打开 Discord")
         self.assertEqual(self.pc.calls[0][3], {"FRIDAY_APP_NAME": "discord"})
-        not_found = self.make(**{"Get-StartApps": (3, "")})
+        not_found = self.make(outputs={"Get-StartApps": (3, "")})
         self.assertIn("没有找到", not_found.do("open_app", "不存在的程序"))
+
+    def make_steam(self):
+        root = Path(self.tmp) / "Steam"
+        other = Path(self.tmp) / "Games" / "SteamLibrary"
+        (root / "steamapps").mkdir(parents=True)
+        (other / "steamapps").mkdir(parents=True)
+        (root / "steamapps" / "libraryfolders.vdf").write_text(
+            '"libraryfolders"\n{\n "0" { "path" "%s" }\n "1" { "path" "%s" }\n}' % (
+                str(root).replace("\\", "\\\\"), str(other).replace("\\", "\\\\")), encoding="utf-8")
+        (root / "steamapps" / "appmanifest_570.acf").write_text('"AppState"\n{\n "appid" "570"\n "name" "Dota 2"\n}')
+        (other / "steamapps" / "appmanifest_1172470.acf").write_text(
+            '"AppState"\n{\n "appid" "1172470"\n "name" "Apex Legends"\n}')
+        return root
+
+    def test_steam_games_across_libraries(self):
+        games = pcmod.steam_games(self.make_steam())
+        self.assertEqual(sorted(games), [("1172470", "Apex Legends"), ("570", "Dota 2")])
+        self.assertEqual(pcmod.steam_games(None), [])
+
+    def test_open_game_via_steam_then_start_menu(self):
+        pc = self.make(steam=self.make_steam(), outputs={"Get-StartApps": (0, "Minecraft Launcher")})
+        self.assertEqual(pc.do("open_game", "apex"), "已通过 Steam 启动 Apex Legends")
+        self.assertIn(("open", "steam://rungameid/1172470"), self.pc.calls)
+        self.assertEqual(pc.do("open_game", "Minecraft"), "已打开 Minecraft Launcher")
+
+    def test_open_game_not_found_lists_steam_games(self):
+        pc = self.make(steam=self.make_steam(), outputs={"Get-StartApps": (3, "")})
+        result = pc.do("open_game", "Titanfall 2")
+        self.assertIn("Dota 2", result)
+        self.assertIn("没找到", result)
+
+    def test_best_match(self):
+        names = ["Dota 2", "Dota Underlords", "Apex Legends"]
+        self.assertEqual(pcmod.best_match(names, "dota 2"), 0)
+        self.assertEqual(pcmod.best_match(names, "Dota"), 0)
+        self.assertEqual(pcmod.best_match(names, "legends apex"), 2)
+        self.assertIsNone(pcmod.best_match(names, "Titanfall"))
+
+    def test_audio_installs_module_once_with_approval(self):
+        state = {"installed": False}
+
+        def has_module(env):
+            return 0, "yes" if state["installed"] else "no"
+
+        def install(env):
+            state["installed"] = True
+            return 0, ""
+
+        pc = self.make(outputs={"ListAvailable": has_module, "Install-Module": install,
+                                "Set-AudioDevice": (0, "Speakers (Realtek(R) Audio)")})
+        approve = mock.Mock(return_value=True)
+        self.assertEqual(pc.do("switch_audio", "Speakers", approve), "已切换到:Speakers (Realtek(R) Audio)")
+        pc.do("switch_audio", "Speakers", approve)
+        approve.assert_called_once()  # 只在第一次安装时问
+
+    def test_audio_install_declined(self):
+        pc = self.make(outputs={"ListAvailable": (0, "no")})
+        with self.assertRaises(pcmod.NeedsUser):
+            pc.do("audio_devices", "", lambda a: False)
+
+    def test_audio_list(self):
+        pc = self.make(outputs={"ListAvailable": (0, "yes"), "Get-AudioDevice -List": (0, "*|Headphones\n |Speakers")})
+        self.assertEqual(pc.do("audio_devices"), "播放设备(* 是当前在用的):\n* Headphones\n  Speakers")
+
+    def test_windows(self):
+        pc = self.make(windows=[(11, "Discord"), (22, "YouTube - Google Chrome")])
+        self.assertIn("- YouTube - Google Chrome", pc.do("list_windows"))
+        self.assertEqual(pc.do("focus_window", "chrome"), "已切到:YouTube - Google Chrome")
+        self.assertIn(("focus", 22), self.pc.calls)
+        self.assertIn("没有找到", pc.do("focus_window", "Spotify"))
+
+    def test_close_app_needs_approval(self):
+        pc = self.make(outputs={"CloseMainWindow": (0, "chrome\nchrome")})
+        with self.assertRaises(pcmod.NeedsUser):
+            pc.do("close_app", "chrome", lambda a: False)
+        self.assertEqual(pc.do("close_app", "chrome", lambda a: True), "已关闭:chrome")
+
+    def test_power(self):
+        pc = self.make()
+        approve = mock.Mock(return_value=True)
+        self.assertIn("60 分钟后关机", pc.do("shutdown", "60", approve))
+        self.assertIn(("run", ["shutdown", "/s", "/t", "3600"]), self.pc.calls)
+        self.assertIn("立刻重启", pc.do("restart", "", approve))
+        self.assertEqual(pc.do("cancel_shutdown"), "已取消关机/重启")
+        self.assertEqual(approve.call_count, 2)  # 取消关机不用确认
+        with self.assertRaises(pcmod.NeedsUser):
+            pc.do("sleep", "", lambda a: False)
+        with self.assertRaises(ValueError):
+            pc.do("shutdown", "半小时", approve)
+
+    def test_empty_recycle_bin_needs_approval(self):
+        pc = self.make()
+        with self.assertRaises(pcmod.NeedsUser):
+            pc.do("empty_recycle_bin", "", lambda a: False)
+        self.assertEqual([c for c in self.pc.calls if c[0] == "ps"], [])
+
+    def test_system_status(self):
+        data = {"cpu": 12, "mem_total": 16 * 1024 ** 3, "mem_free": 6 * 1024 ** 3,
+                "disks": [{"name": "C:", "free": 242 * 1024 ** 3, "size": 476 * 1024 ** 3}],
+                "battery": None, "top": [{"name": "chrome", "mem": 900 * 1024 ** 2}],
+                "ip": "192.168.1.5", "links": ["Wi-Fi 300 Mbps"], "wifi": "HomeWiFi"}
+        pc = self.make(outputs={"Win32_OperatingSystem": (0, json.dumps(data))})
+        result = pc.do("system_status")
+        for text in ("CPU 使用率:12%", "已用 10.0GB / 共 16.0GB", "硬盘 C::剩余 242GB", "chrome 900MB",
+                     "IP:192.168.1.5", "Wi-Fi 300 Mbps", "Wi-Fi:HomeWiFi"):
+            self.assertIn(text, result)
+        self.assertNotIn("电池", result)
+
+    def test_display(self):
+        pc = self.make(outputs={"WmiSetBrightness": (3, "")})
+        self.assertIn("不支持", pc.do("brightness", "50"))
+        with self.assertRaises(ValueError):
+            pc.do("brightness", "150")
+        pc.do("dark_mode")
+        self.assertEqual(self.pc.calls[-1][3], {"FRIDAY_LIGHT": "0"})
+        image = Path(self.tmp) / "wall.jpg"
+        image.write_bytes(b"x")
+        self.assertEqual(pc.do("set_wallpaper", str(image)), "已把壁纸换成 wall.jpg")
+        with self.assertRaises(ValueError):
+            pc.do("set_wallpaper", str(Path(self.tmp) / "missing.png"))
+
+    def test_open_path(self):
+        downloads = Path(self.tmp) / "Downloads"
+        downloads.mkdir()
+        tool = downloads / "setup.exe"
+        tool.write_bytes(b"MZ")
+        pc = self.make(folders={"downloads": downloads})
+        self.assertEqual(pc.do("open_path", "下载"), f"已打开 {downloads}")
+        with self.assertRaises(pcmod.NeedsUser):
+            pc.do("open_path", str(tool), lambda a: False)  # 程序文件要确认
+        self.assertIn("找不到", pc.do("open_path", str(downloads / "nope.txt")))
+
+    def test_find_files(self):
+        downloads = Path(self.tmp) / "Downloads"
+        (downloads / "deep").mkdir(parents=True)
+        (downloads / ".hidden").mkdir()
+        old = downloads / "报告-旧.pdf"
+        new = downloads / "deep" / "报告-新.PDF"
+        for path in (old, new, downloads / "报告.docx", downloads / ".hidden" / "报告-隐藏.pdf"):
+            path.write_bytes(b"x")
+        os.utime(old, (1_600_000_000, 1_600_000_000))
+        pc = self.make(folders={"downloads": downloads})
+        result = pc.do("find_files", "报告", ext="pdf")
+        self.assertIn(str(new), result)
+        self.assertIn(str(old), result)
+        self.assertNotIn("docx", result)
+        self.assertNotIn("隐藏", result)
+        self.assertLess(result.index(str(new)), result.index(str(old)))  # 新的在前
+        recent = pc.do("find_files", "报告", ext=".pdf", days=30)
+        self.assertNotIn(str(old), recent)
+        self.assertEqual(pc.do("find_files", "不存在"), "没有找到符合条件的文件")
 
     def test_open_url_only_http(self):
         pc = self.make()
@@ -1516,11 +1741,118 @@ class ComputerTest(TempDirTest):
     def test_unknown_action_and_non_windows(self):
         with self.assertRaises(ValueError):
             self.make().do("format_disk")
-        with mock.patch.object(daily.os, "name", "posix"):
-            computer = daily.Computer()
+        with mock.patch.object(pcmod.os, "name", "posix"):
+            computer = pcmod.Computer()
             self.assertFalse(computer.available)
             with self.assertRaises(RuntimeError):
                 computer.do("mute")
+
+
+class ParseKeysTest(unittest.TestCase):
+    def test_combos(self):
+        self.assertEqual(pcmod.parse_keys("Ctrl + Shift + T"), [0x11, 0x10, ord("T")])
+        self.assertEqual(pcmod.parse_keys("enter"), [0x0D])
+        self.assertEqual(pcmod.parse_keys("alt+f4"), [0x12, 0x73])
+        with self.assertRaises(ValueError):
+            pcmod.parse_keys("ctrl+banana")
+        with self.assertRaises(ValueError):
+            pcmod.parse_keys("+")
+
+
+class ScreenControlTest(unittest.TestCase):
+    def make(self, screen=(1920, 1080)):
+        self.pc = FakePC(screen=screen)
+        return pcmod.ScreenControl(self.pc)
+
+    def test_look_scales_screenshot(self):
+        control = self.make((2560, 1440))
+        blocks = control.look()
+        self.assertEqual(blocks[0]["source"]["media_type"], "image/jpeg")
+        self.assertEqual(base64.b64decode(blocks[0]["source"]["data"]), b"JPEGDATA")
+        self.assertIn("1366x768", blocks[1]["text"])
+        self.assertAlmostEqual(control.scale, 1366 / 2560)
+
+    def test_click_converts_coordinates_and_asks_once(self):
+        control = self.make((2560, 1440))
+        control.look()
+        approve = mock.Mock(return_value=True)
+        control.act({"action": "click", "x": 683, "y": 384, "reason": "打开设置"}, approve)
+        control.act({"action": "click", "x": 100, "y": 100, "clicks": 2}, approve)
+        self.assertIn(("move", 1280, 720), self.pc.calls)  # 截图坐标换算回真实屏幕
+        self.assertEqual(approve.call_count, 1)  # 同一个问题只问一次
+        self.assertIn("打开设置", approve.call_args.args[0])
+        downs = [c for c in self.pc.calls if c[0] == "button" and c[2]]
+        self.assertEqual(len(downs), 3)  # 单击 + 双击
+
+    def test_new_question_asks_again(self):
+        control = self.make()
+        control.look()
+        approve = mock.Mock(return_value=True)
+        control.act({"action": "key", "keys": "ctrl+c"}, approve)
+        control.begin_turn()
+        control.act({"action": "key", "keys": "ctrl+v"}, approve)
+        self.assertEqual(approve.call_count, 2)
+
+    def test_declined(self):
+        control = self.make()
+        control.look()
+        with self.assertRaises(pcmod.NeedsUser):
+            control.act({"action": "click", "x": 1, "y": 1}, lambda a: False)
+        self.assertEqual([c for c in self.pc.calls if c[0] != "grab"], [])
+
+    def test_stops_when_user_moves_mouse(self):
+        control = self.make()
+        control.look()
+        control.act({"action": "click", "x": 100, "y": 100}, lambda a: True)
+        self.pc.pos = (500, 500)  # 用户动了鼠标
+        with self.assertRaises(pcmod.NeedsUser) as ctx:
+            control.act({"action": "click", "x": 200, "y": 200}, lambda a: True)
+        self.assertIn("动了鼠标", str(ctx.exception))
+        self.assertFalse(control.granted)  # 再操作要重新征求同意
+
+    def test_irreversible_and_dangerous_keys_need_confirmation(self):
+        control = self.make()
+        control.look()
+        answers = iter([True, False])  # 同意接管,不同意点“发送”
+        with self.assertRaises(pcmod.NeedsUser):
+            control.act({"action": "click", "x": 10, "y": 10, "irreversible": True, "reason": "点发送"},
+                        lambda a: next(answers))
+        approve = mock.Mock(return_value=True)
+        control.act({"action": "key", "keys": "Alt + F4"}, approve)
+        self.assertIn("可能无法撤销", approve.call_args.args[0])
+
+    def test_action_limit(self):
+        control = self.make()
+        control.look()
+        for _ in range(control.MAX_ACTIONS):
+            control.act({"action": "wait", "amount": 0}, lambda a: True)
+        with self.assertRaises(pcmod.NeedsUser):
+            control.act({"action": "wait", "amount": 0}, lambda a: True)
+
+    def test_needs_screenshot_and_valid_coordinates(self):
+        control = self.make()
+        with self.assertRaises(ValueError):
+            control.act({"action": "click", "x": 1, "y": 1}, lambda a: True)
+        control.look()
+        with self.assertRaises(ValueError):
+            control.act({"action": "click", "x": 5000, "y": 1}, lambda a: True)
+        with self.assertRaises(ValueError):
+            control.act({"action": "click"}, lambda a: True)
+
+    def test_type_drag_scroll(self):
+        control = self.make()
+        control.look()
+        approve = lambda a: True  # noqa: E731
+        control.act({"action": "type", "text": "你好\n"}, approve)
+        control.act({"action": "drag", "x": 0, "y": 0, "x2": 150, "y2": 30}, approve)
+        control.act({"action": "scroll", "x": 10, "y": 10, "amount": 3}, approve)
+        self.assertIn(("type", "你好\n"), self.pc.calls)
+        moves = [c for c in self.pc.calls if c[0] == "move"]
+        end = ("move", round(150 / control.scale), round(30 / control.scale))
+        self.assertEqual(moves[15], end)  # 起点 + 15 步,最后一步正好到终点
+        self.assertIn(("button", "left", False), self.pc.calls)
+        self.assertIn(("scroll", -3), self.pc.calls)
+        self.assertTrue(control.used)
 
 
 class DailyToolsTest(TempDirTest):
@@ -1533,7 +1865,8 @@ class DailyToolsTest(TempDirTest):
             workdir=self.tmp,
             reminders=daily.Reminders(os.path.join(self.tmp, "r.json"), clock=self.clock),
             todos=daily.Todos(os.path.join(self.tmp, "t.json"), clock=self.clock),
-            computer=daily.Computer(self.pc, pictures_dir=self.tmp),
+            computer=pcmod.Computer(self.pc, pictures_dir=self.tmp),
+            screen=pcmod.ScreenControl(self.pc),
         )
 
     def run_tool(self, toolbox, name, tool_input):
@@ -1542,7 +1875,7 @@ class DailyToolsTest(TempDirTest):
 
     def test_tools_are_offered(self):
         names = [t["name"] for t in self.make_toolbox().definitions()]
-        self.assertEqual(names[-3:], ["reminder", "todo", "computer"])
+        self.assertEqual(names[-5:], ["reminder", "todo", "computer", "screen", "control"])
         plain = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m2.json")), lambda a: True, workdir=self.tmp)
         self.assertNotIn("reminder", [t["name"] for t in plain.definitions()])
         result, _ = self.run_tool(plain, "reminder", {"action": "list"})
@@ -1581,12 +1914,45 @@ class DailyToolsTest(TempDirTest):
         self.assertEqual(result["content"], "已切换静音")
         approve.assert_not_called()
 
+    def test_screen_and_control_tools(self):
+        approve = mock.Mock(return_value=True)
+        toolbox = self.make_toolbox(approve)
+        result, statuses = self.run_tool(toolbox, "screen", {})
+        self.assertEqual(result["content"][0]["type"], "image")
+        result, statuses = self.run_tool(toolbox, "control", {"action": "click", "x": 10, "y": 20, "reason": "点按钮"})
+        self.assertNotIn("is_error", result)
+        self.assertIn("单击", statuses[0])
+        self.pc.pos = (900, 900)
+        result, _ = self.run_tool(toolbox, "control", {"action": "click", "x": 10, "y": 20})
+        self.assertTrue(result["is_error"])
+        self.assertIn("动了鼠标", result["content"])  # 原话告诉模型,不是“出错了”
+
+    def test_begin_turn_resets_control_grant(self):
+        approve = mock.Mock(return_value=True)
+        toolbox = self.make_toolbox(approve)
+        self.run_tool(toolbox, "screen", {})
+        self.run_tool(toolbox, "control", {"action": "key", "keys": "ctrl+c"})
+        client = FakeClient(FakeStream(["好"]))
+        app.Assistant(client=client, toolbox=toolbox).ask("下一个问题", lambda t: None)
+        self.assertFalse(toolbox.screen.granted)
+
+    def test_computer_tool_passes_approval(self):
+        approve = mock.Mock(return_value=False)
+        toolbox = self.make_toolbox(approve)
+        result, _ = self.run_tool(toolbox, "computer", {"action": "shutdown", "value": "30"})
+        self.assertTrue(result["is_error"])
+        self.assertIn("30 分钟后关机", approve.call_args.args[0])
+        self.assertNotIn("run", [c[0] for c in self.pc.calls])
+
     def test_unattended_refuses_actions_that_need_approval(self):
         approve = mock.Mock(return_value=True)
         toolbox = self.make_toolbox(approve)
         toolbox.unattended = True
         for name, tool_input in (("run_command", {"command": "echo hi", "reason": "x"}),
-                                 ("write_file", {"path": "a.txt", "content": "x"})):
+                                 ("write_file", {"path": "a.txt", "content": "x"}),
+                                 ("computer", {"action": "shutdown"}),
+                                 ("screen", {}),
+                                 ("control", {"action": "key", "keys": "enter"})):
             result, _ = self.run_tool(toolbox, name, tool_input)
             self.assertTrue(result["is_error"])
             self.assertIn("定时任务", result["content"])

@@ -22,7 +22,6 @@ import anthropic
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from friday_daily import (  # noqa: E402
-    Computer,
     ReminderScheduler,
     Reminders,
     Todos,
@@ -30,6 +29,7 @@ from friday_daily import (  # noqa: E402
     describe_todo,
     notify_popup,
 )
+from friday_pc import Computer, ScreenControl, drain_console_input  # noqa: E402
 from friday_tools import SERVER_TOOL_LABELS, Memory, Toolbox  # noqa: E402
 
 DEFAULT_MODEL = "claude-opus-5-5"
@@ -83,7 +83,11 @@ FRIDAY_PROMPT = """你是“星期五”,{call_me}的私人 AI 助手。
 - 需要最新信息(新闻、天气、价格、资料)时用 web_search 搜索,用 web_fetch 读网页。
 - 在{call_me}的电脑上用 run_command 执行命令,用 read_file / write_file 读写文件。{computer}。
 - 执行命令和写文件前{call_me}会逐一确认;如果被拒绝,换个办法或说明还需要什么。
-- 调音量、切歌、暂停、锁屏、截图、读写剪贴板、打开程序和网址,用 computer 工具直接做,不用确认。
+- 用 computer 工具做一句话就能完成的电脑操作:音量、切歌、切换耳机/音箱、打开程序和游戏、窗口、
+  电脑状态、亮度、深色模式、壁纸、找文件、剪贴板、锁屏、关机睡眠等。
+  “游戏模式”就是:用 system_status 看哪些程序最占内存,问{call_me}关哪些,确认后用 close_app 关掉。
+- {call_me}让你看屏幕时用 screen;必须在界面上点来点去才能办的事,用 control 控制鼠标键盘,
+  并严格遵守 control 工具说明里的规则。
 - 用 reminder 设提醒和定时任务(比如“半小时后提醒我喝水”“每天早上 9 点给我做个早报”),
   用 todo 管理待办清单。提醒只在星期五开着时才会响,第一次设提醒时顺便告诉{call_me}这一点。
 - 消息以“[定时任务]”开头时,是之前设好的任务到点了,{call_me}可能不在电脑前:
@@ -250,6 +254,8 @@ class Assistant:
         出错或被拒绝时撤回本轮的全部消息,保证历史仍然完整有效。
         """
         start = len(self.messages)
+        if self.toolbox is not None:
+            self.toolbox.begin_turn()
         if self.context is not None:
             content: str | list = [
                 {"type": "text", "text": self.context()},
@@ -555,6 +561,9 @@ def chat(assistant: Assistant, persona: Persona | None = None, voice=None, event
         elif not handle_command(question, assistant):
             if not answer(assistant, persona, question, voice):
                 return
+            screen = getattr(assistant.toolbox, "screen", None)
+            if screen is not None and screen.used:
+                drain_console_input()  # 控制键盘时误打进本窗口的字不能当成下一个问题
         reader.request(prompt)
 
 
@@ -641,6 +650,7 @@ def main(argv: list[str] | None = None) -> None:
             reminders=Reminders(os.path.join(data_dir, "friday_reminders.json")),
             todos=Todos(os.path.join(data_dir, "friday_todos.json")),
             computer=Computer(),
+            screen=ScreenControl(),
         )
         persona = friday_persona(call_me, toolbox, voice=args.voice)
     else:
