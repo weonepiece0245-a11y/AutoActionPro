@@ -12,6 +12,27 @@
 
 想把它变成桌面上的按钮:右键 `start.bat` →“发送到”→“桌面快捷方式”。如果想换个图标,右键这个快捷方式 →“属性”→“更改图标”。
 
+## 私人助手“星期五”
+
+除了普通的小助理,这里还有一个叫“星期五”的私人助手人设:冷静干练、先给结论再给细节,会主动提醒风险和下一步该做什么。它知道当前的日期和时间,会按时段跟你打招呼(早上好 / 下午好 / 晚上好)。
+
+- **Windows**:双击 `assistant\friday.bat`(首次运行的安装和填 Key 步骤和 `start.bat` 一样)
+- **命令行**:`python assistant/assistant.py --persona friday`
+
+“星期五”默认称呼你为“老板”。想换个称呼,任选一种方式:
+
+- 在 `assistant/.env` 里加一行 `FRIDAY_CALL_ME=队长`
+- 或者运行时加参数 `--call-me 队长`(优先于 `.env`)
+
+```
+下午好,队长。星期五已上线,随时待命。
+现在是 2026-11-06 星期五 17:26。
+命令:/clear 清空对话  /exit 退出
+
+你:今天还有什么要收尾的?
+星期五:……
+```
+
 下面是手动安装和运行的方法(macOS / Linux 也适用)。
 
 ## 安装
@@ -75,6 +96,8 @@ python assistant/assistant.py
 ```bash
 python assistant/assistant.py --effort high        # 思考更仔细(更慢)
 python assistant/assistant.py --model claude-sonnet-5-5
+python assistant/assistant.py --persona friday     # 切换为“星期五”
+python assistant/assistant.py --persona friday --call-me 队长
 ```
 
 `--effort` 可选 `low`(默认,适合日常聊天)、`medium`、`high`、`xhigh`、`max`。

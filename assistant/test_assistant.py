@@ -3,6 +3,7 @@
 运行:python -m unittest assistant/test_assistant.py
 """
 
+import datetime
 import importlib.util
 import os
 import sys
@@ -52,6 +53,7 @@ _spec = importlib.util.spec_from_file_location(
     "assistant_app", os.path.join(os.path.dirname(os.path.abspath(__file__)), "assistant.py")
 )
 app = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = app  # dataclass 需要能在 sys.modules 里找到所在模块
 _spec.loader.exec_module(app)
 
 
@@ -153,6 +155,71 @@ class AssistantTest(unittest.TestCase):
         self.assertEqual(bot.messages, [])
 
 
+class FridayPersonaTest(unittest.TestCase):
+    FRIDAY_EVENING = datetime.datetime(2026, 11, 6, 19, 30)  # 2026-11-06 是星期五
+
+    def make(self, call_me="老板"):
+        return app.friday_persona(call_me, clock=lambda: self.FRIDAY_EVENING)
+
+    def test_greeting_uses_time_and_name(self):
+        persona = self.make("队长")
+        self.assertEqual(persona.name, "星期五")
+        self.assertIn("晚上好,队长", persona.greeting)
+        self.assertIn("2026-11-06 星期五 19:30", persona.greeting)
+        self.assertIn("队长", persona.farewell)
+
+    def test_system_prompt_has_name_and_current_time(self):
+        system = self.make("队长").system()
+        self.assertIn("“队长”", system)
+        self.assertIn("当前本地时间:2026-11-06 星期五 19:30", system)
+
+    def test_system_prompt_is_recomputed_each_request(self):
+        times = iter([
+            datetime.datetime(2026, 11, 6, 9, 0),   # 创建人设时
+            datetime.datetime(2026, 11, 6, 9, 0),   # 第一次提问
+            datetime.datetime(2026, 11, 7, 10, 0),  # 第二次提问,已经过了一天
+        ])
+        persona = app.friday_persona(clock=lambda: next(times))
+        client = FakeClient(FakeStream(["A1"]), FakeStream(["A2"]))
+        bot = app.Assistant(client=client, system=persona.system)
+
+        bot.ask("Q1", lambda t: None)
+        bot.ask("Q2", lambda t: None)
+
+        self.assertIn("2026-11-06 星期五 09:00", client.calls[0]["system"])
+        self.assertIn("2026-11-07 星期六 10:00", client.calls[1]["system"])
+
+    def test_time_greeting(self):
+        cases = {5: "早上好", 11: "早上好", 12: "下午好", 18: "晚上好", 23: "夜深了", 2: "夜深了"}
+        for hour, expected in cases.items():
+            self.assertEqual(app.time_greeting(datetime.datetime(2026, 1, 1, hour)), expected)
+
+    def test_default_assistant_keeps_plain_system_prompt(self):
+        client = FakeClient(FakeStream(["ok"]))
+        app.Assistant(client=client).ask("hi", lambda t: None)
+        self.assertEqual(client.calls[0]["system"], app.SYSTEM_PROMPT)
+
+    def test_main_selects_friday_persona(self):
+        env = {"ANTHROPIC_API_KEY": "sk-test", "FRIDAY_CALL_ME": "队长"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(app, "Assistant") as assistant_cls, \
+                mock.patch.object(app, "chat") as chat:
+            app.main(["--persona", "friday", "--env-file", os.devnull])
+
+        persona = chat.call_args.args[1]
+        self.assertEqual(persona.name, "星期五")
+        self.assertIn("队长", persona.greeting)
+        self.assertIs(assistant_cls.call_args.kwargs["system"], persona.system)
+
+    def test_call_me_argument_overrides_env(self):
+        env = {"ANTHROPIC_API_KEY": "sk-test", "FRIDAY_CALL_ME": "队长"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(app, "Assistant"), \
+                mock.patch.object(app, "chat") as chat:
+            app.main(["--persona", "friday", "--call-me", "主人", "--env-file", os.devnull])
+        self.assertIn("主人", chat.call_args.args[1].greeting)
+
+
 class ChatLoopTest(unittest.TestCase):
     def run_chat(self, inputs, bot):
         with mock.patch("builtins.input", side_effect=inputs), mock.patch("builtins.print"):
@@ -162,6 +229,16 @@ class ChatLoopTest(unittest.TestCase):
         bot = app.Assistant(client=FakeClient(FakeStream(["A"])))
         self.run_chat(["Q", "/clear", "/exit"], bot)
         self.assertEqual(bot.messages, [])
+
+    def test_friday_label_and_farewell(self):
+        persona = app.friday_persona("队长")
+        bot = app.Assistant(client=FakeClient(FakeStream(["收到"])), system=persona.system)
+        with mock.patch("builtins.input", side_effect=["Q", "/exit"]), \
+                mock.patch("builtins.print") as fake_print:
+            app.chat(bot, persona)
+        printed = [c.args[0] for c in fake_print.call_args_list if c.args]
+        self.assertIn("\n星期五:", printed)
+        self.assertEqual(printed[-1], persona.farewell)
 
     def test_eof_exits(self):
         bot = app.Assistant(client=FakeClient())
