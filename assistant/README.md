@@ -65,7 +65,9 @@
 
 如果识别时提示“在线语音识别连接失败”,在 `assistant/.env` 里加一行 `FRIDAY_STT=vosk` 改用离线识别。
 
-**朗读**用的是系统自带的语音,不需要联网。如果提示“没有找到中文朗读语音”,在 Windows 的“设置 → 时间和语言 → 语音”里添加中文(简体)语音即可。
+**朗读**用的是系统自带的语音(Windows 上直接调用系统的 SAPI 语音引擎),不需要联网。如果提示“没有找到中文朗读语音”,在 Windows 的“设置 → 时间和语言 → 语音 → 管理语音”里添加“中文(简体)”即可。
+
+**没声音或听不到我说话?** 双击 `assistant\voice-test.bat` 做个检查:它会列出系统里的朗读语音、读一句测试语,再录一句话看能不能识别。
 
 命令行用法:`python assistant/assistant.py --persona friday --voice`(普通小助理也可以加 `--voice`)。手动安装语音依赖:`python -m pip install -r assistant/requirements-voice.txt`。
 

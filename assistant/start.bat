@@ -18,7 +18,7 @@ if errorlevel 1 goto pip_failed
 
 rem ---- 2b. Voice mode (friday-voice.bat): install voice dependencies on first run ----
 if not defined ASSISTANT_VOICE goto voice_ok
-%PY% -c "import speech_recognition, pyttsx3, sounddevice, vosk" >nul 2>nul
+%PY% -c "import speech_recognition, pyttsx3, sounddevice, vosk, win32com.client" >nul 2>nul
 if not errorlevel 1 goto voice_ok
 echo First voice run: installing voice dependencies, please wait...
 %PY% -m pip install -r requirements-voice.txt

@@ -770,6 +770,109 @@ class FakeEngine:
         pass
 
 
+class FakeSapi:
+    """假的 SAPI.SpVoice。"""
+
+    def __init__(self, voices):
+        self.voices = voices
+        self.Voice = None
+        self.Rate = 0
+        self.spoken = []
+        self.waits = 0
+
+    def GetVoices(self):
+        voices = self.voices
+        return SimpleNamespace(Count=len(voices), Item=lambda i: voices[i])
+
+    def Speak(self, text, flags):
+        self.spoken.append((text, flags))
+
+    def WaitUntilDone(self, ms):
+        self.waits += 1
+        return self.waits >= 2  # 第二次查询时读完
+
+
+def sapi_voice(description, token_id):
+    return SimpleNamespace(GetDescription=lambda: description, Id=token_id)
+
+
+def fake_win32com(sapi):
+    client = types.ModuleType("win32com.client")
+    client.Dispatch = lambda name: sapi if name == "SAPI.SpVoice" else None
+    package = types.ModuleType("win32com")
+    package.client = client
+    return {"win32com": package, "win32com.client": client}
+
+
+class WindowsSpeakerTest(unittest.TestCase):
+    def test_picks_chinese_voice_and_waits_until_done(self):
+        zira = sapi_voice("Microsoft Zira Desktop - English (United States)", "TTS_MS_EN-US_ZIRA_11.0")
+        huihui = sapi_voice("Microsoft Huihui Desktop - Chinese (Simplified)", "TTS_MS_ZH-CN_HUIHUI_11.0")
+        sapi = FakeSapi([zira, huihui])
+        with mock.patch.dict(sys.modules, fake_win32com(sapi)):
+            speaker = voice.WindowsSpeaker()
+        self.assertTrue(speaker.has_chinese_voice)
+        self.assertIs(sapi.Voice, huihui)
+        self.assertEqual(speaker.voice_name, "Microsoft Huihui Desktop - Chinese (Simplified)")
+        self.assertEqual(len(speaker.voice_names), 2)
+
+        speaker.speak("**你好**")
+        self.assertEqual(sapi.spoken, [("你好", 3)])  # 异步 + 清空队列
+        self.assertEqual(sapi.waits, 2)  # 等到读完才返回
+        speaker.speak("** **")
+        self.assertEqual(len(sapi.spoken), 1)
+
+    def test_no_chinese_voice(self):
+        sapi = FakeSapi([sapi_voice("Microsoft Zira Desktop - English (United States)", "TTS_MS_EN-US_ZIRA_11.0")])
+        with mock.patch.dict(sys.modules, fake_win32com(sapi)):
+            speaker = voice.WindowsSpeaker()
+        self.assertFalse(speaker.has_chinese_voice)
+        self.assertIsNone(sapi.Voice)
+
+    def test_ctrl_c_stops_reading(self):
+        sapi = FakeSapi([])
+
+        def interrupted(ms):
+            raise KeyboardInterrupt
+
+        sapi.WaitUntilDone = interrupted
+        with mock.patch.dict(sys.modules, fake_win32com(sapi)):
+            speaker = voice.WindowsSpeaker()
+        with self.assertRaises(KeyboardInterrupt):
+            speaker.speak("很长的一段话")
+        self.assertEqual(sapi.spoken[-1], ("", 3))  # 清空朗读队列
+
+    def test_missing_pywin32(self):
+        with mock.patch.dict(sys.modules, {"win32com": None, "win32com.client": None}):
+            with self.assertRaises(voice.VoiceUnavailable):
+                voice.WindowsSpeaker()
+
+    def test_make_speaker_uses_sapi_on_windows(self):
+        with mock.patch.object(voice.os, "name", "nt"), \
+                mock.patch.object(voice, "WindowsSpeaker", return_value="sapi"), \
+                mock.patch.object(voice, "Speaker", return_value="pyttsx3"):
+            self.assertEqual(voice.make_speaker(), "sapi")
+        with mock.patch.object(voice.os, "name", "posix"), \
+                mock.patch.object(voice, "WindowsSpeaker", return_value="sapi"), \
+                mock.patch.object(voice, "Speaker", return_value="pyttsx3"):
+            self.assertEqual(voice.make_speaker(), "pyttsx3")
+
+    def test_self_test_reports_missing_chinese_voice(self):
+        speaker = SimpleNamespace(
+            voice_names=["Microsoft Zira"], voice_name="Microsoft Zira", has_chinese_voice=False, speak=mock.Mock()
+        )
+        listener = SimpleNamespace(listen=lambda on_status: "你好")
+        with mock.patch.object(voice, "make_speaker", return_value=speaker), \
+                mock.patch.object(voice, "Listener", return_value=listener), \
+                mock.patch("builtins.print") as fake_print:
+            self.assertEqual(voice.self_test(), 0)
+        printed = "\n".join(str(c.args[0]) for c in fake_print.call_args_list if c.args)
+        self.assertIn("Microsoft Zira", printed)
+        self.assertIn("没有找到中文朗读语音", printed)
+        self.assertIn("识别结果:你好", printed)
+        speaker.speak.assert_called_once()
+
+
 class VoiceModuleTest(unittest.TestCase):
     def fake_tts(self, voices):
         engine = FakeEngine(voices)
