@@ -82,6 +82,8 @@
 
 在线语音用的是 Edge 浏览器朗读功能背后的免费接口,不是正式的付费服务,将来有可能失效;失效时会自动改用系统语音。
 
+**每句话开头被吞掉?** 很多扬声器、蓝牙耳机没声音时会休眠,来声音时要半秒到一秒才醒,开头就丢了。语音模式会在后台一直播放听不见的极小声音让设备保持唤醒(默认开启;在 `.env` 里写 `FRIDAY_KEEP_AUDIO_AWAKE=0` 可关闭)。
+
 **没声音或听不到我说话?** 双击 `assistant\voice-test.bat` 做个检查:它会列出系统里的朗读语音,分别用系统语音和在线语音各读一句,再录一句话看能不能识别。
 
 命令行用法:`python assistant/assistant.py --persona friday --voice`(普通小助理也可以加 `--voice`)。手动安装语音依赖:`python -m pip install -r assistant/requirements-voice.txt`。

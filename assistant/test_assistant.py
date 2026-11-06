@@ -753,10 +753,75 @@ class FakeRawInputStream:
         return bytearray(tone(level, frames)), False
 
 
-def fake_sounddevice(stream_cls=FakeRawInputStream):
+class FakeRawOutputStream:
+    instances = []
+
+    def __init__(self, samplerate, channels, dtype, blocksize, callback):
+        self.args = (samplerate, channels, dtype, blocksize)
+        self.callback = callback
+        self.started = self.closed = False
+        FakeRawOutputStream.instances.append(self)
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.started = False
+
+    def close(self):
+        self.closed = True
+
+
+def fake_sounddevice(stream_cls=FakeRawInputStream, output_cls=FakeRawOutputStream):
     module = types.ModuleType("sounddevice")
     module.RawInputStream = stream_cls
+    module.RawOutputStream = output_cls
     return module
+
+
+class KeepAliveTest(unittest.TestCase):
+    def test_plays_inaudible_sound(self):
+        FakeRawOutputStream.instances = []
+        with mock.patch.dict(sys.modules, {"sounddevice": fake_sounddevice()}), \
+                mock.patch.dict(os.environ, {}, clear=True):
+            keep_alive = voice.start_keep_alive(lambda t: None)
+        stream = FakeRawOutputStream.instances[0]
+        self.assertTrue(stream.started)
+        self.assertEqual(stream.args, (16000, 1, "int16", 1024))
+
+        for size in (2048, 1000, 5000):  # 不管设备要多少数据都能填满
+            buf = bytearray(size)
+            stream.callback(buf, size // 2, None, None)
+            samples = array.array("h", bytes(buf[: size - size % 2]))
+            self.assertTrue(any(samples))  # 不是纯静音
+            self.assertLessEqual(max(abs(x) for x in samples), 1)  # 但小到听不见
+
+        keep_alive.stop()
+        self.assertTrue(stream.closed)
+
+    def test_can_be_turned_off(self):
+        with mock.patch.dict(sys.modules, {"sounddevice": fake_sounddevice()}), \
+                mock.patch.dict(os.environ, {"FRIDAY_KEEP_AUDIO_AWAKE": "0"}):
+            self.assertIsNone(voice.start_keep_alive(lambda t: None))
+
+    def test_failure_does_not_stop_voice_mode(self):
+        def broken(*a, **k):
+            raise RuntimeError("没有输出设备")
+
+        statuses = []
+        with mock.patch.dict(sys.modules, {"sounddevice": fake_sounddevice(output_cls=broken)}), \
+                mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(voice.start_keep_alive(statuses.append))
+        self.assertIn("没有输出设备", statuses[0])
+
+    def test_create_voice_wakes_audio_before_calibrating(self):
+        order = []
+        with mock.patch.object(voice, "make_speaker", return_value=SimpleNamespace(has_chinese_voice=True)), \
+                mock.patch.object(voice, "start_keep_alive", side_effect=lambda s: order.append("keep_alive") or "KA"), \
+                mock.patch.object(voice, "Listener", side_effect=lambda *a, **k: order.append("listener") or "L"):
+            io = voice.create_voice("google", lambda t: None)
+        self.assertEqual(order, ["keep_alive", "listener"])
+        self.assertEqual(io.keep_alive, "KA")
 
 
 CALIBRATION_CHUNKS = round(voice.CALIBRATE_SECONDS / voice.CHUNK_SECONDS)

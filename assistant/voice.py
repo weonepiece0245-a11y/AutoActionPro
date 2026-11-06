@@ -380,12 +380,59 @@ class Listener:
         return text or None
 
 
+class AudioKeepAlive:
+    """在后台一直播放听不见的极小声音,让扬声器 / 蓝牙耳机保持唤醒。
+
+    很多音频设备没声音时会休眠,来声音时要半秒到一秒才醒过来,
+    这段时间播放的内容就丢了,听起来就是每句话的开头被吞掉。
+    """
+
+    BLOCK = 1024
+
+    def __init__(self) -> None:
+        import sounddevice as sd
+
+        # 幅度只有 1(满幅是 32767),约 -90 分贝,人耳听不见,但设备会认为一直在放声音
+        self._block = array.array("h", [1, 0, -1, 0] * (self.BLOCK // 4)).tobytes()
+        self._stream = sd.RawOutputStream(
+            samplerate=SAMPLE_RATE, channels=1, dtype="int16", blocksize=self.BLOCK, callback=self._fill
+        )
+
+    def _fill(self, outdata, frames, time_info, status) -> None:
+        size = len(outdata)
+        outdata[:] = (self._block * (size // len(self._block) + 1))[:size]
+
+    def start(self) -> None:
+        self._stream.start()
+
+    def stop(self) -> None:
+        try:
+            self._stream.stop()
+            self._stream.close()
+        except Exception:
+            pass
+
+
+def start_keep_alive(on_status: StatusFn = print):
+    """开始让音频设备保持唤醒;设置 FRIDAY_KEEP_AUDIO_AWAKE=0 可关闭。失败时不影响使用。"""
+    if os.environ.get("FRIDAY_KEEP_AUDIO_AWAKE", "1").strip() in ("0", "false", "no", "off"):
+        return None
+    try:
+        keep_alive = AudioKeepAlive()
+        keep_alive.start()
+        return keep_alive
+    except Exception as e:
+        on_status(f"(无法让音频设备保持唤醒:{e}。如果每句话开头被吞掉,可以检查扬声器设置)")
+        return None
+
+
 class VoiceIO:
     """把听和说组合在一起,供聊天循环使用。"""
 
-    def __init__(self, listener, speaker) -> None:
+    def __init__(self, listener, speaker, keep_alive=None) -> None:
         self.listener = listener
         self.speaker = speaker
+        self.keep_alive = keep_alive
 
     def listen(self, on_status: StatusFn) -> str | None:
         return self.listener.listen(on_status)
@@ -533,11 +580,16 @@ def create_voice(
     speaker = make_speaker(tts, edge_voice, on_status)
     if not speaker.has_chinese_voice:
         on_status(NO_CHINESE_VOICE_HINT)
-    return VoiceIO(Listener(engine, on_status, pause=pause), speaker)
+    # 先唤醒音频设备;接下来校准麦克风的 1 秒正好留给设备醒过来
+    keep_alive = start_keep_alive(on_status)
+    return VoiceIO(Listener(engine, on_status, pause=pause), speaker, keep_alive)
 
 
 def self_test() -> int:
     """检查朗读和麦克风:分别试读系统语音和在线语音,再录一句话。"""
+    keep_alive = start_keep_alive(print)
+    if keep_alive is not None:
+        time.sleep(1)  # 给音频设备一点时间醒过来
     print("== 1. 系统语音(离线)==")
     try:
         speaker = make_system_speaker()
