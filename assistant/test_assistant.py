@@ -2498,6 +2498,40 @@ class GoogleTodoSwitchTest(GoogleToolboxTest):
         self.assertEqual(statuses, ["查了通讯录"])
 
 
+class ClientSecretTest(TempDirTest):
+    SECRET = {"installed": {"client_id": "abc.apps.googleusercontent.com", "client_secret": "x"}}
+
+    def test_picks_newest_valid_client_secret_from_downloads(self):
+        downloads = Path(self.tmp, "Downloads")
+        app_dir = Path(self.tmp, "assistant")
+        downloads.mkdir()
+        app_dir.mkdir()
+        old = downloads / "client_secret_old.apps.googleusercontent.com.json"
+        new = downloads / "client_secret_new.apps.googleusercontent.com.json"
+        broken = downloads / "client_secret_broken.json"
+        old.write_text(json.dumps(self.SECRET))
+        new.write_text(json.dumps({"installed": {"client_id": "new"}}))
+        broken.write_text("{坏的")
+        os.utime(old, (1_600_000_000, 1_600_000_000))
+        with mock.patch("builtins.print"):
+            self.assertTrue(gmod.ensure_credentials_file(app_dir, [app_dir, downloads]))
+        self.assertEqual(json.loads((app_dir / "credentials.json").read_text())["installed"]["client_id"], "new")
+
+    def test_existing_credentials_untouched_and_missing(self):
+        app_dir = Path(self.tmp)
+        self.assertFalse(gmod.ensure_credentials_file(app_dir, [app_dir]))
+        (app_dir / "credentials.json").write_text("mine")
+        (app_dir / "client_secret_x.json").write_text(json.dumps(self.SECRET))
+        self.assertTrue(gmod.ensure_credentials_file(app_dir, [app_dir]))
+        self.assertEqual((app_dir / "credentials.json").read_text(), "mine")
+
+    def test_login_without_any_file_explains_what_to_do(self):
+        with mock.patch("builtins.print") as fake_print:
+            self.assertEqual(gmod.login(self.tmp, search=[Path(self.tmp)]), 1)
+        printed = "\n".join(str(c.args[0]) for c in fake_print.call_args_list if c.args)
+        self.assertIn("不用改名", printed)
+
+
 class GoogleAccountTest(TempDirTest):
     def test_configured_when_credentials_or_token_exist(self):
         account = gmod.GoogleAccount(os.path.join(self.tmp, "credentials.json"), os.path.join(self.tmp, "token.json"))

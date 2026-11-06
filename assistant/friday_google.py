@@ -725,11 +725,67 @@ class GoogleTools(_MoreGoogleTools):
         return "已标记为已读"
 
 
-def login(folder: str | os.PathLike | None = None) -> int:
+def downloads_folder() -> Path:
+    """系统设置里的“下载”文件夹(用户可能把它挪到了别的盘)。"""
+    if os.name == "nt":
+        try:
+            import winreg
+
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+                value, _ = winreg.QueryValueEx(key, "{374DE290-123F-4565-9164-39C4925E467B}")
+            return Path(os.path.expandvars(value))
+        except OSError:
+            pass
+    return Path.home() / "Downloads"
+
+
+def find_client_secret(folders: list[Path]) -> Path | None:
+    """找最新下载的 client_secret_*.json(从 Google Cloud Console 下载的授权文件,不用用户自己改名)。"""
+    candidates = []
+    for folder in folders:
+        try:
+            candidates += [p for p in Path(folder).glob("client_secret*.json") if p.is_file()]
+        except OSError:
+            continue
+    valid = []
+    for path in candidates:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and ("installed" in data or "web" in data):
+            valid.append(path)
+    return max(valid, key=lambda p: p.stat().st_mtime) if valid else None
+
+
+def ensure_credentials_file(folder: Path, search: list[Path] | None = None) -> bool:
+    """credentials.json 不在时,自动从本文件夹或“下载”文件夹里找 client_secret 文件复制过来。"""
+    target = folder / "credentials.json"
+    if target.exists():
+        return True
+    found = find_client_secret(search if search is not None else [folder, downloads_folder()])
+    if found is None:
+        return False
+    target.write_bytes(found.read_bytes())
+    print(f"找到授权文件 {found.name},已自动复制为 {target}")
+    return True
+
+
+def login(folder: str | os.PathLike | None = None, search: list[Path] | None = None) -> int:
     """命令行登录授权,并读一下日历和邮件确认能用。"""
     folder = Path(folder or os.path.dirname(os.path.abspath(__file__)))
     account = GoogleAccount(folder / "credentials.json", folder / "google_token.json")
     print("== Google 授权 ==")
+    if not account.token_file.exists() and not ensure_credentials_file(folder, search):
+        print(
+            "没有找到授权文件。请在 Google Cloud Console 的“客户”页面创建“桌面应用”客户端,点“下载 JSON”,\n"
+            "下载好后再双击一次 google-login(不用改名,会自动从“下载”文件夹里找到)。"
+        )
+        return 1
+    if account.token_file.exists():
+        ensure_credentials_file(folder, search)  # 需要重新授权时也要用到
+    print("浏览器会打开 Google 登录页面:选你的账号,看到“Google 尚未验证此应用”就点“继续”,再勾选所有权限并允许。")
     try:
         account.credentials(interactive=True)
     except GoogleNotReady as e:

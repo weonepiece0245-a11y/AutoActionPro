@@ -123,7 +123,7 @@
 3. 左侧菜单进入 **Google Auth Platform**(或“API 和服务 → OAuth 同意屏幕”),按提示配置:应用名称随便填,用户类型选 **外部(External)**,联系邮箱填你自己的。
 4. 在 **目标对象(Audience)** 里把你自己的 Gmail 加为 **测试用户**;然后点 **发布应用(Publish app)** 改成“正式版”,这样授权不会每 7 天过期一次。(如果发布后登录时被拦住,就保持“测试”状态,只是每 7 天要重新双击一次 `google-login.bat`。)
 5. 进入 **客户端(Clients)**,创建 OAuth 客户端,类型选 **桌面应用(Desktop app)**,创建后点 **下载 JSON**。
-6. 把下载的文件改名为 `credentials.json`,放进 `assistant` 文件夹。
+6. 下载的文件(名字类似 `client_secret_xxxx.json`)留在“下载”文件夹就行,**不用改名**:下一步会自动找到它,复制到 `assistant` 文件夹并改名为 `credentials.json`。
 7. 双击 `assistant\google-login.bat`,浏览器会打开 Google 登录页。因为这个应用是你自己建的、没给 Google 审核,会看到“Google 尚未验证此应用”,点 **继续**(或“高级 → 转至 Friday”),再**勾选所有权限**并允许。(以后加了新功能需要新权限时,“星期五”会提示你再双击一次 `google-login.bat`。)
 8. 窗口里显示出你最近的日程和邮件,就说明成功了。之后打开“星期五”就能用。
 
