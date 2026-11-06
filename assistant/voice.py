@@ -40,7 +40,7 @@ CHINESE_VOICE_HINTS = (
 )
 NO_CHINESE_VOICE_HINT = (
     "没有找到中文朗读语音,读中文时会没有声音。"
-    "请在 Windows“设置 → 时间和语言 → 语音 → 管理语音”里添加“中文(简体)”,然后重新打开。"
+    "请在 Windows“设置 → 时间和语言 → 语音 → 管理语音 → 添加语音”里添加“中文(简体,中国)”,然后重新打开。"
 )
 
 
@@ -87,6 +87,8 @@ class WindowsSpeaker:
 
     SVSF_ASYNC = 1
     SVSF_PURGE = 2
+    # Windows 10/11 在“设置 → 语音”里添加的新式语音装在这里,SAPI 默认不列出来
+    ONECORE_VOICES = r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Speech_OneCore\Voices"
 
     def __init__(self, rate: int = 1) -> None:
         try:
@@ -99,16 +101,40 @@ class WindowsSpeaker:
             raise VoiceUnavailable(f"无法启动 Windows 语音引擎:{e}") from e
         self.sapi.Rate = rate  # -10(最慢)到 10(最快)
 
+        voices = self._all_voices(win32com.client)
+        self.voice_names = [name for name, _ in voices]
+        self.voice_name = self.voice_names[0] if voices else "(无)"
+        self.has_chinese_voice = False
+        for name, token in voices:
+            if not _is_chinese(f"{name} {token.Id}"):
+                continue
+            try:
+                self.sapi.Voice = token
+            except Exception:  # 个别新式语音不能直接用于 SAPI,换下一个
+                continue
+            self.voice_name = name
+            self.has_chinese_voice = True
+            break
+
+    def _all_voices(self, client) -> list:
+        """返回 [(名称, 语音)]:先列传统的桌面语音,再列新式语音,同名的只保留一个。"""
+        groups = []
         tokens = self.sapi.GetVoices()
-        voices = [tokens.Item(i) for i in range(tokens.Count)]
-        self.voice_names = [v.GetDescription() for v in voices]
-        chinese = [v for v, name in zip(voices, self.voice_names) if _is_chinese(f"{name} {v.Id}")]
-        self.has_chinese_voice = bool(chinese)
-        if chinese:
-            self.sapi.Voice = chinese[0]
-            self.voice_name = chinese[0].GetDescription()
-        else:
-            self.voice_name = self.voice_names[0] if self.voice_names else "(无)"
+        groups.append([tokens.Item(i) for i in range(tokens.Count)])
+        try:
+            category = client.Dispatch("SAPI.SpObjectTokenCategory")
+            category.SetId(self.ONECORE_VOICES, False)
+            tokens = category.EnumerateTokens()
+            groups.append([tokens.Item(i) for i in range(tokens.Count)])
+        except Exception:  # 老版本 Windows 没有新式语音
+            pass
+        voices, seen = [], set()
+        for token in (t for group in groups for t in group):
+            name = token.GetDescription()
+            if name not in seen:
+                seen.add(name)
+                voices.append((name, token))
+        return voices
 
     def speak(self, text: str) -> None:
         text = clean_for_speech(text)

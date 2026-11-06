@@ -796,9 +796,32 @@ def sapi_voice(description, token_id):
     return SimpleNamespace(GetDescription=lambda: description, Id=token_id)
 
 
-def fake_win32com(sapi):
+class FakeTokenCategory:
+    def __init__(self, voices):
+        self.voices = voices
+        self.id = None
+
+    def SetId(self, category_id, create):
+        self.id = category_id
+
+    def EnumerateTokens(self):
+        assert self.id == voice.WindowsSpeaker.ONECORE_VOICES
+        voices = self.voices
+        return SimpleNamespace(Count=len(voices), Item=lambda i: voices[i])
+
+
+def fake_win32com(sapi, onecore=None):
+    objects = {"SAPI.SpVoice": sapi}
+    if onecore is not None:
+        objects["SAPI.SpObjectTokenCategory"] = FakeTokenCategory(onecore)
+
+    def dispatch(name):
+        if name not in objects:
+            raise OSError("类没有注册")
+        return objects[name]
+
     client = types.ModuleType("win32com.client")
-    client.Dispatch = lambda name: sapi if name == "SAPI.SpVoice" else None
+    client.Dispatch = dispatch
     package = types.ModuleType("win32com")
     package.client = client
     return {"win32com": package, "win32com.client": client}
@@ -821,6 +844,36 @@ class WindowsSpeakerTest(unittest.TestCase):
         self.assertEqual(sapi.waits, 2)  # 等到读完才返回
         speaker.speak("** **")
         self.assertEqual(len(sapi.spoken), 1)
+
+    def test_finds_chinese_voice_added_in_windows_settings(self):
+        david = sapi_voice("Microsoft David Desktop - English (United States)", "TTS_MS_EN-US_DAVID_11.0")
+        onecore = [
+            sapi_voice("Microsoft David - English (United States)", "MSTTS_V110_enUS_DavidM"),
+            sapi_voice("Microsoft David Desktop - English (United States)", "dup"),
+            sapi_voice("Microsoft Huihui - Chinese (Simplified, PRC)", "MSTTS_V110_zhCN_HuihuiM"),
+        ]
+        sapi = FakeSapi([david])
+        with mock.patch.dict(sys.modules, fake_win32com(sapi, onecore)):
+            speaker = voice.WindowsSpeaker()
+        self.assertTrue(speaker.has_chinese_voice)
+        self.assertIs(sapi.Voice, onecore[2])
+        self.assertEqual(speaker.voice_name, "Microsoft Huihui - Chinese (Simplified, PRC)")
+        self.assertEqual(len(speaker.voice_names), 3)  # 同名的只列一次
+
+    def test_skips_chinese_voice_that_cannot_be_used(self):
+        class PickySapi(FakeSapi):
+            def __setattr__(self, name, value):
+                if name == "Voice" and getattr(value, "Id", "") == "broken":
+                    raise OSError("不能使用这个语音")
+                super().__setattr__(name, value)
+
+        broken = sapi_voice("Microsoft Xiaoxiao - Chinese (Simplified, PRC)", "broken")
+        good = sapi_voice("Microsoft Kangkang - Chinese (Simplified, PRC)", "MSTTS_V110_zhCN_KangkangM")
+        sapi = PickySapi([])
+        with mock.patch.dict(sys.modules, fake_win32com(sapi, [broken, good])):
+            speaker = voice.WindowsSpeaker()
+        self.assertIs(sapi.Voice, good)
+        self.assertEqual(speaker.voice_name, "Microsoft Kangkang - Chinese (Simplified, PRC)")
 
     def test_no_chinese_voice(self):
         sapi = FakeSapi([sapi_voice("Microsoft Zira Desktop - English (United States)", "TTS_MS_EN-US_ZIRA_11.0")])
