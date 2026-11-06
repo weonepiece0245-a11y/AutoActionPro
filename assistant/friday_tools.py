@@ -335,9 +335,114 @@ GMAIL_TOOL = {
     },
 }
 
+GOOGLE_TASKS_TOOL = {
+    "name": "google_tasks",
+    "description": (
+        "用户的待办清单(Google Tasks,手机上也能看到):list 查看,add 添加,done 标记完成,delete 删除。"
+        "用户说“记一下要…”“我还有什么没做”“…做完了”时调用。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["list", "add", "done", "delete"]},
+            "title": {"type": "string", "description": "add:待办内容"},
+            "notes": {"type": "string", "description": "add 可选:备注"},
+            "due": {"type": "string", "description": "add 可选:截止日期 YYYY-MM-DD"},
+            "key": {"type": "string", "description": "done / delete:待办 id 或关键词"},
+            "include_done": {"type": "boolean", "description": "list 时是否也列出已完成的"},
+        },
+        "required": ["action"],
+    },
+}
+
+CONTACTS_TOOL = {
+    "name": "contacts",
+    "description": "按名字、邮箱或电话查用户 Google 通讯录里的联系人(只读)。发邮件给某人但不知道邮箱时先查这里。",
+    "input_schema": {
+        "type": "object",
+        "properties": {"query": {"type": "string", "description": "名字、邮箱或电话的一部分"}},
+        "required": ["query"],
+    },
+}
+
+DRIVE_TOOL = {
+    "name": "drive",
+    "description": (
+        "用户的 Google 云端硬盘:search 按名字或内容找文件,read 读文件内容(Google 文档、表格、纯文本),"
+        "download 下载到电脑的“下载”文件夹,upload 把电脑上的文件传上去。不能删除或分享文件。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["search", "read", "download", "upload"]},
+            "query": {"type": "string", "description": "search:关键词"},
+            "id": {"type": "string", "description": "read / download:文件 id 或链接"},
+            "path": {"type": "string", "description": "upload:电脑上的文件路径"},
+            "name": {"type": "string", "description": "upload 可选:上传后的文件名"},
+        },
+        "required": ["action"],
+    },
+}
+
+DOCS_TOOL = {
+    "name": "docs",
+    "description": "Google 文档:create 新建文档(可带内容),append 在已有文档末尾加内容。读文档用 drive 的 read。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["create", "append"]},
+            "title": {"type": "string", "description": "create:文档标题"},
+            "content": {"type": "string", "description": "要写入的文字"},
+            "id": {"type": "string", "description": "append:文档 id 或链接"},
+        },
+        "required": ["action"],
+    },
+}
+
+SHEETS_TOOL = {
+    "name": "sheets",
+    "description": (
+        "Google 表格:create 新建表格(可带几行数据),read 读取内容,append 在末尾加几行(比如记账)。"
+        "新建的表格以后还要用的话,用 remember 把表格名和 id 记下来。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["create", "read", "append"]},
+            "title": {"type": "string", "description": "create:表格标题"},
+            "id": {"type": "string", "description": "read / append:表格 id 或链接"},
+            "range": {"type": "string", "description": "可选:范围,如 Sheet1!A1:D50"},
+            "rows": {"type": "array", "items": {"type": "array"}, "description": "要写入的行,二维数组"},
+        },
+        "required": ["action"],
+    },
+}
+
+YOUTUBE_TOOL = {
+    "name": "youtube",
+    "description": (
+        "YouTube:search 搜视频,subscriptions 看订阅频道最近几天的新视频,playlists 列出用户的播放列表,"
+        "add_to_playlist 把视频加进播放列表。要播放视频就用 computer 的 open_url 打开视频链接。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["search", "subscriptions", "playlists", "add_to_playlist"]},
+            "query": {"type": "string", "description": "search:关键词"},
+            "max": {"type": "integer", "description": "search:最多几个(默认 8)"},
+            "days": {"type": "integer", "description": "subscriptions:最近几天(默认 2)"},
+            "playlist_id": {"type": "string"},
+            "video_id": {"type": "string"},
+        },
+        "required": ["action"],
+    },
+}
+
+GOOGLE_EXTRA_TOOLS = [GOOGLE_TASKS_TOOL, CONTACTS_TOOL, DRIVE_TOOL, DOCS_TOOL, SHEETS_TOOL, YOUTUBE_TOOL]
+
 # 请求是流式的,让较长的工具参数(例如文件内容)边生成边传输;参数在执行前会自己校验
 for _tool in CLIENT_TOOLS + [REMINDER_TOOL, TODO_TOOL, COMPUTER_TOOL, SCREEN_TOOL, CONTROL_TOOL,
-                             CALENDAR_TOOL, GMAIL_TOOL]:
+                             CALENDAR_TOOL, GMAIL_TOOL] + GOOGLE_EXTRA_TOOLS:
     _tool["eager_input_streaming"] = True
 
 UNATTENDED_REFUSAL = (
@@ -389,6 +494,12 @@ class Toolbox:
             "control": self._control,
             "calendar": self._calendar,
             "gmail": self._gmail,
+            "google_tasks": self._google("tasks", "看了待办清单"),
+            "contacts": self._google("contacts", "查了通讯录"),
+            "drive": self._google("drive", "用了云端硬盘"),
+            "docs": self._google("docs", "用了 Google 文档"),
+            "sheets": self._google("sheets", "用了 Google 表格"),
+            "youtube": self._google("youtube", "看了 YouTube"),
         }
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
 
@@ -396,14 +507,14 @@ class Toolbox:
         tools = (SERVER_TOOLS if self.web else []) + CLIENT_TOOLS
         if self.reminders is not None:
             tools = tools + [REMINDER_TOOL]
-        if self.todos is not None:
+        if self.todos is not None and self.google is None:  # 接了 Google 就用 Google Tasks 当待办清单
             tools = tools + [TODO_TOOL]
         if self.computer is not None and self.computer.available:
             tools = tools + [COMPUTER_TOOL]
         if self.screen is not None and self.screen.available:
             tools = tools + [SCREEN_TOOL, CONTROL_TOOL]
         if self.google is not None:
-            tools = tools + [CALENDAR_TOOL, GMAIL_TOOL]
+            tools = tools + [CALENDAR_TOOL, GMAIL_TOOL] + GOOGLE_EXTRA_TOOLS
         return tools
 
     def begin_turn(self) -> None:
@@ -598,3 +709,12 @@ class Toolbox:
         result = self.google.gmail(args, self._approved, self._confirmed)
         on_status({"list": "看了邮件列表", "read": "读了一封邮件"}.get(args.get("action"), result[:80]))
         return result, False
+
+    def _google(self, method: str, status: str):
+        def handler(args, on_status):
+            result = getattr(self.google, method)(args, self._approved, self._confirmed)
+            on_status(status if args.get("action") in (None, "list", "search", "read", "subscriptions", "playlists")
+                      else result.splitlines()[0][:80])
+            return result, False
+
+        return handler

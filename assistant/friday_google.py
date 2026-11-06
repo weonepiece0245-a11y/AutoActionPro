@@ -1,4 +1,4 @@
-"""“星期五”的 Google 日历和 Gmail。
+"""“星期五”的 Google 服务:日历、Gmail、Tasks、通讯录、云端硬盘、文档、表格、YouTube。
 
 第一次使用前需要:
 1. 在 Google Cloud Console 创建一个“桌面应用”类型的 OAuth 客户端,下载 credentials.json,
@@ -7,7 +7,7 @@
 授权结果保存在 google_token.json,之后会自动续期。两个文件都不会提交到 Git。
 
 安全:发送和回复邮件每次都要用户确认;邀请别人参加活动、删除活动也要确认;
-定时任务里只能读,不能发、不能删。
+定时任务里只能读,不能发、不能删。通讯录只读;云端硬盘不删除、不分享文件。
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import datetime
 import html
+import json
 import os
 import re
 import sys
@@ -22,10 +23,24 @@ from email.message import EmailMessage
 from pathlib import Path
 from typing import Callable
 
-SCOPES = [
-    "https://www.googleapis.com/auth/calendar.events",
-    "https://www.googleapis.com/auth/gmail.modify",  # 读邮件、标记已读、发邮件、存草稿(不能永久删除)
-]
+SERVICE_SCOPES = {
+    "calendar": ["https://www.googleapis.com/auth/calendar.events"],
+    "gmail": ["https://www.googleapis.com/auth/gmail.modify"],  # 读、标记已读、发送、草稿(不能永久删除)
+    "tasks": ["https://www.googleapis.com/auth/tasks"],
+    "people": [
+        "https://www.googleapis.com/auth/contacts.readonly",  # 只读通讯录
+        "https://www.googleapis.com/auth/contacts.other.readonly",  # 只读“其他联系人”(和你通过邮件的人)
+    ],
+    "drive": ["https://www.googleapis.com/auth/drive"],
+    "docs": ["https://www.googleapis.com/auth/documents"],
+    "sheets": ["https://www.googleapis.com/auth/spreadsheets"],
+    "youtube": ["https://www.googleapis.com/auth/youtube"],
+}
+SERVICE_VERSIONS = {"calendar": "v3", "gmail": "v1", "tasks": "v1", "people": "v1", "drive": "v3",
+                    "docs": "v1", "sheets": "v4", "youtube": "v3"}
+SERVICE_NAMES = {"calendar": "日历", "gmail": "Gmail", "tasks": "Google Tasks", "people": "通讯录",
+                 "drive": "云端硬盘", "docs": "Google 文档", "sheets": "Google 表格", "youtube": "YouTube"}
+SCOPES = [scope for scopes in SERVICE_SCOPES.values() for scope in scopes]
 INSTALL_HINT = "需要先安装 Google 相关的库:python -m pip install -r assistant/requirements.txt"
 SETUP_HINT = "还没有授权 Google 账号。请把 credentials.json 放进 assistant 文件夹,然后双击 google-login.bat 登录授权。"
 MAX_BODY_CHARS = 8000
@@ -50,6 +65,20 @@ class GoogleAccount:
     def configured(self) -> bool:
         return self.credentials_file.exists() or self.token_file.exists()
 
+    def granted_scopes(self) -> set[str] | None:
+        """授权文件里记录的已授权范围;读不到时返回 None(不做检查)。"""
+        try:
+            scopes = json.loads(self.token_file.read_text(encoding="utf-8")).get("scopes")
+        except (OSError, ValueError):
+            return None
+        if isinstance(scopes, str):
+            scopes = scopes.split()
+        return set(scopes) if isinstance(scopes, list) else None
+
+    def missing_scopes(self) -> list[str]:
+        granted = self.granted_scopes()
+        return [] if granted is None else [s for s in SCOPES if s not in granted]
+
     def credentials(self, interactive: bool = False):
         try:
             from google.auth.transport.requests import Request
@@ -59,7 +88,9 @@ class GoogleAccount:
 
         creds = None
         if self.token_file.exists():
-            creds = Credentials.from_authorized_user_file(str(self.token_file), SCOPES)
+            creds = Credentials.from_authorized_user_file(str(self.token_file))
+            if interactive and self.missing_scopes():
+                creds = None  # 加了新功能,重新登录授权一次
         if creds and creds.valid:
             return creds
         if creds and creds.expired and creds.refresh_token:
@@ -88,12 +119,18 @@ class GoogleAccount:
 
     def service(self, name: str):
         if name not in self._services:
+            granted = self.granted_scopes()
+            if granted is not None and not all(s in granted for s in SERVICE_SCOPES[name]):
+                raise GoogleNotReady(
+                    f"还没有授权“{SERVICE_NAMES[name]}”。请双击 google-login.bat 重新登录,并勾选允许所有权限。"
+                )
             try:
                 from googleapiclient.discovery import build
             except ImportError as e:
                 raise GoogleNotReady(INSTALL_HINT) from e
-            version = {"calendar": "v3", "gmail": "v1"}[name]
-            self._services[name] = build(name, version, credentials=self.credentials(), cache_discovery=False)
+            self._services[name] = build(
+                name, SERVICE_VERSIONS[name], credentials=self.credentials(), cache_discovery=False
+            )
         return self._services[name]
 
 
@@ -201,12 +238,321 @@ def _preview(body: str, limit: int = 300) -> str:
 # ======================== 工具 ========================
 
 
-class GoogleTools:
-    """日历和 Gmail 的操作。approve:普通确认;confirm:必须每次确认(发邮件、邀请别人)。"""
+# ======================== Tasks、通讯录、云端硬盘、文档、表格、YouTube ========================
 
-    def __init__(self, account: GoogleAccount, clock: Callable[[], datetime.datetime] | None = None) -> None:
+GOOGLE_EXPORTS = {
+    # Google 自己格式的文件:读取时导出成什么,下载时导出成什么
+    "application/vnd.google-apps.document": ("text/plain", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"),
+    "application/vnd.google-apps.spreadsheet": ("text/csv", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"),
+    "application/vnd.google-apps.presentation": ("text/plain", "application/vnd.openxmlformats-officedocument.presentationml.presentation", ".pptx"),
+}
+TEXT_MIMES = ("text/", "application/json", "application/xml", "application/javascript")
+MAX_READ_CHARS = 20000
+
+
+def file_id(text: str) -> str:
+    """接受文件 id 或分享链接,返回 id。"""
+    text = (text or "").strip()
+    match = re.search(r"/d/([a-zA-Z0-9_-]{10,})", text) or re.search(r"[?&]id=([a-zA-Z0-9_-]{10,})", text)
+    return match.group(1) if match else text
+
+
+def _q(text: str) -> str:
+    """Drive 搜索语句里的字符串转义。"""
+    return text.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _unique_path(folder: Path, name: str) -> Path:
+    name = re.sub(r'[<>:"/\\|?*]', "_", name).strip() or "下载的文件"
+    path = folder / name
+    stem, suffix, n = path.stem, path.suffix, 2
+    while path.exists():
+        path = folder / f"{stem} ({n}){suffix}"
+        n += 1
+    return path
+
+
+def _need_args(args: dict, *names: str) -> None:
+    missing = [n for n in names if not str(args.get(n) or "").strip()]
+    if missing:
+        raise ValueError(f"缺少参数:{'、'.join(missing)}")
+
+
+class _MoreGoogleTools:
+    """混入 GoogleTools 的其他服务。"""
+
+    account: GoogleAccount
+    downloads_dir: Callable[[], Path]
+
+    # ---- Google Tasks(待办,手机上也能看到) ----
+    def tasks(self, args: dict, approve: Approver = None, confirm: Approver = None) -> str:
+        api = self.account.service("tasks").tasks()
+        action = args.get("action")
+        tasklist = "@default"
+        if action == "list":
+            items = api.list(tasklist=tasklist, showCompleted=bool(args.get("include_done")),
+                             showHidden=bool(args.get("include_done")), maxResults=100).execute().get("items", [])
+            if not items:
+                return "待办清单是空的"
+            lines = []
+            for t in items:
+                mark = "✓" if t.get("status") == "completed" else "□"
+                due = f"(截止 {t['due'][:10]})" if t.get("due") else ""
+                notes = f" — {t['notes']}" if t.get("notes") else ""
+                lines.append(f"{mark} {t.get('title', '')}{due}{notes} | id:{t['id']}")
+            return "待办清单(Google Tasks):\n" + "\n".join(lines)
+        if action == "add":
+            _need_args(args, "title")
+            body = {"title": args["title"].strip()}
+            if args.get("notes"):
+                body["notes"] = args["notes"]
+            if args.get("due"):
+                due, _ = parse_when(str(args["due"])[:10])
+                body["due"] = f"{due.isoformat()}T00:00:00.000Z"
+            task = api.insert(tasklist=tasklist, body=body).execute()
+            return f"已添加待办:{task.get('title')}(手机上的 Google Tasks 里也能看到)"
+        if action in ("done", "delete"):
+            target = self._find_task(api, tasklist, str(args.get("key") or ""))
+            if action == "done":
+                api.patch(tasklist=tasklist, task=target["id"], body={"status": "completed"}).execute()
+                return f"已完成:{target.get('title')}"
+            api.delete(tasklist=tasklist, task=target["id"]).execute()
+            return f"已删除待办:{target.get('title')}"
+        raise ValueError(f"不支持的 action:{action}")
+
+    @staticmethod
+    def _find_task(api, tasklist: str, key: str) -> dict:
+        key = key.strip()
+        if not key:
+            raise ValueError("需要 key:待办的 id 或关键词")
+        items = api.list(tasklist=tasklist, showCompleted=False, maxResults=100).execute().get("items", [])
+        found = [t for t in items if t["id"] == key] or [t for t in items if key in t.get("title", "")]
+        if not found:
+            raise ValueError(f"没有找到“{key}”对应的待办")
+        if len(found) > 1:
+            raise ValueError("有多条待办都包含这个关键词:" + "、".join(t.get("title", "") for t in found) + ",请说得更具体")
+        return found[0]
+
+    # ---- 通讯录(只读) ----
+    def contacts(self, args: dict, approve: Approver = None, confirm: Approver = None) -> str:
+        _need_args(args, "query")
+        people = self.account.service("people")
+        mask = "names,emailAddresses,phoneNumbers"
+        if not self._contacts_warmed:  # Google 要求先用空查询“预热”一次搜索缓存
+            try:
+                people.people().searchContacts(query="", readMask=mask, pageSize=1).execute()
+                people.otherContacts().search(query="", readMask=mask, pageSize=1).execute()
+            except Exception:
+                pass
+            self._contacts_warmed = True
+        found = []
+        for source in (people.people().searchContacts, people.otherContacts().search):
+            try:
+                results = source(query=args["query"], readMask=mask, pageSize=10).execute().get("results", [])
+            except Exception:
+                continue
+            found.extend(r.get("person", {}) for r in results)
+        lines, seen = [], set()
+        for person in found:
+            name = (person.get("names") or [{}])[0].get("displayName", "(没有名字)")
+            emails = [e.get("value") for e in person.get("emailAddresses", []) if e.get("value")]
+            phones = [p.get("value") for p in person.get("phoneNumbers", []) if p.get("value")]
+            line = f"{name} | 邮箱:{'、'.join(emails) or '无'} | 电话:{'、'.join(phones) or '无'}"
+            if line not in seen:
+                seen.add(line)
+                lines.append(line)
+        if not lines:
+            return f"通讯录里没有找到“{args['query']}”"
+        return "找到的联系人:\n" + "\n".join(lines[:10])
+
+    # ---- 云端硬盘(不删除、不分享) ----
+    def drive(self, args: dict, approve: Approver = None, confirm: Approver = None) -> str:
+        files = self.account.service("drive").files()
+        action = args.get("action")
+        if action == "search":
+            query = str(args.get("query") or "").strip()
+            q = "trashed = false"
+            if query:
+                q += f" and (name contains '{_q(query)}' or fullText contains '{_q(query)}')"
+            result = files.list(q=q, pageSize=20, orderBy="modifiedTime desc",
+                                fields="files(id,name,mimeType,modifiedTime,size,webViewLink)").execute()
+            items = result.get("files", [])
+            if not items:
+                return f"云端硬盘里没有找到“{query}”"
+            return "云端硬盘里的文件(最近修改的在前):\n" + "\n".join(
+                f"{f['name']} | {f.get('modifiedTime', '')[:10]} | id:{f['id']} | {f.get('webViewLink', '')}"
+                for f in items)
+        if action == "read":
+            meta = self._drive_meta(files, args)
+            mime = meta.get("mimeType", "")
+            if mime in GOOGLE_EXPORTS:
+                data = files.export(fileId=meta["id"], mimeType=GOOGLE_EXPORTS[mime][0]).execute()
+            elif mime.startswith(TEXT_MIMES):
+                data = files.get_media(fileId=meta["id"]).execute()
+            else:
+                return f"“{meta['name']}”是 {mime} 格式,不能直接读;可以用 download 下载到电脑再打开"
+            text = data.decode("utf-8", errors="replace") if isinstance(data, bytes) else str(data)
+            if len(text) > MAX_READ_CHARS:
+                text = text[:MAX_READ_CHARS] + f"\n……(太长了,只显示前 {MAX_READ_CHARS} 个字)"
+            return f"“{meta['name']}”的内容:\n{text}"
+        if action == "download":
+            meta = self._drive_meta(files, args)
+            mime = meta.get("mimeType", "")
+            name = meta["name"]
+            if mime in GOOGLE_EXPORTS:
+                data = files.export(fileId=meta["id"], mimeType=GOOGLE_EXPORTS[mime][1]).execute()
+                name += GOOGLE_EXPORTS[mime][2]
+            elif mime.startswith("application/vnd.google-apps"):
+                return f"“{name}”这种 Google 格式不能下载"
+            else:
+                data = files.get_media(fileId=meta["id"]).execute()
+            folder = self.downloads_dir()
+            folder.mkdir(parents=True, exist_ok=True)
+            path = _unique_path(folder, name)
+            path.write_bytes(data if isinstance(data, bytes) else str(data).encode())
+            return f"已下载到 {path}"
+        if action == "upload":
+            _need_args(args, "path")
+            path = Path(os.path.expandvars(os.path.expanduser(str(args["path"]))))
+            if not path.is_file():
+                raise ValueError(f"找不到文件 {path}")
+            try:
+                from googleapiclient.http import MediaFileUpload
+            except ImportError as e:
+                raise GoogleNotReady(INSTALL_HINT) from e
+            media = MediaFileUpload(str(path), resumable=True)
+            created = files.create(body={"name": args.get("name") or path.name}, media_body=media,
+                                   fields="id,name,webViewLink").execute()
+            return f"已上传到云端硬盘:{created.get('name')} | {created.get('webViewLink', '')}"
+        raise ValueError(f"不支持的 action:{action}")
+
+    @staticmethod
+    def _drive_meta(files, args: dict) -> dict:
+        _need_args(args, "id")
+        return files.get(fileId=file_id(str(args["id"])), fields="id,name,mimeType,size").execute()
+
+    # ---- Google 文档 ----
+    def docs(self, args: dict, approve: Approver = None, confirm: Approver = None) -> str:
+        api = self.account.service("docs").documents()
+        action = args.get("action")
+        if action == "create":
+            _need_args(args, "title")
+            doc = api.create(body={"title": args["title"]}).execute()
+            doc_id = doc["documentId"]
+            if args.get("content"):
+                api.batchUpdate(documentId=doc_id, body={"requests": [
+                    {"insertText": {"location": {"index": 1}, "text": args["content"]}}]}).execute()
+            return f"已新建文档“{args['title']}”:https://docs.google.com/document/d/{doc_id}/edit"
+        if action == "append":
+            _need_args(args, "id", "content")
+            doc_id = file_id(str(args["id"]))
+            doc = api.get(documentId=doc_id).execute()
+            end = doc["body"]["content"][-1]["endIndex"] - 1
+            api.batchUpdate(documentId=doc_id, body={"requests": [
+                {"insertText": {"location": {"index": max(1, end)}, "text": "\n" + args["content"]}}]}).execute()
+            return f"已在“{doc.get('title', '')}”末尾添加内容"
+        raise ValueError(f"不支持的 action:{action}(读取文档请用 drive 的 read)")
+
+    # ---- Google 表格 ----
+    def sheets(self, args: dict, approve: Approver = None, confirm: Approver = None) -> str:
+        api = self.account.service("sheets").spreadsheets()
+        action = args.get("action")
+        rows = args.get("rows")
+        if rows is not None and not (isinstance(rows, list) and all(isinstance(r, list) for r in rows)):
+            raise ValueError("rows 要是二维数组,例如 [[\"2026-11-07\", \"午饭\", 15]]")
+        if action == "create":
+            _need_args(args, "title")
+            sheet = api.create(body={"properties": {"title": args["title"]}},
+                               fields="spreadsheetId,spreadsheetUrl").execute()
+            if rows:
+                self._append(api, sheet["spreadsheetId"], rows, "A1")
+            return (f"已新建表格“{args['title']}”:{sheet.get('spreadsheetUrl')}(id:{sheet['spreadsheetId']},"
+                    "以后要往里记东西,可以把 id 记下来)")
+        if action == "read":
+            _need_args(args, "id")
+            rng = args.get("range") or "A1:Z200"
+            values = api.values().get(spreadsheetId=file_id(str(args["id"])), range=rng).execute().get("values", [])
+            if not values:
+                return "这个范围里没有内容"
+            return f"表格内容({rng}):\n" + "\n".join(" | ".join(str(c) for c in row) for row in values)
+        if action == "append":
+            _need_args(args, "id")
+            if not rows:
+                raise ValueError("append 需要 rows")
+            self._append(api, file_id(str(args["id"])), rows, args.get("range") or "A1")
+            return f"已添加 {len(rows)} 行"
+        raise ValueError(f"不支持的 action:{action}")
+
+    @staticmethod
+    def _append(api, sheet_id: str, rows: list, rng: str) -> None:
+        api.values().append(spreadsheetId=sheet_id, range=rng, valueInputOption="USER_ENTERED",
+                            insertDataOption="INSERT_ROWS", body={"values": rows}).execute()
+
+    # ---- YouTube ----
+    def youtube(self, args: dict, approve: Approver = None, confirm: Approver = None) -> str:
+        yt = self.account.service("youtube")
+        action = args.get("action")
+        limit = max(1, min(20, int(args.get("max") or 8)))
+        if action == "search":
+            _need_args(args, "query")
+            items = yt.search().list(part="snippet", q=args["query"], type="video",
+                                     maxResults=limit).execute().get("items", [])
+            return self._videos([(i["id"]["videoId"], i["snippet"]) for i in items]) or "没有找到相关视频"
+        if action == "subscriptions":
+            days = max(1, min(30, int(args.get("days") or 2)))
+            since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)).isoformat()
+            subs = yt.subscriptions().list(part="snippet", mine=True, maxResults=50).execute().get("items", [])
+            channel_ids = [s["snippet"]["resourceId"]["channelId"] for s in subs]
+            if not channel_ids:
+                return "你还没有订阅任何频道"
+            channels = yt.channels().list(part="contentDetails", id=",".join(channel_ids),
+                                          maxResults=50).execute().get("items", [])
+            videos = []
+            for ch in channels:
+                uploads = ch["contentDetails"]["relatedPlaylists"]["uploads"]
+                for item in yt.playlistItems().list(part="snippet", playlistId=uploads,
+                                                    maxResults=3).execute().get("items", []):
+                    snippet = item["snippet"]
+                    if snippet.get("publishedAt", "") >= since[:19]:
+                        videos.append((snippet["resourceId"]["videoId"], snippet))
+            videos.sort(key=lambda v: v[1].get("publishedAt", ""), reverse=True)
+            if not videos:
+                return f"订阅的频道最近 {days} 天没有新视频"
+            return f"订阅频道最近 {days} 天的新视频:\n" + self._videos(videos[:20])
+        if action == "playlists":
+            items = yt.playlists().list(part="snippet", mine=True, maxResults=50).execute().get("items", [])
+            if not items:
+                return "你还没有播放列表"
+            return "你的播放列表:\n" + "\n".join(f"{p['snippet']['title']} | id:{p['id']}" for p in items)
+        if action == "add_to_playlist":
+            _need_args(args, "playlist_id", "video_id")
+            yt.playlistItems().insert(part="snippet", body={"snippet": {
+                "playlistId": args["playlist_id"],
+                "resourceId": {"kind": "youtube#video", "videoId": args["video_id"]}}}).execute()
+            return "已加到播放列表"
+        raise ValueError(f"不支持的 action:{action}")
+
+    @staticmethod
+    def _videos(videos: list) -> str:
+        return "\n".join(
+            f"{html.unescape(sn.get('title', ''))} | {sn.get('channelTitle') or sn.get('videoOwnerChannelTitle', '')} | "
+            f"{sn.get('publishedAt', '')[:10]} | https://www.youtube.com/watch?v={vid} | video_id:{vid}"
+            for vid, sn in videos)
+
+
+class GoogleTools(_MoreGoogleTools):
+    """Google 各项服务的操作。approve:普通确认;confirm:必须每次确认(发邮件、邀请别人)。"""
+
+    def __init__(
+        self,
+        account: GoogleAccount,
+        clock: Callable[[], datetime.datetime] | None = None,
+        downloads_dir: Callable[[], Path] | None = None,
+    ) -> None:
         self.account = account
         self.clock = clock or (lambda: datetime.datetime.now().astimezone())
+        self.downloads_dir = downloads_dir or (lambda: Path.home() / "Downloads")
+        self._contacts_warmed = False
 
     def _calendar(self):
         return self.account.service("calendar")

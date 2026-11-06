@@ -2257,7 +2257,7 @@ class GoogleToolboxTest(TempDirTest):
 
     def test_tools_offered_only_with_google(self):
         names = [t["name"] for t in self.make_toolbox({}).definitions()]
-        self.assertEqual(names[-2:], ["calendar", "gmail"])
+        self.assertEqual(names[-8:], ["calendar", "gmail", "google_tasks", "contacts", "drive", "docs", "sheets", "youtube"])
         plain = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m2.json")), lambda a: True)
         self.assertNotIn("gmail", [t["name"] for t in plain.definitions()])
 
@@ -2286,6 +2286,216 @@ class GoogleToolboxTest(TempDirTest):
         result = toolbox.run(tool_use("calendar", {"action": "list"}), lambda t: None)
         self.assertTrue(result["is_error"])
         self.assertNotIn("出错了", result["content"])  # 直接告诉用户怎么做
+
+
+class GoogleTasksTest(unittest.TestCase):
+    ITEMS = {"items": [
+        {"id": "t1", "title": "交报告", "due": "2026-11-10T00:00:00.000Z", "status": "needsAction"},
+        {"id": "t2", "title": "买牛奶", "notes": "低脂", "status": "needsAction"},
+        {"id": "t3", "title": "买面包", "status": "needsAction"},
+    ]}
+
+    def make(self, extra=None):
+        self.account = FakeAccount({"tasks.list": self.ITEMS, **(extra or {})})
+        return gmod.GoogleTools(self.account)
+
+    def test_list(self):
+        result = self.make().tasks({"action": "list"})
+        self.assertIn("□ 交报告(截止 2026-11-10) | id:t1", result)
+        self.assertIn("□ 买牛奶 — 低脂 | id:t2", result)
+        self.assertEqual(self.account.log[0][1]["tasklist"], "@default")
+
+    def test_add_with_due(self):
+        tools = self.make({"tasks.insert": {"title": "交作业"}})
+        self.assertIn("手机上", tools.tasks({"action": "add", "title": "交作业", "due": "2026-11-12"}))
+        self.assertEqual(self.account.log[-1][1]["body"], {"title": "交作业", "due": "2026-11-12T00:00:00.000Z"})
+
+    def test_done_and_delete_by_keyword(self):
+        tools = self.make({"tasks.patch": {}, "tasks.delete": ""})
+        self.assertEqual(tools.tasks({"action": "done", "key": "牛奶"}), "已完成:买牛奶")
+        self.assertEqual(self.account.log[-1][1], {"tasklist": "@default", "task": "t2", "body": {"status": "completed"}})
+        self.assertEqual(tools.tasks({"action": "delete", "key": "t1"}), "已删除待办:交报告")
+        with self.assertRaises(ValueError) as ctx:
+            tools.tasks({"action": "done", "key": "买"})  # 有两条都包含“买”
+        self.assertIn("买牛奶、买面包", str(ctx.exception))
+        with self.assertRaises(ValueError):
+            tools.tasks({"action": "done", "key": "不存在"})
+
+
+class ContactsTest(unittest.TestCase):
+    def test_search_merges_contacts_and_other_contacts(self):
+        person = {"names": [{"displayName": "阿明"}], "emailAddresses": [{"value": "ming@x.com"}],
+                  "phoneNumbers": [{"value": "+60 12-345 6789"}]}
+        other = {"names": [{"displayName": "Ming Lee"}], "emailAddresses": [{"value": "ming.lee@work.com"}]}
+        account = FakeAccount({"people.searchContacts": {"results": [{"person": person}]},
+                               "otherContacts.search": {"results": [{"person": other}, {"person": other}]}})
+        tools = gmod.GoogleTools(account)
+        result = tools.contacts({"query": "ming"})
+        self.assertIn("阿明 | 邮箱:ming@x.com | 电话:+60 12-345 6789", result)
+        self.assertEqual(result.count("Ming Lee"), 1)  # 去重
+        queries = [kw["query"] for name, kw in account.log]
+        self.assertEqual(queries[:2], ["", ""])  # 先预热
+        tools.contacts({"query": "ming"})
+        self.assertEqual([kw["query"] for name, kw in account.log][4:], ["ming", "ming"])  # 只预热一次
+
+    def test_not_found(self):
+        tools = gmod.GoogleTools(FakeAccount({"people.searchContacts": {}, "otherContacts.search": {}}))
+        self.assertIn("没有找到", tools.contacts({"query": "nobody"}))
+
+
+class DriveTest(TempDirTest):
+    def make(self, results):
+        self.account = FakeAccount(results)
+        return gmod.GoogleTools(self.account, downloads_dir=lambda: Path(self.tmp))
+
+    def test_search_escapes_quotes(self):
+        tools = self.make({"files.list": {"files": [
+            {"id": "f1", "name": "简历.pdf", "modifiedTime": "2026-10-01T10:00:00Z", "webViewLink": "https://d/f1"}]}})
+        result = tools.drive({"action": "search", "query": "Tom's 简历"})
+        self.assertIn("简历.pdf | 2026-10-01 | id:f1 | https://d/f1", result)
+        self.assertIn("name contains 'Tom\\'s 简历'", self.account.log[0][1]["q"])
+        self.assertIn("trashed = false", self.account.log[0][1]["q"])
+
+    def test_read_google_doc_and_unsupported(self):
+        doc = {"id": "d1", "name": "计划", "mimeType": "application/vnd.google-apps.document"}
+        tools = self.make({"files.get": doc, "files.export": "第一条\n第二条".encode()})
+        self.assertIn("第一条", tools.drive({"action": "read", "id": "https://docs.google.com/document/d/d1abcdefghijk/edit"}))
+        self.assertEqual(self.account.log[0][1]["fileId"], "d1abcdefghijk")  # 从链接里取出 id
+        self.assertEqual(self.account.log[-1][1]["mimeType"], "text/plain")
+        pdf = self.make({"files.get": {"id": "p1", "name": "a.pdf", "mimeType": "application/pdf"}})
+        self.assertIn("不能直接读", pdf.drive({"action": "read", "id": "p1"}))
+
+    def test_download_exports_and_avoids_overwrite(self):
+        sheet = {"id": "s1", "name": "账本", "mimeType": "application/vnd.google-apps.spreadsheet"}
+        tools = self.make({"files.get": sheet, "files.export": b"XLSX"})
+        Path(self.tmp, "账本.xlsx").write_bytes(b"old")
+        result = tools.drive({"action": "download", "id": "s1"})
+        new = Path(self.tmp, "账本 (2).xlsx")
+        self.assertIn(str(new), result)
+        self.assertEqual(new.read_bytes(), b"XLSX")
+        self.assertEqual(Path(self.tmp, "账本.xlsx").read_bytes(), b"old")
+
+    def test_upload(self):
+        path = Path(self.tmp, "照片.jpg")
+        path.write_bytes(b"jpg")
+        http = types.ModuleType("googleapiclient.http")
+        http.MediaFileUpload = lambda filename, resumable: ("media", filename, resumable)
+        tools = self.make({"files.create": {"name": "照片.jpg", "webViewLink": "https://d/x"}})
+        with mock.patch.dict(sys.modules, {"googleapiclient": types.ModuleType("googleapiclient"),
+                                           "googleapiclient.http": http}):
+            result = tools.drive({"action": "upload", "path": str(path)})
+        self.assertIn("已上传到云端硬盘:照片.jpg", result)
+        self.assertEqual(self.account.log[-1][1]["media_body"], ("media", str(path), True))
+        with self.assertRaises(ValueError):
+            tools.drive({"action": "upload", "path": str(Path(self.tmp, "没有.jpg"))})
+
+
+class DocsSheetsTest(unittest.TestCase):
+    def test_docs_create_and_append(self):
+        account = FakeAccount({"documents.create": {"documentId": "doc1"}, "documents.batchUpdate": {},
+                               "documents.get": {"title": "周报", "body": {"content": [{"endIndex": 1}, {"endIndex": 42}]}}})
+        tools = gmod.GoogleTools(account)
+        self.assertIn("https://docs.google.com/document/d/doc1/edit",
+                      tools.docs({"action": "create", "title": "周报", "content": "本周完成了……"}))
+        self.assertEqual(account.log[1][1]["body"]["requests"][0]["insertText"]["text"], "本周完成了……")
+        tools.docs({"action": "append", "id": "doc1", "content": "补充"})
+        self.assertEqual(account.log[-1][1]["body"]["requests"][0]["insertText"]["location"], {"index": 41})
+
+    def test_sheets_create_append_read(self):
+        account = FakeAccount({
+            "spreadsheets.create": {"spreadsheetId": "sh1", "spreadsheetUrl": "https://s/sh1"},
+            "spreadsheets.values.append": {},
+            "spreadsheets.values.get": {"values": [["日期", "项目", "金额"], ["2026-11-07", "午饭", "15"]]},
+        })
+        tools = gmod.GoogleTools(account)
+        result = tools.sheets({"action": "create", "title": "记账", "rows": [["日期", "项目", "金额"]]})
+        self.assertIn("id:sh1", result)
+        self.assertEqual(account.log[-1][1]["body"], {"values": [["日期", "项目", "金额"]]})
+        self.assertEqual(tools.sheets({"action": "append", "id": "sh1", "rows": [["2026-11-07", "午饭", 15]]}), "已添加 1 行")
+        self.assertEqual(account.log[-1][1]["valueInputOption"], "USER_ENTERED")
+        self.assertIn("2026-11-07 | 午饭 | 15", tools.sheets({"action": "read", "id": "sh1"}))
+        with self.assertRaises(ValueError):
+            tools.sheets({"action": "append", "id": "sh1", "rows": "午饭 15"})
+
+
+class YouTubeTest(unittest.TestCase):
+    def test_search(self):
+        account = FakeAccount({"search.list": {"items": [
+            {"id": {"videoId": "v1"}, "snippet": {"title": "Apex &amp; 攻略", "channelTitle": "某频道",
+                                                 "publishedAt": "2026-11-05T10:00:00Z"}}]}})
+        result = gmod.GoogleTools(account).youtube({"action": "search", "query": "apex"})
+        self.assertEqual(result, "Apex & 攻略 | 某频道 | 2026-11-05 | https://www.youtube.com/watch?v=v1 | video_id:v1")
+
+    def test_new_videos_from_subscriptions(self):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        recent = (now - datetime.timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        old = (now - datetime.timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        account = FakeAccount({
+            "subscriptions.list": {"items": [{"snippet": {"resourceId": {"channelId": "c1"}}}]},
+            "channels.list": {"items": [{"contentDetails": {"relatedPlaylists": {"uploads": "UU1"}}}]},
+            "playlistItems.list": {"items": [
+                {"snippet": {"title": "新视频", "videoOwnerChannelTitle": "频道A", "publishedAt": recent,
+                             "resourceId": {"videoId": "new1"}}},
+                {"snippet": {"title": "旧视频", "videoOwnerChannelTitle": "频道A", "publishedAt": old,
+                             "resourceId": {"videoId": "old1"}}}]},
+        })
+        result = gmod.GoogleTools(account).youtube({"action": "subscriptions"})
+        self.assertIn("新视频 | 频道A", result)
+        self.assertNotIn("旧视频", result)
+        self.assertEqual(account.log[1][1]["id"], "c1")
+
+    def test_add_to_playlist(self):
+        account = FakeAccount({"playlistItems.insert": {}})
+        tools = gmod.GoogleTools(account)
+        self.assertEqual(tools.youtube({"action": "add_to_playlist", "playlist_id": "PL1", "video_id": "v1"}), "已加到播放列表")
+        self.assertEqual(account.log[-1][1]["body"]["snippet"]["resourceId"]["videoId"], "v1")
+
+
+class GoogleScopesTest(TempDirTest):
+    def account(self, scopes):
+        token = Path(self.tmp, "token.json")
+        token.write_text(json.dumps({"scopes": scopes}))
+        return gmod.GoogleAccount(Path(self.tmp, "credentials.json"), token)
+
+    def test_missing_permission_asks_to_log_in_again(self):
+        account = self.account(gmod.SERVICE_SCOPES["calendar"] + gmod.SERVICE_SCOPES["gmail"])
+        self.assertIn("https://www.googleapis.com/auth/tasks", account.missing_scopes())
+        with self.assertRaises(gmod.GoogleNotReady) as ctx:
+            account.service("tasks")
+        self.assertIn("Google Tasks", str(ctx.exception))
+        self.assertIn("google-login.bat", str(ctx.exception))
+
+    def test_all_scopes_granted(self):
+        self.assertEqual(self.account(gmod.SCOPES).missing_scopes(), [])
+
+    def test_file_id_from_links(self):
+        self.assertEqual(gmod.file_id("https://docs.google.com/spreadsheets/d/1AbC_dEf-123456/edit#gid=0"), "1AbC_dEf-123456")
+        self.assertEqual(gmod.file_id("https://drive.google.com/open?id=1XyZ987654321"), "1XyZ987654321")
+        self.assertEqual(gmod.file_id(" plainId123 "), "plainId123")
+
+
+class GoogleTodoSwitchTest(GoogleToolboxTest):
+    def test_local_todo_hidden_and_todo_command_uses_google(self):
+        account = FakeAccount({"tasks.list": {"items": [{"id": "t1", "title": "交报告", "status": "needsAction"}]}})
+        toolbox = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m.json")), lambda a: True, workdir=self.tmp,
+                                todos=daily.Todos(os.path.join(self.tmp, "t.json")), google=gmod.GoogleTools(account))
+        names = [t["name"] for t in toolbox.definitions()]
+        self.assertNotIn("todo", names)
+        self.assertIn("google_tasks", names)
+        bot = app.Assistant(client=FakeClient(), toolbox=toolbox)
+        with mock.patch("builtins.input", side_effect=["/todo", "/exit"]), mock.patch("builtins.print") as fake_print:
+            app.chat(bot, None, None, queue.Queue())
+        printed = [str(c.args[0]) for c in fake_print.call_args_list if c.args]
+        self.assertTrue(any("□ 交报告" in p for p in printed))
+
+    def test_contacts_tool_runs(self):
+        toolbox = self.make_toolbox({"people.searchContacts": {"results": [
+            {"person": {"names": [{"displayName": "阿明"}], "emailAddresses": [{"value": "m@x.com"}]}}]},
+            "otherContacts.search": {}})
+        statuses = []
+        result = toolbox.run(tool_use("contacts", {"query": "阿明"}), statuses.append)
+        self.assertIn("m@x.com", result["content"])
+        self.assertEqual(statuses, ["查了通讯录"])
 
 
 class GoogleAccountTest(TempDirTest):
