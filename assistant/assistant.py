@@ -4,6 +4,7 @@
     在 assistant/.env 里写入 ANTHROPIC_API_KEY=你的Key(或设置同名环境变量)
     python assistant/assistant.py                    # 普通小助理
     python assistant/assistant.py --persona friday   # 私人助手“星期五”:有记忆,能上网、动手做事
+    python assistant/assistant.py --persona friday --voice   # 用语音和星期五对话
 """
 
 from __future__ import annotations
@@ -34,6 +35,8 @@ SYSTEM_PROMPT = (
 
 HELP_TEXT = "命令:/clear 清空对话  /exit 退出"
 FRIDAY_HELP_TEXT = "命令:/memory 看看我记得什么  /forget 关键词 删除记忆  /clear 开始新话题  /exit 退出"
+VOICE_HELP_TEXT = "语音模式:直接按回车开始说话,也可以照常打字;说“退出”或“再见”结束。"
+VOICE_EXIT_WORDS = ("退出", "退出程序", "再见", "拜拜")
 
 DEFAULT_CALL_ME = "老板"
 WEEKDAYS = "一二三四五六日"
@@ -66,8 +69,16 @@ FRIDAY_PROMPT = """你是“星期五”,{call_me}的私人 AI 助手。
 - 执行命令和写文件前{call_me}会逐一确认;如果被拒绝,换个办法或说明还需要什么。
 - 能直接办到的事就直接办,办完简要汇报结果;做不到的事坦白说,并给出替代方案。
 
-## 我记得的事
+{voice}## 我记得的事
 {memories}
+"""
+
+VOICE_PROMPT_SECTION = """## 语音对话
+{call_me}正在用语音和你交谈:用户的话是语音识别出来的,可能有错别字或同音字,按最合理的意思理解,
+实在听不明白就简短地确认一下。你的回答会被朗读出来,所以要像说话一样口语化、简短,
+一般两三句话说完;不要用表格、代码块、Markdown 符号和长网址,需要列步骤就用“第一、第二”。
+需要给出长内容(文章、代码、清单)时,用 write_file 保存成文件,口头告诉{call_me}保存在哪里。
+
 """
 
 
@@ -118,11 +129,13 @@ def friday_persona(
     call_me: str = DEFAULT_CALL_ME,
     toolbox: Optional[Toolbox] = None,
     clock: Callable[[], datetime.datetime] = datetime.datetime.now,
+    voice: bool = False,
 ) -> Persona:
     def system() -> str:
         return FRIDAY_PROMPT.format(
             call_me=call_me,
             computer=f"用户的电脑:{toolbox.describe()}" if toolbox else "(本次没有开启电脑操作)",
+            voice=VOICE_PROMPT_SECTION.format(call_me=call_me) if voice else "",
             memories=toolbox.memory.as_prompt() if toolbox else "(本次没有开启记忆)",
         )
 
@@ -327,23 +340,56 @@ def show_memory(toolbox: Toolbox) -> None:
         print(f"  - {f['text']}")
 
 
-def chat(assistant: Assistant, persona: Persona | None = None) -> None:
+def is_voice_exit(text: str) -> bool:
+    return text.strip(" ,.!?,。!?~～") in VOICE_EXIT_WORDS
+
+
+def say(voice, text: str) -> None:
+    """语音模式下把文字读出来;朗读出错不影响继续聊天。"""
+    if voice is None:
+        return
+    try:
+        voice.speak(text)
+    except KeyboardInterrupt:
+        print("(已停止朗读)")
+    except Exception as e:  # 朗读引擎偶尔出错,不要让整个程序退出
+        print(f"(朗读失败:{e})")
+
+
+def chat(assistant: Assistant, persona: Persona | None = None, voice=None) -> None:
+    """终端聊天循环。voice 不为 None 时开启语音:回车说话,回答会被读出来。"""
     if persona is None:
         persona = default_persona()
     toolbox = assistant.toolbox
     print(persona.greeting)
     print(persona.help_text)
+    if voice is not None:
+        print(VOICE_HELP_TEXT)
+        say(voice, persona.greeting)
     while True:
         try:
-            question = input("\n你:").strip()
+            question = input("\n你(回车说话):" if voice is not None else "\n你:").strip()
+            spoken = False
+            if not question and voice is not None:
+                question = voice.listen(print_status) or ""
+                if not question:
+                    print("  没听清,再说一次?")
+                    continue
+                spoken = True
+                print(f"你(语音):{question}")
         except (EOFError, KeyboardInterrupt):
             print(f"\n{persona.farewell}")
+            say(voice, persona.farewell)
             return
+        except Exception as e:  # 麦克风或语音识别出错时退回打字
+            print(f"\n  语音识别出错:{e}\n  这次可以先打字。")
+            continue
 
         if not question:
             continue
-        if question in ("/exit", "/quit"):
+        if question in ("/exit", "/quit") or (spoken and is_voice_exit(question)):
             print(persona.farewell)
+            say(voice, persona.farewell)
             return
         if question == "/clear":
             assistant.reset()
@@ -363,8 +409,9 @@ def chat(assistant: Assistant, persona: Persona | None = None) -> None:
 
         print(f"\n{persona.name}:", end="", flush=True)
         try:
-            assistant.ask(question, print_text, print_status)
+            answer = assistant.ask(question, print_text, print_status)
             print()
+            say(voice, answer)
         except KeyboardInterrupt:
             print("\n(已中断本次回答)")
         except RefusalError:
@@ -416,6 +463,14 @@ def main(argv: list[str] | None = None) -> None:
         help="“星期五”执行命令、读写文件的默认目录(默认是你的用户主目录)",
     )
     parser.add_argument("--no-web", action="store_true", help="不让“星期五”联网搜索")
+    parser.add_argument("--voice", action="store_true", help="语音对话:回车后对着麦克风说话,回答会读出来")
+    parser.add_argument(
+        "--stt",
+        default=None,
+        choices=("google", "vosk"),
+        help="语音识别引擎:google 在线(默认,需要能访问 Google),vosk 离线(首次自动下载中文模型)。"
+        "也可在 .env 里设置 FRIDAY_STT",
+    )
     parser.add_argument(
         "--env-file",
         default=DEFAULT_ENV_FILE,
@@ -433,9 +488,20 @@ def main(argv: list[str] | None = None) -> None:
         memory_file = args.memory_file or os.environ.get("FRIDAY_MEMORY_FILE") or DEFAULT_MEMORY_FILE
         workdir = os.path.expanduser(args.workdir) if args.workdir else None
         toolbox = Toolbox(Memory(memory_file), ConsoleApprover(), workdir=workdir, web=not args.no_web)
-        persona = friday_persona(call_me, toolbox)
+        persona = friday_persona(call_me, toolbox, voice=args.voice)
     else:
         persona = default_persona()
+
+    voice = None
+    if args.voice:
+        from voice import VoiceUnavailable, create_voice
+
+        stt = args.stt or os.environ.get("FRIDAY_STT") or "google"
+        try:
+            voice = create_voice(stt, print_status)
+        except VoiceUnavailable as e:
+            print(f"无法开启语音:{e}", file=sys.stderr)
+            sys.exit(1)
 
     try:
         assistant = Assistant(
@@ -448,7 +514,7 @@ def main(argv: list[str] | None = None) -> None:
     except anthropic.AnthropicError:
         print(f"未找到 API 凭据。{KEY_HINT}", file=sys.stderr)
         sys.exit(1)
-    chat(assistant, persona)
+    chat(assistant, persona, voice)
 
 
 if __name__ == "__main__":

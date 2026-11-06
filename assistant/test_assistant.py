@@ -58,6 +58,7 @@ _spec.loader.exec_module(app)
 
 
 tools = sys.modules["friday_tools"]  # assistant.py 加载时已导入
+import voice  # noqa: E402  assistant.py 已把所在目录加入 sys.path
 
 
 def text_block(text):
@@ -557,6 +558,262 @@ class LoadEnvFileTest(unittest.TestCase):
             app.DEFAULT_ENV_FILE,
             os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
         )
+
+
+class FakeVoice:
+    def __init__(self, heard=()):
+        self.heard = list(heard)
+        self.spoken = []
+
+    def listen(self, on_status):
+        item = self.heard.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def speak(self, text):
+        self.spoken.append(text)
+
+
+class VoiceChatTest(unittest.TestCase):
+    def run_chat(self, inputs, bot, fake_voice, persona=None):
+        with mock.patch("builtins.input", side_effect=inputs), mock.patch("builtins.print") as fake_print:
+            app.chat(bot, persona, fake_voice)
+        return [c.args[0] for c in fake_print.call_args_list if c.args]
+
+    def test_enter_to_speak_and_answer_is_read_aloud(self):
+        client = FakeClient(FakeStream(["明天", "晴"]))
+        bot = app.Assistant(client=client)
+        fake_voice = FakeVoice(["明天天气怎么样"])
+
+        printed = self.run_chat(["", "/exit"], bot, fake_voice)
+
+        self.assertEqual(client.calls[0]["messages"][0]["content"], "明天天气怎么样")
+        self.assertIn("你(语音):明天天气怎么样", printed)
+        greeting = app.default_persona().greeting
+        self.assertEqual(fake_voice.spoken, [greeting, "明天晴", "再见!"])
+
+    def test_typing_still_works_in_voice_mode(self):
+        client = FakeClient(FakeStream(["好"]))
+        fake_voice = FakeVoice()
+        self.run_chat(["打字的问题", "/exit"], app.Assistant(client=client), fake_voice)
+        self.assertEqual(client.calls[0]["messages"][0]["content"], "打字的问题")
+
+    def test_unheard_and_recognition_errors_keep_going(self):
+        client = FakeClient(FakeStream(["好"]))
+        fake_voice = FakeVoice([None, voice.VoiceUnavailable("连不上"), "你好"])
+        printed = self.run_chat(["", "", "", "/exit"], app.Assistant(client=client), fake_voice)
+        self.assertIn("  没听清,再说一次?", printed)
+        self.assertTrue(any("连不上" in p for p in printed))
+        self.assertEqual(client.calls[0]["messages"][0]["content"], "你好")
+
+    def test_saying_goodbye_exits(self):
+        client = FakeClient()
+        self.run_chat([""], app.Assistant(client=client), FakeVoice(["再见。"]))
+        self.assertEqual(client.calls, [])
+
+    def test_typed_goodbye_is_a_normal_question(self):
+        client = FakeClient(FakeStream(["拜"]))
+        self.run_chat(["再见", "/exit"], app.Assistant(client=client), FakeVoice())
+        self.assertEqual(len(client.calls), 1)
+
+    def test_speech_failure_does_not_stop_chat(self):
+        class BrokenVoice(FakeVoice):
+            def speak(self, text):
+                raise RuntimeError("引擎坏了")
+
+        client = FakeClient(FakeStream(["A"]), FakeStream(["B"]))
+        bot = app.Assistant(client=client)
+        self.run_chat(["Q1", "Q2", "/exit"], bot, BrokenVoice())
+        self.assertEqual(len(client.calls), 2)
+
+    def test_friday_voice_prompt(self):
+        with tempfile.TemporaryDirectory() as d:
+            toolbox = tools.Toolbox(tools.Memory(os.path.join(d, "m.json")), lambda a: True, workdir=d)
+            self.assertIn("## 语音对话", app.friday_persona("队长", toolbox, voice=True).system())
+            self.assertNotIn("## 语音对话", app.friday_persona("队长", toolbox).system())
+
+    def test_main_creates_voice(self):
+        env = {"ANTHROPIC_API_KEY": "sk-test", "FRIDAY_STT": "vosk"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(app, "Assistant"), \
+                mock.patch.object(app, "chat") as chat, \
+                mock.patch.object(voice, "create_voice", return_value="VOICE") as create:
+            app.main(["--voice", "--env-file", os.devnull])
+        self.assertEqual(create.call_args.args[0], "vosk")
+        self.assertEqual(chat.call_args.args[2], "VOICE")
+
+    def test_main_exits_when_voice_unavailable(self):
+        env = {"ANTHROPIC_API_KEY": "sk-test"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(app, "Assistant"), \
+                mock.patch.object(app, "chat") as chat, \
+                mock.patch("builtins.print"), \
+                mock.patch.object(voice, "create_voice", side_effect=voice.VoiceUnavailable("缺依赖")):
+            with self.assertRaises(SystemExit):
+                app.main(["--voice", "--stt", "google", "--env-file", os.devnull])
+        chat.assert_not_called()
+
+
+class CleanForSpeechTest(unittest.TestCase):
+    def test_strips_markdown(self):
+        text = (
+            "## 结论\n"
+            "**明天晴**,适合 `出门`。\n\n"
+            "- 第一点\n"
+            "1. 第二点\n"
+            "| 时间 | 温度 |\n|---|---|\n| 早 | 10 |\n"
+            "详见 [天气网](https://example.com) 或 https://example.com/a\n"
+            "```python\nprint(1)\n```"
+        )
+        self.assertEqual(
+            voice.clean_for_speech(text),
+            "结论\n明天晴,适合 出门。\n第一点\n第二点\n, 时间 , 温度 ,\n, 早 , 10 ,\n详见 天气网 或 (链接)\n(代码略)",
+        )
+
+    def test_empty(self):
+        self.assertEqual(voice.clean_for_speech("**  **"), "")
+
+
+class FakeSR(types.ModuleType):
+    """假的 speech_recognition 模块。"""
+
+    class WaitTimeoutError(Exception):
+        pass
+
+    class UnknownValueError(Exception):
+        pass
+
+    class RequestError(Exception):
+        pass
+
+    def __init__(self, results):
+        super().__init__("speech_recognition")
+        self.results = list(results)
+        fake = self
+
+        class Microphone:
+            def __init__(self, sample_rate=None):
+                self.sample_rate = sample_rate
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        class Recognizer:
+            pause_threshold = 0.8
+
+            def adjust_for_ambient_noise(self, source, duration=1):
+                pass
+
+            def listen(self, source, timeout=None, phrase_time_limit=None):
+                item = fake.results.pop(0)
+                if isinstance(item, fake.WaitTimeoutError):
+                    raise item
+                return item  # 其他异常留到识别时抛出
+
+            def recognize_google(self, audio, language=None):
+                fake.language = language
+                if isinstance(audio, Exception):
+                    raise audio
+                return audio
+
+        self.Microphone = Microphone
+        self.Recognizer = Recognizer
+
+
+class FakeEngine:
+    def __init__(self, voices):
+        self.props = {"voices": voices}
+        self.said = []
+
+    def getProperty(self, name):
+        return self.props[name]
+
+    def setProperty(self, name, value):
+        self.props[name] = value
+
+    def say(self, text):
+        self.said.append(text)
+
+    def runAndWait(self):
+        pass
+
+    def stop(self):
+        pass
+
+
+class VoiceModuleTest(unittest.TestCase):
+    def fake_tts(self, voices):
+        engine = FakeEngine(voices)
+        module = types.ModuleType("pyttsx3")
+        module.init = lambda: engine
+        return module, engine
+
+    def test_speaker_picks_chinese_voice_and_cleans_text(self):
+        voices = [
+            SimpleNamespace(id="EN-US_ZIRA", name="Microsoft Zira", languages=[]),
+            SimpleNamespace(id="TTS_MS_ZH-CN_HUIHUI_11.0", name="Microsoft Huihui", languages=[]),
+        ]
+        module, engine = self.fake_tts(voices)
+        with mock.patch.dict(sys.modules, {"pyttsx3": module}):
+            speaker = voice.Speaker()
+        self.assertTrue(speaker.has_chinese_voice)
+        self.assertEqual(engine.props["voice"], "TTS_MS_ZH-CN_HUIHUI_11.0")
+        speaker.speak("**你好**")
+        speaker.speak("** **")  # 清理后为空,不朗读
+        self.assertEqual(engine.said, ["你好"])
+
+    def test_speaker_without_chinese_voice(self):
+        module, engine = self.fake_tts([SimpleNamespace(id="en", name="Zira", languages=[b"\x05en_US"])])
+        with mock.patch.dict(sys.modules, {"pyttsx3": module}):
+            self.assertFalse(voice.Speaker().has_chinese_voice)
+        self.assertNotIn("voice", engine.props)
+
+    def test_missing_dependencies(self):
+        with mock.patch.dict(sys.modules, {"pyttsx3": None, "speech_recognition": None}):
+            with self.assertRaises(voice.VoiceUnavailable):
+                voice.Speaker()
+            with self.assertRaises(voice.VoiceUnavailable):
+                voice.Listener()
+
+    def test_listener_google(self):
+        sr = FakeSR(["你好星期五", FakeSR.WaitTimeoutError(), FakeSR.UnknownValueError()])
+        with mock.patch.dict(sys.modules, {"speech_recognition": sr}):
+            listener = voice.Listener("google", on_status=lambda t: None)
+            self.assertEqual(listener.listen(lambda t: None), "你好星期五")
+            self.assertEqual(sr.language, "zh-CN")
+            self.assertIsNone(listener.listen(lambda t: None))  # 没开口
+            self.assertIsNone(listener.listen(lambda t: None))  # 没听清
+
+    def test_listener_network_error_suggests_vosk(self):
+        sr = FakeSR([FakeSR.RequestError("连不上")])
+        with mock.patch.dict(sys.modules, {"speech_recognition": sr}):
+            listener = voice.Listener("google", on_status=lambda t: None)
+            with self.assertRaises(voice.VoiceUnavailable) as ctx:
+                listener.listen(lambda t: None)
+        self.assertIn("--stt vosk", str(ctx.exception))
+
+    def test_microphone_unavailable(self):
+        sr = FakeSR([])
+
+        def broken(*a, **k):
+            raise AttributeError("Could not find PyAudio; check installation")
+
+        sr.Microphone = broken
+        with mock.patch.dict(sys.modules, {"speech_recognition": sr}):
+            with self.assertRaises(voice.VoiceUnavailable):
+                voice.Listener("google", on_status=lambda t: None)
+
+    def test_vosk_model_already_downloaded(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, voice.VOSK_MODEL_NAME))
+            with mock.patch("urllib.request.urlretrieve") as download:
+                path = voice.ensure_vosk_model(d, on_status=lambda t: None)
+            download.assert_not_called()
+            self.assertEqual(path, os.path.join(d, voice.VOSK_MODEL_NAME))
 
 
 if __name__ == "__main__":

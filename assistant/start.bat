@@ -16,6 +16,15 @@ echo First run: installing dependencies, please wait...
 if errorlevel 1 goto pip_failed
 :deps_ok
 
+rem ---- 2b. Voice mode (friday-voice.bat): install voice dependencies on first run ----
+if not defined ASSISTANT_VOICE goto voice_ok
+%PY% -c "import speech_recognition, pyttsx3, pyaudio, vosk" >nul 2>nul
+if not errorlevel 1 goto voice_ok
+echo First voice run: installing voice dependencies, please wait...
+%PY% -m pip install -r requirements-voice.txt
+if errorlevel 1 goto pip_failed
+:voice_ok
+
 rem ---- 3. No .env and no environment variable: create .env and open it in Notepad ----
 if exist ".env" goto run
 if defined ANTHROPIC_API_KEY goto run
@@ -48,6 +57,7 @@ exit /b 1
 echo.
 echo Failed to install dependencies. Please check your network and try again.
 echo You can also run manually: python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+if defined ASSISTANT_VOICE echo For voice: python -m pip install -r requirements-voice.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 echo.
 pause
 exit /b 1

@@ -23,3 +23,6 @@ __pycache__/
 
 # 星期五的记忆(个人信息,不要提交)
 assistant/friday_memory.json*
+
+# 离线语音识别模型(首次使用时自动下载)
+assistant/models/

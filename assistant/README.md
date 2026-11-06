@@ -46,6 +46,29 @@
   允许吗?[y] 允许  [n] 拒绝  [a] 本次运行都允许:y
 ```
 
+### 语音对话
+
+双击 `assistant\friday-voice.bat` 就能用嘴和“星期五”聊天,它的回答会读出来。第一次运行会自动安装语音相关的依赖。
+
+- **说话**:直接按**回车**,看到“我在听,请说话……”后对着麦克风说,停顿 1 秒自动结束。
+- **打字**:照常输入文字再回车,和平时一样。
+- **结束**:说“退出”或“再见”,或者按 Ctrl+C。朗读时按 Ctrl+C 可以打断朗读。
+- 语音模式下,“星期五”的回答会更口语、更简短;长内容(文章、代码)会存成文件告诉你位置。
+- 执行命令、写文件仍然要你在键盘上按 `y` 确认,语音不能代替确认。
+
+**语音识别引擎**(用 `--stt` 参数或在 `.env` 里写 `FRIDAY_STT=` 选择):
+
+| 引擎 | 说明 |
+|---|---|
+| `google`(默认) | 在线识别,免费、准确度好,**需要能访问 Google** |
+| `vosk` | 离线识别,不需要联网,准确度稍差;第一次使用会自动下载约 42MB 的中文模型到 `assistant/models/` |
+
+如果识别时提示“在线语音识别连接失败”,在 `assistant/.env` 里加一行 `FRIDAY_STT=vosk` 改用离线识别。
+
+**朗读**用的是系统自带的语音,不需要联网。如果提示“没有找到中文朗读语音”,在 Windows 的“设置 → 时间和语言 → 语音”里添加中文(简体)语音即可。
+
+命令行用法:`python assistant/assistant.py --persona friday --voice`(普通小助理也可以加 `--voice`)。手动安装语音依赖:`python -m pip install -r assistant/requirements-voice.txt`。
+
 ### 安全
 
 - **执行命令和写文件之前一定会先问你**,你输入 `y` 才会执行;输入 `a` 表示本次运行期间都不再询问(关掉程序后恢复询问)。读取文件、搜索网页不需要确认。
@@ -136,6 +159,7 @@ python assistant/assistant.py --effort high        # 思考更仔细(更慢)
 python assistant/assistant.py --model claude-sonnet-5-5
 python assistant/assistant.py --persona friday     # 切换为“星期五”
 python assistant/assistant.py --persona friday --call-me 队长
+python assistant/assistant.py --persona friday --voice --stt vosk   # 语音对话,离线识别
 ```
 
 `--effort` 可选 `low`、`medium`、`high`、`xhigh`、`max`。普通小助理默认 `low`(适合日常聊天),“星期五”默认 `medium`(要上网、动手做事,多想一点更稳)。
