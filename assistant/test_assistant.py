@@ -4,6 +4,7 @@
 """
 
 import array
+import asyncio
 import base64
 import datetime
 import importlib.util
@@ -13,6 +14,7 @@ import queue
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -2714,6 +2716,77 @@ class StatusEventTest(unittest.TestCase):
             app.chat(bot, None, None, events)
         printed = [str(c.args[0]) for c in fake_print.call_args_list if c.args]
         self.assertIn("\n  〔已和 Discord 账号 alt 配对〕", printed)
+
+
+class DiscordChannelRulesTest(DiscordGateTest):
+    def test_server_channels_need_mention_or_friday_channel(self):
+        gate = self.paired((42, "main"))
+        gate.handle(42, "main", False, "和朋友聊天", "general")  # 普通频道、没 @ 机器人:不插嘴
+        self.assertTrue(self.events.empty())
+        gate.handle(42, "main", False, "今天天气怎么样", "general", mentioned=True)
+        gate.handle(42, "main", False, "放首歌", "friday-chat", named_channel=True)
+        texts = [self.events.get_nowait()[1].text for _ in range(2)]
+        self.assertEqual(texts, ["今天天气怎么样", "放首歌"])
+
+    def test_strangers_in_friday_channel_are_ignored(self):
+        gate = self.paired((42, "main"))
+        gate.handle(99, "friend", False, "帮我关机", "friday", named_channel=True)
+        self.assertTrue(self.events.empty())
+        self.assertEqual(self.sent, [])
+
+    def test_pairing_in_friday_channel(self):
+        gate = self.make()
+        gate.handle(42, "main", False, gate.pair_code, "friday", named_channel=True)
+        self.assertEqual(gate.owners, {42: "main"})
+        self.assertIn("@我", self.sent[-1][1])
+
+    def test_channel_names(self):
+        self.assertTrue(dmod.is_friday_channel("Friday"))
+        self.assertTrue(dmod.is_friday_channel("和星期五聊天"))
+        self.assertFalse(dmod.is_friday_channel("常规"))
+        self.assertFalse(dmod.is_friday_channel(None))
+
+
+class DiscordSendTest(TempDirTest):
+    def setUp(self):
+        super().setUp()
+        self.bridge = dmod.DiscordBridge(FAKE_TOKEN, queue.Queue(), Path(self.tmp, "d.json"), lambda t: None)
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+        self.thread.start()
+        self.bridge.loop = self.loop
+        self.addCleanup(lambda: self.loop.call_soon_threadsafe(self.loop.stop))
+        self.received = []
+        self.done = threading.Event()
+        test = self
+
+        class Channel:
+            async def send(self, text):
+                test.received.append(text)
+                if len(test.received) >= test.expected:
+                    test.done.set()
+
+        self.channel = Channel()
+
+    def test_send_from_bot_thread_does_not_deadlock(self):
+        self.expected = 1
+
+        async def on_message():  # 机器人线程里(比如回复“配对成功”)直接调用 send
+            self.bridge.send(self.channel, "配对成功!")
+
+        started = time.monotonic()
+        asyncio.run_coroutine_threadsafe(on_message(), self.loop).result(timeout=2)
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertTrue(self.done.wait(2))
+        self.assertEqual(self.received, ["配对成功!"])
+
+    def test_send_from_chat_thread_waits_and_keeps_order(self):
+        self.expected = 3
+        long_text = "\n".join("第%d段" % i + "字" * 1500 for i in range(3))
+        self.bridge.send(self.channel, long_text)
+        self.assertEqual(len(self.received), 3)  # 返回时已经发完
+        self.assertTrue(self.received[0].startswith("第0段"))
+        self.assertTrue(self.received[2].startswith("第2段"))
 
 
 class DiscordCommandTest(TempDirTest):

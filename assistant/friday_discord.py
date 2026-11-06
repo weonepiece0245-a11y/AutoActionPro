@@ -1,6 +1,7 @@
 """在手机上通过 Discord 私信和“星期五”说话。
 
-- 机器人只在私信里工作,只听配对过的账号(可以是主人的几个号),其他人的消息一律忽略。
+- 机器人只听配对过的账号(可以是主人的几个号),其他人的消息一律忽略。
+  可以私信它;在服务器里,在名字带 friday / 星期五 的频道说话,或在别的频道 @它。
 - 第一次使用要配对:电脑上显示 6 位配对码,在 Discord 私信机器人发送这个码。
   想再加一个号:在“星期五”窗口输入 /discord pair 生成新配对码(10 分钟有效、只能用一次)。
 - “星期五”需要用户确认的操作(执行命令、关程序、发邮件……)会发到 Discord 问主人,
@@ -16,6 +17,7 @@ import base64
 import json
 import os
 import queue
+import re
 import secrets
 import sys
 import threading
@@ -54,6 +56,11 @@ def bot_id_from_token(token: str) -> str | None:
     except Exception:
         return None
     return value if value.isdigit() else None
+
+
+def is_friday_channel(name: str | None) -> bool:
+    name = (name or "").lower()
+    return "friday" in name or "星期五" in name
 
 
 def invite_url(bot_id: str) -> str:
@@ -144,8 +151,13 @@ class DiscordGate:
         return self.pair_code is not None and (self.pair_expires is None or self.clock() <= self.pair_expires)
 
     # ---- 收到私信 ----
-    def handle(self, author_id: int, author_name: str, is_dm: bool, text: str, channel) -> None:
-        if not is_dm:
+    def handle(self, author_id: int, author_name: str, is_dm: bool, text: str, channel,
+               mentioned: bool = False, named_channel: bool = False) -> None:
+        """is_dm:私信;mentioned:消息里 @ 了机器人;named_channel:频道名带 friday / 星期五。
+
+        服务器频道里只有 @ 机器人,或在专用频道里说话时才处理,免得和朋友聊天时它插嘴。
+        """
+        if not (is_dm or mentioned or named_channel):
             return
         text = (text or "").strip()
         if author_id not in self.owners:
@@ -154,11 +166,11 @@ class DiscordGate:
                 self.pair_code = self.pair_expires = None
                 self._save_owners()
                 self.on_status(f"已和 Discord 账号 {author_name} 配对(现在共 {len(self.owners)} 个账号)")
-                self.send(channel, "配对成功!以后在这里私信我就行。")
+                self.send(channel, "配对成功!以后私信我,或在名字带 friday / 星期五 的频道里说话,或 @我 都可以。")
             elif not self.owners:
                 self.send(channel, "还没有配对。请发送“星期五”电脑窗口里显示的 6 位配对码。")
             else:
-                self.on_status(f"有没配对的账号({author_name})私信了机器人,已忽略")
+                self.on_status(f"有没配对的账号({author_name})找机器人说话,已忽略")
             return
         if not text:
             return
@@ -211,39 +223,77 @@ class DiscordBridge:
 
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
-        client = discord.Client(intents=discord.Intents.default())  # 私信内容不需要特殊权限
+        # 先尝试读取服务器频道里的消息内容(需要在开发者页面打开 Message Content Intent);
+        # 没打开的话退回只用私信和 @机器人(这两种不需要特殊权限)
+        intents = discord.Intents.default()
+        intents.message_content = True
+        try:
+            self.loop.run_until_complete(self._make_client(discord, intents).start(self.token))
+        except discord.PrivilegedIntentsRequired:
+            self.on_status("开发者页面还没打开 Message Content Intent:现在只能私信机器人,或在频道里 @它")
+            try:
+                self.loop.run_until_complete(self._make_client(discord, discord.Intents.default()).start(self.token))
+            except Exception as e:
+                self._report(discord, e)
+        except Exception as e:
+            self._report(discord, e)
+
+    def _report(self, discord, error: Exception) -> None:
+        if isinstance(error, discord.LoginFailure):
+            self.on_status("Discord 机器人的 Token 无效,请双击 discord-setup.bat 重新设置")
+        else:
+            self.on_status(f"Discord 连接断开:{type(error).__name__}: {error}")
+
+    def _make_client(self, discord, intents):
+        client = discord.Client(intents=intents)
 
         @client.event
         async def on_ready():
             self.on_status(f"Discord 已连接:{client.user}")
             if self.gate.pair_code:
-                self.on_status(f"还没配对:在 Discord 私信机器人 {client.user},发送配对码 {self.gate.pair_code}")
+                self.on_status(f"还没配对:私信机器人 {client.user},发送配对码 {self.gate.pair_code}")
 
         @client.event
         async def on_message(message):
             if message.author.bot:
                 return
-            self.gate.handle(message.author.id, str(message.author),
-                             isinstance(message.channel, discord.DMChannel), message.content, message.channel)
+            mentioned = client.user in message.mentions
+            text = re.sub(rf"<@!?{client.user.id}>", "", message.content or "").strip()
+            self.gate.handle(
+                message.author.id, str(message.author), isinstance(message.channel, discord.DMChannel), text,
+                message.channel, mentioned=mentioned, named_channel=is_friday_channel(getattr(message.channel, "name", "")),
+            )
 
-        try:
-            self.loop.run_until_complete(client.start(self.token))
-        except discord.LoginFailure:
-            self.on_status("Discord 机器人的 Token 无效,请双击 discord-setup.bat 重新设置")
-        except Exception as e:
-            self.on_status(f"Discord 连接断开:{type(e).__name__}: {e}")
+        return client
 
     def send(self, channel, text: str) -> None:
-        """从任何线程发消息(在机器人的事件循环里执行)。"""
+        """从任何线程发消息。在机器人自己的线程里调用时只安排发送、不等待(等待会把自己卡死)。"""
         if self.loop is None:
             return
-        for part in split_message(text):
-            future = asyncio.run_coroutine_threadsafe(channel.send(part), self.loop)
-            try:
-                future.result(timeout=30)
-            except Exception as e:
-                self.on_status(f"发送 Discord 消息失败:{e}")
-                return
+        parts = split_message(text)
+
+        async def send_all():
+            for part in parts:
+                await channel.send(part)
+
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is self.loop:
+            task = self.loop.create_task(send_all())
+            task.add_done_callback(self._log_failure)
+            return
+        future = asyncio.run_coroutine_threadsafe(send_all(), self.loop)
+        try:
+            future.result(timeout=60)
+        except Exception as e:
+            self.on_status(f"发送 Discord 消息失败:{type(e).__name__}: {e}")
+
+    def _log_failure(self, task) -> None:
+        if not task.cancelled() and task.exception() is not None:
+            error = task.exception()
+            self.on_status(f"发送 Discord 消息失败:{type(error).__name__}: {error}")
 
 
 # ======================== 设置向导 ========================
