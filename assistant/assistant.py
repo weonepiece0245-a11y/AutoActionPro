@@ -481,6 +481,27 @@ def next_event(events: queue.Queue):
             continue
 
 
+def error_text(error: BaseException) -> tuple[str, bool] | None:
+    """把回答过程中的异常翻译成给用户看的话;返回 (文字, 是否应当退出),不认识的异常返回 None。"""
+    if isinstance(error, KeyboardInterrupt):
+        return "(已中断本次回答)", False
+    if isinstance(error, RefusalError):
+        return "抱歉,这个问题我无法回答,换个问题试试吧。", False
+    if isinstance(error, IncompleteAnswerError):
+        return f"这次没能完成:{error}。可以把任务拆小一点再试。", False
+    if isinstance(error, anthropic.AuthenticationError):
+        return f"API Key 无效或未设置。{KEY_HINT}", True
+    if isinstance(error, anthropic.RateLimitError):
+        return "请求太频繁了,请稍等片刻再试。", False
+    if isinstance(error, anthropic.APIStatusError):
+        return f"服务出错(HTTP {error.status_code}):{error.message}", False
+    if isinstance(error, anthropic.APIConnectionError):
+        return "网络连接失败,请检查网络后重试。", False
+    if isinstance(error, ValueError):  # 流式工具参数完全无法解析时 SDK 抛出 ValueError
+        return "这次的工具调用出了点问题,请再说一次。", False
+    return None
+
+
 def answer(assistant: Assistant, persona: Persona, question: str, voice, reply=None) -> bool:
     """让助手回答一个问题并读出来;reply 不为空时(Discord)把回答也发回去。
 
@@ -496,24 +517,12 @@ def answer(assistant: Assistant, persona: Persona, question: str, voice, reply=N
         else:
             say(voice, text)
         return True
-    except KeyboardInterrupt:
-        problem = "(已中断本次回答)"
-    except RefusalError:
-        problem = "抱歉,这个问题我无法回答,换个问题试试吧。"
-    except IncompleteAnswerError as e:
-        problem = f"这次没能完成:{e}。可以把任务拆小一点再试。"
-    except anthropic.AuthenticationError:
-        problem = f"API Key 无效或未设置。{KEY_HINT}"
-        keep_going = False
-    except anthropic.RateLimitError:
-        problem = "请求太频繁了,请稍等片刻再试。"
-    except anthropic.APIStatusError as e:
-        problem = f"服务出错(HTTP {e.status_code}):{e.message}"
-    except anthropic.APIConnectionError:
-        problem = "网络连接失败,请检查网络后重试。"
-    except ValueError:
-        # 流式工具参数完全无法解析时 SDK 抛出 ValueError
-        problem = "这次的工具调用出了点问题,请再说一次。"
+    except (KeyboardInterrupt, Exception) as e:
+        described = error_text(e)
+        if described is None:
+            raise
+        problem, fatal = described
+        keep_going = not fatal
     print(f"\n{problem}")
     if reply is not None:
         reply(problem)
@@ -772,6 +781,259 @@ def serve(assistant: Assistant, persona: Persona, events: queue.Queue, discord, 
         sys.stdout.flush()
 
 
+class WebSession:
+    """图形界面模式:把回答、状态、语音推给窗口。在主线程里使用。"""
+
+    def __init__(self, assistant: Assistant | None, persona: Persona, hub, synthesize=None,
+                 startup_error: str = "") -> None:
+        self.assistant = assistant
+        self.persona = persona
+        self.hub = hub
+        self.synthesize = synthesize
+        self.startup_error = startup_error
+        self.speak_enabled = True  # 跟着界面上“朗读回答”开关走
+
+    def ask(self, text: str, source: str = "web", speak: bool = False, prefix: str = "",
+            show_user: bool = True) -> str | None:
+        hub = self.hub
+        if show_user:
+            hub.broadcast({"type": "user", "text": text, "source": source})
+        if self.assistant is None:
+            hub.broadcast({"type": "error", "text": self.startup_error or "星期五还没准备好"})
+            return None
+        hub.broadcast({"type": "thinking", "source": source})
+        try:
+            result = self.assistant.ask(
+                prefix + text,
+                lambda delta: hub.broadcast({"type": "delta", "text": delta}),
+                lambda status: hub.broadcast({"type": "status", "text": status}),
+            )
+        except Exception as e:  # 界面里不能让异常把程序弄崩
+            described = error_text(e)
+            message = described[0] if described else f"出错了:{type(e).__name__}: {e}"
+            print(f"回答出错:{type(e).__name__}: {e}", flush=True)
+            hub.broadcast({"type": "error", "text": message})
+            return None
+        hub.broadcast({"type": "done", "text": result, "source": source})
+        if speak:
+            self.speak(result)
+        return result
+
+    def speak(self, text: str) -> None:
+        if self.synthesize is None or self.hub_audio is None:
+            return
+        try:
+            audio = self.synthesize(text)
+        except Exception:
+            audio = None
+        if audio:
+            self.hub.broadcast({"type": "audio", "url": f"/audio/{self.hub_audio.put(audio)}.mp3"})
+
+    hub_audio = None  # 由 run_web 设置成 WebContext.audio
+
+
+def web_reminder(item: dict, session: WebSession) -> None:
+    """图形界面模式:提醒弹窗 + 界面提示 + 读出来;定时任务交给星期五执行。"""
+    missed = f"(原定 {item['time'][11:]},星期五当时没开)" if item.get("missed") else ""
+    session.hub.broadcast({"type": "reminder", "text": f"⏰ {item['time'][11:]} {item['message']}{missed}"})
+    if item.get("kind") == "task":
+        toolbox = session.assistant.toolbox if session.assistant else None
+        if toolbox is not None:
+            toolbox.unattended = True
+        try:
+            session.ask(item["message"], source="task", speak=session.speak_enabled,
+                        prefix=f"[定时任务]{missed}", show_user=False)
+        finally:
+            if toolbox is not None:
+                toolbox.unattended = False
+        return
+    notify_popup(f"{session.persona.name}提醒", item["message"])
+    if session.speak_enabled:
+        session.speak(f"提醒你:{item['message']}")
+
+
+def web_discord(message, session: WebSession, transcribe=None) -> None:
+    """图形界面模式:手机 Discord 的问答也显示在窗口里。"""
+    hub = session.hub
+    hub.broadcast({"type": "user", "text": message.text or "(语音消息)", "source": "discord"})
+    original_reply, original_voice = message.reply, message.reply_voice
+
+    def reply(text):
+        hub.broadcast({"type": "done", "text": text, "source": "discord"})
+        original_reply(text)
+
+    def reply_voice(text):
+        hub.broadcast({"type": "done", "text": text, "source": "discord"})
+        original_voice(text)
+
+    message.reply, message.reply_voice = reply, reply_voice
+    if session.assistant is None:
+        reply(session.startup_error or "星期五还没准备好")
+        return
+    hub.broadcast({"type": "status", "text": "正在回答手机 Discord 的消息……"})
+    handle_discord(message, session.assistant, session.persona, transcribe)
+
+
+def web_loop(session: WebSession, events: queue.Queue, transcribe=None) -> None:
+    """图形界面模式的主循环:处理窗口发来的问题、Discord 消息、提醒。"""
+    while True:
+        kind, payload = next_event(events)
+        if kind == "eof":
+            session.hub.broadcast({"type": "status", "text": "星期五已关闭"})
+            return
+        if kind == "status":
+            session.hub.broadcast({"type": "status", "text": payload})
+        elif kind == "web":
+            session.speak_enabled = bool(payload.get("speak"))
+            session.ask(payload["text"], source=payload.get("source", "web"), speak=session.speak_enabled)
+        elif kind == "command" and payload == "clear":
+            if session.assistant is not None:
+                session.assistant.reset()
+            session.hub.broadcast({"type": "cleared"})
+        elif kind == "discord":
+            web_discord(payload, session, transcribe)
+        elif kind == "reminder":
+            web_reminder(payload, session)
+        sys.stdout.flush()
+
+
+def web_state(session: WebSession, toolbox: Toolbox, discord, cache: dict) -> dict:
+    """界面左右面板要显示的内容。"""
+    memories = [{"text": f["text"], "added": f.get("added", "")} for f in reversed(toolbox.memory.facts)]
+    reminders = []
+    for r in (toolbox.reminders.upcoming() if toolbox.reminders else [])[:12]:
+        repeat = {"daily": "每天 ", "weekdays": "工作日 ", "weekly": "每周 "}.get(r.get("repeat"), "")
+        reminders.append({"text": r["message"], "when": f"{repeat}{r['time']}"})
+    if toolbox.google is not None:
+        now = time.monotonic()
+        if now - cache.get("tasks_at", -1e9) > 60:  # Google Tasks 一分钟最多读一次
+            try:
+                cache["tasks"] = toolbox.google.task_items()
+            except Exception:
+                cache.setdefault("tasks", [])
+            cache["tasks_at"] = now
+        todos = cache.get("tasks", [])
+    else:
+        todos = [{"text": t["text"], "due": t.get("due", "")} for t in (toolbox.todos.pending() if toolbox.todos else [])]
+    discord_on = bool(discord is not None and getattr(discord, "client", None) is not None
+                      and discord.client.is_ready())
+    system = [
+        ("Claude", session.assistant is not None, "ONLINE" if session.assistant else "未设置"),
+        ("Discord", discord_on, "ONLINE" if discord_on else ("连接中" if discord is not None else "OFF")),
+        ("Google", toolbox.google is not None, "ONLINE" if toolbox.google else "OFF"),
+        ("联网搜索", toolbox.web, "ON" if toolbox.web else "OFF"),
+    ]
+    return {"memories": memories[:40], "reminders": reminders, "todos": todos[:20], "system": system,
+            "startup_error": session.startup_error}
+
+
+def redirect_output(log_file: str) -> None:
+    """没有黑色窗口时(pythonw),把输出写进日志文件,出问题时方便排查。"""
+    stream = open(log_file, "a", encoding="utf-8", buffering=1)
+    sys.stdout = sys.stderr = stream
+    print(f"\n==== 星期五启动 {datetime.datetime.now():%Y-%m-%d %H:%M:%S} ====")
+
+
+def run_web(args) -> None:
+    """图形界面模式:后台运行星期五,用独立窗口显示科技风界面。"""
+    import friday_web
+    import voice as voice_module
+
+    memory_file = args.memory_file or os.environ.get("FRIDAY_MEMORY_FILE") or DEFAULT_MEMORY_FILE
+    data_dir = os.path.dirname(os.path.abspath(memory_file))
+    if sys.stdout is None or args.log:
+        redirect_output(os.path.join(data_dir, "friday.log"))
+    instance_file = Path(data_dir) / "friday_web.json"
+    profile_dir = Path(data_dir) / "browser-profile"
+
+    # 已经在运行了:只打开窗口
+    existing = friday_web.read_instance(instance_file)
+    if existing and friday_web.instance_alive(existing):
+        if not args.no_browser:
+            friday_web.open_window(friday_web.app_url(existing["port"], existing["token"]), profile_dir)
+        print("星期五已经在运行,打开了它的窗口")
+        return
+
+    call_me = args.call_me or os.environ.get("FRIDAY_CALL_ME") or DEFAULT_CALL_ME
+    account = GoogleAccount(os.path.join(data_dir, "credentials.json"), os.path.join(data_dir, "google_token.json"))
+    computer = Computer()
+
+    def downloads_dir():
+        try:
+            return computer.folder("downloads")
+        except Exception:
+            return Path.home() / "Downloads"
+
+    google = GoogleTools(account, downloads_dir=downloads_dir) if account.configured else None
+    hub = friday_web.Hub()
+    approver = friday_web.WebApprover(hub)
+    toolbox = Toolbox(
+        Memory(memory_file), approver, workdir=os.path.expanduser(args.workdir) if args.workdir else None,
+        web=not args.no_web, reminders=Reminders(os.path.join(data_dir, "friday_reminders.json")),
+        todos=Todos(os.path.join(data_dir, "friday_todos.json")), computer=computer, screen=ScreenControl(),
+        google=google, confirm=approver.confirm,
+    )
+    persona = friday_persona(call_me, toolbox, voice=False)
+    startup_error = ""
+    assistant = None
+    if os.environ.get("ANTHROPIC_API_KEY", "").strip() in ("", PLACEHOLDER_KEY):
+        startup_error = f"还没有填写 API Key:请用记事本打开 {args.env_file},把“{PLACEHOLDER_KEY}”换成你的 Key,保存后重新打开星期五。"
+    else:
+        try:
+            assistant = Assistant(model=args.model, effort=args.effort or persona.effort, system=persona.system,
+                                  context=persona.context, toolbox=toolbox)
+        except anthropic.AnthropicError as e:
+            startup_error = f"无法连接 Claude:{e}"
+
+    events: queue.Queue = queue.Queue()
+    session = WebSession(assistant, persona, hub, voice_module.synthesize_mp3, startup_error)
+    port = args.port or int(os.environ.get("FRIDAY_WEB_PORT") or friday_web.DEFAULT_PORT)
+    token = friday_web.new_token()
+    discord = None  # 下面启动;界面状态接口会读到它
+    state_cache: dict = {}
+    ctx = None
+    server = None
+    for candidate in range(port, port + 10):  # 端口被别的程序占了就往后找
+        ctx = friday_web.WebContext(
+            hub, events, approver, token, candidate,
+            state=lambda: web_state(session, toolbox, discord, state_cache),
+            greeting=persona.greeting, transcribe=voice_module.transcribe_audio,
+            synthesize=voice_module.synthesize_mp3,
+        )
+        try:
+            server = friday_web.start_server(ctx)
+            break
+        except OSError:
+            continue
+    if server is None:
+        print(f"端口 {port}~{port + 9} 都被占用了,无法启动界面", file=sys.stderr)
+        sys.exit(1)
+    session.hub_audio = ctx.audio
+    friday_web.write_instance(instance_file, ctx.port, token)
+
+    discord_token = os.environ.get("FRIDAY_DISCORD_TOKEN", "").strip()
+    if discord_token:
+        discord = DiscordBridge(discord_token, events, os.path.join(data_dir, "friday_discord.json"),
+                                lambda text: events.put(("status", text)))
+        discord.tts = voice_module.synthesize_mp3
+        discord.gate.transcriber = voice_module.transcribe_audio
+        discord.start()
+    ReminderScheduler(toolbox.reminders, events).start()
+
+    url = friday_web.app_url(ctx.port, token)
+    print(f"星期五界面已启动:{url}", flush=True)
+    if not args.no_browser:
+        friday_web.open_window(url, profile_dir)
+    try:
+        web_loop(session, events, voice_module.transcribe_audio)
+    finally:
+        server.shutdown()
+        try:
+            instance_file.unlink()
+        except OSError:
+            pass
+
+
 def run_server(args) -> None:
     """云端模式:读取配置,启动 Discord 机器人和提醒,然后一直运行。"""
     token = read_token(args.env_file)
@@ -846,6 +1108,10 @@ def main(argv: list[str] | None = None) -> None:
         help="“星期五”执行命令、读写文件的默认目录(默认是你的用户主目录)",
     )
     parser.add_argument("--no-web", action="store_true", help="不让“星期五”联网搜索")
+    parser.add_argument("--web", action="store_true", help="用图形界面(独立窗口)代替命令行")
+    parser.add_argument("--no-browser", action="store_true", help="图形界面模式下先不打开窗口(开机自动启动时用)")
+    parser.add_argument("--port", type=int, default=None, help="图形界面用的本机端口(默认 47800)")
+    parser.add_argument("--log", action="store_true", help="把输出写进 friday.log")
     parser.add_argument(
         "--server",
         action="store_true",
@@ -886,12 +1152,15 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     load_env_file(args.env_file)
+    global CURRENT_ENV_FILE
+    CURRENT_ENV_FILE = args.env_file
+    if args.web:  # 图形界面自己会提示没填 Key
+        run_web(args)
+        return
     if os.environ.get("ANTHROPIC_API_KEY") == PLACEHOLDER_KEY:
         print(f"还没有填写 API Key。请打开 {args.env_file},把“{PLACEHOLDER_KEY}”换成你的 Key。", file=sys.stderr)
         sys.exit(1)
 
-    global CURRENT_ENV_FILE
-    CURRENT_ENV_FILE = args.env_file
     if args.server:
         run_server(args)
         return

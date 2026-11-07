@@ -32,3 +32,7 @@ assistant/friday_discord.json
 
 # 离线语音识别模型(首次使用时自动下载)
 assistant/models/
+# 图形界面运行时生成的文件
+assistant/browser-profile/
+assistant/friday_web.json
+assistant/friday.log

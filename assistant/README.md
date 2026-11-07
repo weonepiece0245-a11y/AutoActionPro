@@ -24,8 +24,19 @@
 
 ### 启动
 
-**装成应用(推荐)**:双击 `assistant\\install-app.bat`,选 1 安装。它会画一个专属图标,在**桌面**和**开始菜单**里放上“星期五”和“星期五 语音”,还会问你要不要**开机自动启动**(开机后最小化运行,Discord 一直在线)。之后在开始菜单搜“星期五”就能打开,也可以右键固定到任务栏。想撤销就再双击一次,选 2 卸载。
+**装成应用(推荐)**:双击 `assistant\\install-app.bat`,选 1 安装。它会画一个专属图标,在**桌面**和**开始菜单**里放上“星期五”(图形界面)和“星期五 命令行”(以前的黑色窗口版),还会问你要不要**开机自动启动**(开机后在后台运行,不弹窗口,Discord 和提醒一直在线)。之后在开始菜单搜“星期五”就能打开,也可以右键固定到任务栏。想撤销就再双击一次,选 2 卸载。
 
+#### 图形界面(科技风页面)
+
+点“星期五”(或双击 `assistant\\friday-app.bat`)会打开星期五自己的窗口,不再是黑色命令行:
+
+- 中间是一颗 **3D 全息球**:待机时青色缓缓旋转;思考时变蓝、转得更快;**说话时跟着声音起伏、发光**;你在说话(录音)时变成紫色。
+- 左边是**系统状态**和**记住的事**,右边是**提醒**和**待办**(含 Google 待办),每 30 秒自动刷新。
+- 下面是对话框:打字回车发送;点🎤说话(停顿 2 秒自动结束);🔊 开关朗读;↺ 开始新话题。
+- 需要授权的操作(执行命令、发邮件等)会弹出“授权请求”窗口,点允许/拒绝。
+- **关掉窗口,星期五仍在后台运行**(手机 Discord、提醒照常);再点一次“星期五”会重新打开窗口。点右下角的**电源按钮**才会完全退出。
+- 运行记录写在 `assistant\\friday.log`,出问题时可以看这里。
+- 3D 效果需要联网加载一次图形库;没网时会显示简化版的光球,功能不受影响。
 
 - **Windows**:双击 `assistant\friday.bat`(首次运行的安装和填 Key 步骤和 `start.bat` 一样)
 - **命令行**:`python assistant/assistant.py --persona friday`
@@ -321,6 +332,7 @@ python assistant/assistant.py --model claude-sonnet-5-5
 python assistant/assistant.py --persona friday     # 切换为“星期五”
 python assistant/assistant.py --persona friday --call-me 队长
 python assistant/assistant.py --persona friday --voice --stt vosk   # 语音对话,离线识别
+python assistant/assistant.py --persona friday --web               # 图形界面(--no-browser 只在后台运行,--port 指定端口)
 ```
 
 `--effort` 可选 `low`、`medium`、`high`、`xhigh`、`max`。普通小助理默认 `low`(适合日常聊天),“星期五”默认 `medium`(要上网、动手做事,多想一点更稳)。

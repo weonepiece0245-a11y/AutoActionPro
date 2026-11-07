@@ -71,6 +71,7 @@ pcmod = sys.modules["friday_pc"]
 gmod = sys.modules["friday_google"]
 dmod = sys.modules["friday_discord"]
 import friday_app  # noqa: E402
+import friday_web  # noqa: E402
 import voice  # noqa: E402  assistant.py 已把所在目录加入 sys.path
 
 
@@ -3184,7 +3185,7 @@ class NotifyOwnersTest(DiscordSendTest):
 class FridayAppInstallTest(TempDirTest):
     def setUp(self):
         super().setUp()
-        for bat in ("friday.bat", "friday-voice.bat"):
+        for bat in ("friday.bat", "friday-app.bat"):
             Path(self.tmp, bat).write_text("@echo off")
         self.calls = []
 
@@ -3203,29 +3204,35 @@ class FridayAppInstallTest(TempDirTest):
         self.assertEqual(self.install("n"), 0)
         created = [(env["FRIDAY_FOLDER"], env["FRIDAY_NAME"]) for kind, env in self.calls if kind == "create"]
         self.assertEqual(created, [("Desktop", "星期五"), ("Programs", "星期五"),
-                                   ("Desktop", "星期五 语音"), ("Programs", "星期五 语音")])
-        first = self.calls[0][1]
-        self.assertEqual(first["FRIDAY_TARGET"], str(Path(self.tmp, "friday.bat")))
-        self.assertEqual(first["FRIDAY_WORKDIR"], self.tmp)
-        self.assertEqual(first["FRIDAY_ICON"], str(Path(self.tmp, "friday.ico")))
-        self.assertEqual(first["FRIDAY_WINDOW"], "1")
+                                   ("Desktop", "星期五 命令行"), ("Programs", "星期五 命令行")])
+        removed_legacy = [env["FRIDAY_NAME"] for kind, env in self.calls[:2]]
+        self.assertEqual(removed_legacy, ["星期五 语音", "星期五 语音"])  # 旧版的快捷方式顺手删掉
+        app_shortcut = next(env for kind, env in self.calls if kind == "create")
+        self.assertEqual(app_shortcut["FRIDAY_TARGET"], str(Path(self.tmp, "friday-app.bat")))
+        self.assertEqual(app_shortcut["FRIDAY_WORKDIR"], self.tmp)
+        self.assertEqual(app_shortcut["FRIDAY_ICON"], str(Path(self.tmp, "friday.ico")))
+        self.assertEqual(app_shortcut["FRIDAY_WINDOW"], "7")  # 启动器的黑窗口最小化,一闪而过
+        console = [env for kind, env in self.calls if kind == "create" and env["FRIDAY_NAME"] == "星期五 命令行"][0]
+        self.assertEqual((console["FRIDAY_TARGET"], console["FRIDAY_WINDOW"]), (str(Path(self.tmp, "friday.bat")), "1"))
         self.assertEqual(self.calls[-1], ("remove", {"FRIDAY_FOLDER": "Startup", "FRIDAY_NAME": "星期五(开机启动)"}))
 
     def test_autostart_starts_minimized(self):
         self.install("y")
         kind, env = self.calls[-1]
         self.assertEqual((kind, env["FRIDAY_FOLDER"], env["FRIDAY_WINDOW"]), ("create", "Startup", "7"))
+        self.assertEqual(env["FRIDAY_TARGET"], str(Path(self.tmp, "friday-app.bat")))
+        self.assertEqual(env["FRIDAY_ARGS"], "--no-browser")  # 开机只在后台运行,不弹窗口
         self.assertIn("开机自动启动", self.printed)
 
     def test_missing_bat_and_icon_failure(self):
-        Path(self.tmp, "friday-voice.bat").unlink()
+        Path(self.tmp, "friday.bat").unlink()
 
         def broken_icon(path):
             raise OSError("没有 Pillow")
 
         self.install("n", icon_maker=broken_icon)
         self.assertIn("画图标失败", self.printed)
-        self.assertIn("跳过“星期五 语音”", self.printed)
+        self.assertIn("跳过“星期五 命令行”", self.printed)
         names = {env["FRIDAY_NAME"] for kind, env in self.calls if kind == "create"}
         self.assertEqual(names, {"星期五"})
 
@@ -3233,7 +3240,7 @@ class FridayAppInstallTest(TempDirTest):
         with mock.patch("builtins.print") as fake_print:
             friday_app.uninstall(powershell=self.powershell)
         removed = {(env["FRIDAY_FOLDER"], env["FRIDAY_NAME"]) for kind, env in self.calls}
-        self.assertEqual(len(removed), 5)
+        self.assertEqual(len(removed), 7)  # 两个快捷方式 + 旧版语音快捷方式,各在桌面和开始菜单,加开机启动
         self.assertIn(("Startup", "星期五(开机启动)"), removed)
 
     def test_only_windows(self):
@@ -3251,6 +3258,252 @@ class FridayAppInstallTest(TempDirTest):
         icon = friday_app.make_icon(Path(self.tmp, "friday.ico"), fonts=[])
         self.assertTrue(icon.exists())
         self.assertEqual(icon.read_bytes()[:4], b"\x00\x00\x01\x00")  # ICO 文件头
+
+
+class WebHubTest(unittest.TestCase):
+    def test_broadcast_and_history(self):
+        hub = friday_web.Hub(history=10)
+        hub.broadcast({"type": "user", "text": "早"})
+        hub.broadcast({"type": "delta", "text": "不进历史"})
+        client, backlog = hub.subscribe()
+        self.assertEqual([e["type"] for e in backlog], ["user"])
+        hub.broadcast({"type": "done", "text": "早上好"})
+        self.assertEqual(client.get_nowait()["text"], "早上好")
+        hub.broadcast({"type": "cleared"})
+        self.assertEqual([e["type"] for e in hub.subscribe()[1]], ["cleared"])
+        hub.unsubscribe(client)
+        self.assertEqual(hub.connected, 1)
+
+    def test_audio_store_keeps_recent(self):
+        store = friday_web.AudioStore(limit=2)
+        keys = [store.put(bytes([i])) for i in range(3)]
+        self.assertIsNone(store.get(keys[0]))
+        self.assertEqual(store.get(keys[2]), b"\x02")
+
+
+class WebApproverTest(unittest.TestCase):
+    def make(self):
+        hub = friday_web.Hub()
+        self.client, _ = hub.subscribe()
+        return friday_web.WebApprover(hub, timeout=2)
+
+    def answer_next(self, approver, value):
+        def go():
+            event = self.client.get(timeout=2)
+            while event["type"] != "approval":  # 跳过上一次的 approval_done
+                event = self.client.get(timeout=2)
+            approver.answer(event["id"], value)
+        threading.Thread(target=go).start()
+
+    def test_yes_no_all(self):
+        approver = self.make()
+        self.answer_next(approver, "no")
+        self.assertFalse(approver("关机"))
+        self.answer_next(approver, "yes")
+        self.assertTrue(approver("关机"))
+        self.answer_next(approver, "all")
+        self.assertTrue(approver("关机"))
+        self.assertTrue(approver.allow_all)
+        self.assertTrue(approver("再关一次"))  # 本次运行都允许
+
+    def test_confirm_always_asks_and_all_does_not_stick(self):
+        approver = self.make()
+        approver.allow_all = True
+        self.answer_next(approver, "no")
+        self.assertFalse(approver.confirm("发邮件"))
+
+    def test_no_window_or_timeout_means_no(self):
+        approver = friday_web.WebApprover(friday_web.Hub(), timeout=0.05)
+        self.assertFalse(approver("关机"))  # 没有窗口开着
+        approver = self.make()
+        approver.timeout = 0.05
+        self.assertFalse(approver("关机"))
+
+    def test_remote_while_answering_discord(self):
+        approver = self.make()
+        approver.remote = mock.Mock(return_value=True)
+        self.assertTrue(approver("关机"))
+        self.assertIn("关机", approver.remote.call_args.args[0])
+
+
+class WebServerTest(TempDirTest):
+    def setUp(self):
+        super().setUp()
+        self.hub = friday_web.Hub()
+        self.events = queue.Queue()
+        self.approver = friday_web.WebApprover(self.hub, timeout=2)
+        sock = __import__("socket").socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        self.ctx = friday_web.WebContext(self.hub, self.events, self.approver, "secret", port,
+                                         state=lambda: {"memories": []}, greeting="早上好",
+                                         transcribe=lambda audio: "今天天气" if audio == b"OGG" else None,
+                                         synthesize=lambda text: b"MP3" + text.encode())
+        self.server = friday_web.start_server(self.ctx)
+        self.addCleanup(self.server.shutdown)
+
+    def request(self, method, path, body=None, headers=None, host=None):
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.ctx.port, timeout=5)
+        all_headers = {"Host": host or f"127.0.0.1:{self.ctx.port}", **(headers or {})}
+        conn.request(method, path, body=body, headers=all_headers)
+        response = conn.getresponse()
+        data = response.read()
+        conn.close()
+        return response.status, data
+
+    def auth(self, extra=None):
+        return {"X-Friday-Token": "secret", **(extra or {})}
+
+    def test_static_page_and_security(self):
+        status, body = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn("FRIDAY".encode(), body)
+        self.assertEqual(self.request("GET", "/api/state")[0], 403)  # 没有口令
+        self.assertEqual(self.request("GET", "/api/state", headers={"X-Friday-Token": "wrong"})[0], 403)
+        self.assertEqual(self.request("GET", "/", host="evil.example.com")[0], 403)  # 防 DNS 重绑定
+        self.assertIn(self.request("GET", "/../friday_tools.py")[0], (403, 404))
+        self.assertEqual(self.request("GET", "/../friday_tools.py", headers=self.auth())[0], 404)  # 有口令也拿不到源码
+        status, body = self.request("GET", "/api/state?t=secret")
+        self.assertEqual(json.loads(body)["greeting"], "早上好")
+
+    def test_ask_and_command_go_to_main_loop(self):
+        status, _ = self.request("POST", "/api/ask", json.dumps({"text": " 你好 ", "speak": True}), self.auth())
+        self.assertEqual(status, 202)
+        self.assertEqual(self.events.get_nowait(), ("web", {"text": "你好", "speak": True, "source": "web"}))
+        self.assertEqual(self.request("POST", "/api/ask", json.dumps({"text": ""}), self.auth())[0], 400)
+        self.assertEqual(self.request("POST", "/api/command", json.dumps({"command": "rm"}), self.auth())[0], 400)
+        self.request("POST", "/api/command", json.dumps({"command": "clear"}), self.auth())
+        self.assertEqual(self.events.get_nowait(), ("command", "clear"))
+        self.request("POST", "/api/shutdown", "{}", self.auth())
+        self.assertEqual(self.events.get_nowait(), ("eof", None))
+        self.assertEqual(self.request("POST", "/api/ask", json.dumps({"text": "x"}))[0], 403)
+
+    def test_voice_upload(self):
+        status, body = self.request("POST", "/api/voice", b"OGG", self.auth({"X-Speak": "1"}))
+        self.assertEqual(json.loads(body), {"text": "今天天气"})
+        self.assertEqual(self.events.get_nowait(), ("web", {"text": "今天天气", "speak": True, "source": "voice"}))
+        status, body = self.request("POST", "/api/voice", b"NOISE", self.auth())
+        self.assertIsNone(json.loads(body)["text"])
+        self.assertTrue(self.events.empty())
+
+    def test_speak_and_audio(self):
+        status, body = self.request("POST", "/api/speak", json.dumps({"text": "你好"}), self.auth())
+        url = json.loads(body)["url"]
+        self.assertEqual(self.request("GET", url)[0], 403)
+        status, audio = self.request("GET", url + "?t=secret")
+        self.assertEqual((status, audio), (200, "MP3你好".encode()))
+
+    def test_approve_endpoint(self):
+        client, _ = self.hub.subscribe()
+        result = {}
+        thread = threading.Thread(target=lambda: result.setdefault("ok", self.approver("关机")))
+        thread.start()
+        request_id = client.get(timeout=2)["id"]
+        self.request("POST", "/api/approve", json.dumps({"id": request_id, "answer": "yes"}), self.auth())
+        thread.join(2)
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.request("POST", "/api/approve", json.dumps({"id": "nope"}), self.auth())[0], 404)
+
+    def test_event_stream_replays_history(self):
+        import http.client
+        self.hub.broadcast({"type": "user", "text": "之前的话"})
+        conn = http.client.HTTPConnection("127.0.0.1", self.ctx.port, timeout=5)
+        conn.request("GET", "/events?t=secret", headers={"Host": f"127.0.0.1:{self.ctx.port}"})
+        response = conn.getresponse()
+        line = response.fp.readline().decode()
+        self.assertTrue(line.startswith("data: "))
+        self.assertEqual(json.loads(line[6:])["text"], "之前的话")
+        conn.close()
+
+
+class WebSessionTest(TempDirTest):
+    def make(self, client, toolbox=None):
+        self.hub = friday_web.Hub()
+        self.client, _ = self.hub.subscribe()
+        bot = app.Assistant(client=client, toolbox=toolbox)
+        session = app.WebSession(bot, app.default_persona(), self.hub, synthesize=lambda text: b"MP3")
+        session.hub_audio = friday_web.AudioStore()
+        return session
+
+    def drain(self):
+        events = []
+        while not self.client.empty():
+            events.append(self.client.get_nowait())
+        return events
+
+    def test_streams_answer_and_speaks(self):
+        session = self.make(FakeClient(FakeStream(["晴", "天"])))
+        self.assertEqual(session.ask("天气?", speak=True), "晴天")
+        types = [e["type"] for e in self.drain()]
+        self.assertEqual(types, ["user", "thinking", "delta", "delta", "done", "audio"])
+
+    def test_errors_become_messages(self):
+        session = self.make(FakeClient(FakeStream([], error=anthropic.APIConnectionError("断网"))))
+        self.assertIsNone(session.ask("你好"))
+        events = self.drain()
+        self.assertEqual(events[-1]["type"], "error")
+        self.assertIn("网络连接失败", events[-1]["text"])
+
+    def test_without_api_key(self):
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub(), startup_error="还没有填写 API Key")
+        client, _ = session.hub.subscribe()
+        session.ask("你好")
+        events = [client.get_nowait() for _ in range(2)]
+        self.assertEqual(events[1], {**events[1], "type": "error", "text": "还没有填写 API Key"})
+
+    def test_loop_handles_web_clear_reminder_and_discord(self):
+        session = self.make(FakeClient(FakeStream(["好"]), FakeStream(["已回复"])))
+        events = queue.Queue()
+        events.put(("web", {"text": "你好", "speak": False, "source": "web"}))
+        events.put(("command", "clear"))
+        events.put(("reminder", {"time": "2026-11-07 09:00", "message": "喝水", "kind": "notify", "missed": False}))
+        replies = []
+        events.put(("discord", dmod.DiscordMessage("在吗", reply=replies.append, ask=lambda q: False)))
+        events.put(("eof", None))
+        with mock.patch.object(app, "notify_popup") as popup, mock.patch("builtins.print"):
+            app.web_loop(session, events)
+        kinds = [e["type"] for e in self.drain()]
+        self.assertIn("cleared", kinds)
+        self.assertIn("reminder", kinds)
+        popup.assert_called_once()
+        self.assertEqual(replies, ["已回复"])
+        discord_done = [e for e in session.hub.history if e["type"] == "done" and e.get("source") == "discord"]
+        self.assertEqual(discord_done[0]["text"], "已回复")
+        self.assertEqual(session.assistant.messages[0]["content"], "[来自手机 Discord]在吗")  # clear 之后的新对话
+
+    def test_state_for_panels(self):
+        toolbox = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m.json")), lambda a: True,
+                                reminders=daily.Reminders(os.path.join(self.tmp, "r.json")),
+                                todos=daily.Todos(os.path.join(self.tmp, "t.json")))
+        toolbox.memory.add("喜欢 Apex")
+        toolbox.todos.add("交报告", due="2026-11-13")
+        toolbox.reminders.add("2030-01-01 09:00", "早报", repeat="daily")
+        session = self.make(FakeClient(), toolbox)
+        state = app.web_state(session, toolbox, None, {})
+        self.assertEqual(state["memories"][0]["text"], "喜欢 Apex")
+        self.assertEqual(state["todos"], [{"text": "交报告", "due": "2026-11-13"}])
+        self.assertEqual(state["reminders"][0], {"text": "早报", "when": "每天 2030-01-01 09:00"})
+        self.assertEqual(state["system"][0], ("Claude", True, "ONLINE"))
+
+
+class WebLaunchTest(TempDirTest):
+    def test_instance_file_and_window(self):
+        path = Path(self.tmp, "friday_web.json")
+        friday_web.write_instance(path, 47801, "tok")
+        self.assertEqual({k: friday_web.read_instance(path)[k] for k in ("port", "token")}, {"port": 47801, "token": "tok"})
+        self.assertIsNone(friday_web.read_instance(Path(self.tmp, "none.json")))
+        self.assertFalse(friday_web.instance_alive({"port": 1, "token": "x"}, timeout=0.2))
+        launched = []
+        mode = friday_web.open_window("http://127.0.0.1:47801/?t=tok", Path(self.tmp, "profile"), edge="msedge.exe",
+                                      popen=launched.append)
+        self.assertEqual(mode, "edge")
+        self.assertIn("--app=http://127.0.0.1:47801/?t=tok", launched[0])
+        self.assertIn(f"--user-data-dir={Path(self.tmp, 'profile')}", launched[0])
+        opened = []
+        self.assertEqual(friday_web.open_window("u", Path(self.tmp, "p"), edge="", browser_open=opened.append), "browser")
+        self.assertEqual(opened, ["u"])
 
 
 if __name__ == "__main__":

@@ -320,6 +320,12 @@ class _MoreGoogleTools:
             return f"已删除待办:{target.get('title')}"
         raise ValueError(f"不支持的 action:{action}")
 
+    def task_items(self) -> list[dict]:
+        """未完成的待办,给界面面板用:[{text, due}]。"""
+        api = self.account.service("tasks").tasks()
+        items = api.list(tasklist="@default", showCompleted=False, maxResults=50).execute().get("items", [])
+        return [{"text": t.get("title", ""), "due": (t.get("due") or "")[:10]} for t in items if t.get("title")]
+
     @staticmethod
     def _find_task(api, tasklist: str, key: str) -> dict:
         key = key.strip()
