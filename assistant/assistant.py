@@ -502,9 +502,12 @@ def handle_discord(message, assistant: Assistant, persona: Persona, transcribe=N
         try:
             heard = transcribe(message.audio) if transcribe else None
         except Exception as e:
-            message.reply(f"这段语音没能识别:{e}")
+            problem = f"这段语音没能识别:{e}"
+            print(f"  {problem}")
+            message.reply(problem)
             return True
         if not heard:
+            print("  没听清这段语音(太短、太小声或杂音太大),已请对方再说一次")
             message.reply("没听清,再说一次?或者打字给我。")
             return True
         message.reply(f"🎤 听到:{heard}")
