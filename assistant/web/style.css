@@ -126,6 +126,11 @@ body[data-mode="speaking"] { --accent: #38bdf8; }
 .sys .tag { font-size: 11px; padding: 2px 8px; border-radius: 4px; border: 1px solid currentColor; letter-spacing: .08em; }
 .bright { display: flex; align-items: center; gap: 10px; margin-top: 12px; font-size: 12px; color: var(--muted); }
 .bright input { flex: 1; min-width: 0; accent-color: var(--accent); }
+.update-row { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; font-size: 12px; color: var(--muted); }
+.update-row b { font-family: var(--mono); font-weight: 400; color: var(--text); }
+.mini-btn { font: inherit; font-size: 12px; color: var(--accent); background: transparent; border: 1px solid var(--accent); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+.mini-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.mini-btn:disabled { opacity: .5; cursor: default; }
 .bright output { width: 38px; text-align: right; font-family: var(--mono); color: var(--text, #cfefff); }
 .tag.on { color: var(--green); }
 .tag.off { color: var(--muted); }

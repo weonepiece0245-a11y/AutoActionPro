@@ -36,3 +36,4 @@ assistant/models/
 assistant/browser-profile/
 assistant/friday_web.json
 assistant/friday.log
+assistant/friday_version.json

@@ -8,6 +8,8 @@ import asyncio
 import base64
 import datetime
 import importlib.util
+import http.client
+import io
 import json
 import os
 import queue
@@ -15,6 +17,8 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import zipfile
 import types
 import unittest
 from pathlib import Path
@@ -72,6 +76,7 @@ gmod = sys.modules["friday_google"]
 dmod = sys.modules["friday_discord"]
 import friday_app  # noqa: E402
 import friday_web  # noqa: E402
+import friday_update  # noqa: E402
 import voice  # noqa: E402  assistant.py 已把所在目录加入 sys.path
 
 
@@ -3193,10 +3198,10 @@ class FridayAppInstallTest(TempDirTest):
         self.calls.append(("create" if "CreateShortcut" in script else "remove", env))
         return env.get("FRIDAY_NAME", "")
 
-    def install(self, answer="n", icon_maker=None):
+    def install(self, answer="n", icon_maker=None, pythonw=None):
         with mock.patch("builtins.print") as fake_print:
             code = friday_app.install(Path(self.tmp), ask=lambda prompt: answer, powershell=self.powershell,
-                                      icon_maker=icon_maker or (lambda path: path))
+                                      icon_maker=icon_maker or (lambda path: path), pythonw=pythonw)
         self.printed = "\n".join(str(c.args[0]) for c in fake_print.call_args_list if c.args)
         return code
 
@@ -3223,6 +3228,20 @@ class FridayAppInstallTest(TempDirTest):
         self.assertEqual(env["FRIDAY_TARGET"], str(Path(self.tmp, "friday-app.bat")))
         self.assertEqual(env["FRIDAY_ARGS"], "--no-browser")  # 开机只在后台运行,不弹窗口
         self.assertIn("开机自动启动", self.printed)
+
+    def test_shortcuts_start_pythonw_directly(self):
+        pythonw = Path(self.tmp, "Python", "pythonw.exe")
+        self.install("y", pythonw=pythonw)
+        app_shortcut = next(env for kind, env in self.calls if kind == "create")
+        script = str(Path(self.tmp, "assistant.py"))
+        # 不经过 .bat:下载来的 .bat 带“来自网络”标记,开机会弹安全警告
+        self.assertEqual(app_shortcut["FRIDAY_TARGET"], str(pythonw))
+        self.assertEqual(app_shortcut["FRIDAY_ARGS"], f'"{script}" --persona friday --web')
+        self.assertEqual((app_shortcut["FRIDAY_WORKDIR"], app_shortcut["FRIDAY_WINDOW"]), (self.tmp, "1"))
+        kind, autostart = self.calls[-1]
+        self.assertEqual((autostart["FRIDAY_FOLDER"], autostart["FRIDAY_TARGET"]), ("Startup", str(pythonw)))
+        self.assertEqual(autostart["FRIDAY_ARGS"], f'"{script}" --persona friday --web --no-browser')
+        self.assertEqual(autostart["FRIDAY_WORKDIR"], self.tmp)
 
     def test_missing_bat_and_icon_failure(self):
         Path(self.tmp, "friday.bat").unlink()
@@ -3342,6 +3361,138 @@ class SpeechStreamTest(unittest.TestCase):
         stream.feed("还读吗。")
         stream.thread.join(2)
         self.assertFalse(stream.thread.is_alive())
+
+
+def make_archive(files: dict, commit="abc1234def", top="AutoActionPro-branch") -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        archive.writestr(f"{top}/", "")
+        for name, content in files.items():
+            archive.writestr(name if name.startswith("/") or ".." in name else f"{top}/{name}", content)
+        archive.comment = commit.encode()
+    return buf.getvalue()
+
+
+class FridayUpdateTest(TempDirTest):
+    def setUp(self):
+        super().setUp()
+        self.root = Path(self.tmp, "repo")
+        self.assistant_dir = self.root / "assistant"
+        self.assistant_dir.mkdir(parents=True)
+        (self.assistant_dir / "assistant.py").write_text("old")
+        (self.assistant_dir / ".env").write_text("ANTHROPIC_API_KEY=mine")
+        (self.assistant_dir / "friday_memory.json").write_text("[]")
+
+    def test_applies_changed_files_and_keeps_private_ones(self):
+        data = make_archive({
+            "assistant/assistant.py": "new",
+            "assistant/web/app.js": "js",
+            "assistant/.env": "ANTHROPIC_API_KEY=someone-else",  # 私人文件绝不覆盖
+            "assistant/friday_memory.json": "[\"x\"]",
+            "AutoActionPro-branch/../../evil.txt": "bad",  # 跑到文件夹外面的路径不写
+        })
+        result = friday_update.update(self.assistant_dir, fetcher=lambda url: data, installer=lambda d: True)
+        self.assertEqual(result["status"], "updated")
+        self.assertEqual(sorted(result["changed"]), ["assistant/assistant.py", "assistant/web/app.js"])
+        self.assertEqual((self.assistant_dir / "assistant.py").read_text(), "new")
+        self.assertEqual((self.assistant_dir / ".env").read_text(), "ANTHROPIC_API_KEY=mine")
+        self.assertEqual((self.assistant_dir / "friday_memory.json").read_text(), "[]")
+        self.assertFalse(Path(self.tmp, "evil.txt").exists())
+        self.assertEqual(friday_update.current_version(self.assistant_dir), "abc1234def")
+        # 再来一次:没有变化
+        again = friday_update.update(self.assistant_dir, fetcher=lambda url: data, installer=lambda d: True)
+        self.assertEqual((again["status"], again["changed"]), ("latest", []))
+
+    def test_installs_requirements_only_when_they_change(self):
+        installed = []
+        data = make_archive({"assistant/requirements.txt": "anthropic"})
+        result = friday_update.update(self.assistant_dir, fetcher=lambda url: data,
+                                      installer=lambda d: installed.append(d) or False)
+        self.assertEqual(installed, [self.assistant_dir])
+        self.assertFalse(result["deps_ok"])
+
+    def test_falls_back_to_main_when_branch_is_gone(self):
+        urls = []
+
+        def fetcher(url):
+            urls.append(url)
+            if "zealous" in url:
+                raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+            return make_archive({"assistant/assistant.py": "main"})
+
+        result = friday_update.update(self.assistant_dir, fetcher=fetcher, installer=lambda d: True)
+        self.assertEqual(result["branch"], "main")
+        self.assertTrue(urls[0].startswith("https://github.com/weonepiece0245-a11y/AutoActionPro/archive/"))
+
+    def test_network_errors_are_raised(self):
+        def fetcher(url):
+            raise urllib.error.URLError("offline")
+
+        with self.assertRaises(urllib.error.URLError):
+            friday_update.update(self.assistant_dir, fetcher=fetcher)
+
+
+class WebUpdateTest(unittest.TestCase):
+    def make(self):
+        hub = friday_web.Hub()
+        client, _ = hub.subscribe()
+        session = app.WebSession(None, app.default_persona(), hub)
+        return session, client
+
+    def events(self, client):
+        out = []
+        while not client.empty():
+            out.append(client.get_nowait())
+        return out
+
+    def test_update_found_restarts(self):
+        session, client = self.make()
+        result = {"status": "updated", "changed": ["assistant/assistant.py"], "commit": "abc", "deps_ok": True}
+        self.assertTrue(app.web_update(session, updater=lambda d: result))
+        self.assertTrue(session.restart)
+        self.assertEqual([e["type"] for e in self.events(client)][-1], "restarting")
+
+    def test_latest_or_failure_does_not_restart(self):
+        session, client = self.make()
+        self.assertFalse(app.web_update(session, updater=lambda d: {"status": "latest", "changed": []}))
+
+        def broken(d):
+            raise RuntimeError("断网")
+
+        with mock.patch("builtins.print"):
+            self.assertFalse(app.web_update(session, updater=broken))
+        events = self.events(client)
+        self.assertFalse(session.restart)
+        self.assertIn("已经是最新版本了", [e.get("text") for e in events])
+        self.assertTrue(any(e["type"] == "error" and "断网" in e["text"] for e in events))
+        self.assertEqual([e["type"] for e in events].count("update_done"), 2)
+
+    def test_loop_stops_for_restart_and_restart_command(self):
+        session, _ = self.make()
+        events = queue.Queue()
+        events.put(("command", "update"))
+        events.put(("web", {"text": "不应该处理到这里", "speak": False}))
+        with mock.patch.object(app, "web_update", return_value=True):
+            app.web_loop(session, events)
+        self.assertEqual(events.qsize(), 1)
+        command = app.restart_command(["--persona", "friday", "--web", "--no-browser"], 47801)
+        self.assertEqual(command[0], sys.executable)
+        self.assertEqual(command[2:], ["--persona", "friday", "--web", "--no-browser", "--port", "47801"])
+
+    def test_update_command_is_allowed(self):
+        ctx = friday_web.WebContext(friday_web.Hub(), queue.Queue(), friday_web.WebApprover(friday_web.Hub()),
+                                    "tok", 0, state=lambda: {})
+        server = friday_web.start_server(ctx)
+        try:
+            port = ctx.port = server.server_address[1]
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("POST", "/api/command", json.dumps({"command": "update"}),
+                         {"X-Friday-Token": "tok", "Content-Type": "application/json"})
+            self.assertEqual(conn.getresponse().status, 202)
+            self.assertEqual(ctx.events.get_nowait(), ("command", "update"))
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 class WebApproverTest(unittest.TestCase):

@@ -10,10 +10,16 @@ if not defined PY (
   pause
   exit /b 1
 )
-%PY% -c "import PIL" >nul 2>nul
+rem The shortcuts start Python directly, so install everything Friday needs now
+%PY% -c "import anthropic, PIL, googleapiclient, google_auth_oauthlib, discord, speech_recognition, edge_tts, imageio_ffmpeg" >nul 2>nul
 if errorlevel 1 (
-  echo Installing Pillow for the icon, please wait...
-  %PY% -m pip install pillow
+  echo Installing what Friday needs, please wait...
+  %PY% -m pip install -r requirements.txt
+)
+if not exist ".env" if not defined ANTHROPIC_API_KEY (
+  copy ".env.example" ".env" >nul
+  echo Fill in your API key in Notepad after "ANTHROPIC_API_KEY=", then save and close Notepad.
+  notepad ".env"
 )
 %PY% friday_app.py
 echo.

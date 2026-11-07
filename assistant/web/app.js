@@ -142,6 +142,10 @@ function handle(ev) {
       showApproval(ev); break;
     case "approval_done":
       if (approvalId === ev.id) hideApproval(); break;
+    case "update_done":
+      resetUpdateBtn(); break;
+    case "restarting":
+      waitForRestart(); break;
     case "cleared":
       log.innerHTML = ""; current = null; addLine("已开始新话题"); break;
   }
@@ -172,6 +176,7 @@ function li(text, meta) {
 async function loadState() {
   const s = await api("/api/state");
   if (!s || s.error) return;
+  $("versionText").textContent = s.version || "未记录";
   if (s.startup_error) { $("banner").hidden = false; $("banner").textContent = s.startup_error; }
   fillList("memoryList", s.memories, "还没有记忆,多跟我聊聊你自己", (m) => li(m.text, m.added));
   fillList("reminderList", s.reminders, "没有提醒", (r) => li(r.text, r.when));
@@ -212,6 +217,29 @@ $("form").onsubmit = async (e) => {
   const r = await api("/api/ask", { text, speak: speakOn });
   if (r.error) toast(r.error);
 };
+// ---------- 检查更新:下载新版本后星期五自动重启,这个窗口自己刷新 ----------
+function resetUpdateBtn() { $("updateBtn").disabled = false; $("updateBtn").textContent = "检查更新"; }
+$("updateBtn").onclick = async () => {
+  $("updateBtn").disabled = true;
+  $("updateBtn").textContent = "检查中…";
+  const r = await api("/api/command", { command: "update" }).catch(() => ({ error: "星期五没有响应" }));
+  if (r.error) { toast(r.error); resetUpdateBtn(); }
+};
+function waitForRestart() {
+  $("updateBtn").textContent = "重启中…";
+  setMode("thinking");
+  const started = Date.now();
+  let wentDown = false;
+  const poll = async () => {
+    try {
+      const s = await api("/api/state");
+      if (s && !s.error && (wentDown || Date.now() - started > 10000)) { location.reload(); return; }
+    } catch { wentDown = true; }
+    if (Date.now() - started > 120000) { addLine("重启好像没成功,请从桌面重新打开星期五", "error"); resetUpdateBtn(); return; }
+    setTimeout(poll, 1500);
+  };
+  setTimeout(poll, 1500);
+}
 $("clearBtn").onclick = () => api("/api/command", { command: "clear" });
 $("powerBtn").onclick = async () => {
   if (!confirm("要完全关闭星期五吗?关闭后手机 Discord 和提醒都会停止。")) return;

@@ -13,6 +13,7 @@ import argparse
 import datetime
 import os
 import queue
+import subprocess
 import sys
 import threading
 import time
@@ -21,6 +22,8 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import anthropic
+
+ORIGINAL_ENV = dict(os.environ)  # 读 .env 之前的环境变量;自动更新后重启时用,这样会重新读 .env
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from friday_daily import (  # noqa: E402
@@ -854,6 +857,7 @@ class WebSession:
 
     _stream = None
     _turn = 0
+    restart = False  # 更新完要重启
     hub_audio = None  # 由 run_web 设置成 WebContext.audio
 
 
@@ -915,11 +919,45 @@ def web_loop(session: WebSession, events: queue.Queue, transcribe=None) -> None:
             if session.assistant is not None:
                 session.assistant.reset()
             session.hub.broadcast({"type": "cleared"})
+        elif kind == "command" and payload == "update":
+            if web_update(session):
+                return  # run_web 会用新代码重新启动
         elif kind == "discord":
             web_discord(payload, session, transcribe)
         elif kind == "reminder":
             web_reminder(payload, session)
         sys.stdout.flush()
+
+
+def web_update(session: WebSession, updater=None) -> bool:
+    """界面上点了“检查更新”。装好了新版本就返回 True(要重启)。"""
+    import friday_update
+
+    hub = session.hub
+    hub.broadcast({"type": "status", "text": "正在从 GitHub 检查更新……"})
+    try:
+        result = (updater or friday_update.update)(Path(SCRIPT_DIR))
+    except Exception as e:
+        print(f"更新失败:{type(e).__name__}: {e}", flush=True)
+        hub.broadcast({"type": "error", "text": f"更新失败:{e}(检查一下网络,稍后再试)"})
+        hub.broadcast({"type": "update_done"})
+        return False
+    if result["status"] == "latest":
+        hub.broadcast({"type": "status", "text": "已经是最新版本了"})
+        hub.broadcast({"type": "update_done"})
+        return False
+    if not result.get("deps_ok", True):
+        hub.broadcast({"type": "error", "text": "新版本需要的组件没装好,可以双击 install-app.bat 再装一次"})
+    hub.broadcast({"type": "status", "text": f"更新完成(改了 {len(result['changed'])} 个文件),正在重启星期五……"})
+    hub.broadcast({"type": "restarting"})
+    session.restart = True
+    return True
+
+
+def restart_command(argv: list[str], port: int) -> list[str]:
+    """更新后重启:同一个端口,不再开新窗口(原来的窗口会自己刷新)。"""
+    args = [a for a in argv if a != "--no-browser"]
+    return [sys.executable, os.path.join(SCRIPT_DIR, "assistant.py"), *args, "--no-browser", "--port", str(port)]
 
 
 def web_state(session: WebSession, toolbox: Toolbox, discord, cache: dict) -> dict:
@@ -948,8 +986,11 @@ def web_state(session: WebSession, toolbox: Toolbox, discord, cache: dict) -> di
         ("Google", toolbox.google is not None, "ONLINE" if toolbox.google else "OFF"),
         ("联网搜索", toolbox.web, "ON" if toolbox.web else "OFF"),
     ]
+    import friday_update
+
+    version = friday_update.current_version(Path(SCRIPT_DIR))[:7]
     return {"memories": memories[:40], "reminders": reminders, "todos": todos[:20], "system": system,
-            "startup_error": session.startup_error}
+            "startup_error": session.startup_error, "version": version}
 
 
 def redirect_output(log_file: str) -> None:
@@ -1013,7 +1054,7 @@ def run_web(args) -> None:
     events: queue.Queue = queue.Queue()
     session = WebSession(assistant, persona, hub, voice_module.synthesize_mp3, startup_error)
     port = args.port or int(os.environ.get("FRIDAY_WEB_PORT") or friday_web.DEFAULT_PORT)
-    token = friday_web.new_token()
+    token = os.environ.get("FRIDAY_WEB_TOKEN") or friday_web.new_token()  # 更新后重启沿用原来的口令
     discord = None  # 下面启动;界面状态接口会读到它
     state_cache: dict = {}
     ctx = None
@@ -1053,10 +1094,17 @@ def run_web(args) -> None:
         web_loop(session, events, voice_module.transcribe_audio)
     finally:
         server.shutdown()
+        server.server_close()
         try:
             instance_file.unlink()
         except OSError:
             pass
+    if session.restart:
+        command = restart_command(sys.argv[1:], ctx.port)
+        print("用新版本重新启动:" + " ".join(command), flush=True)
+        subprocess.Popen(command, cwd=SCRIPT_DIR, env={**ORIGINAL_ENV, "FRIDAY_WEB_TOKEN": token},
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        os._exit(0)  # 后台线程(Discord、提醒)不用等
 
 
 def run_server(args) -> None:
