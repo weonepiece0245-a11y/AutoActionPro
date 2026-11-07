@@ -9,7 +9,7 @@ import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 const COLORS = {
   idle: new THREE.Color("#22d3ee"),
   thinking: new THREE.Color("#3b82f6"),
-  speaking: new THREE.Color("#7df9ff"),
+  speaking: new THREE.Color("#2bc4e6"),
   listening: new THREE.Color("#d946ef"),
 };
 
@@ -43,8 +43,8 @@ const coreFragment = /* glsl */ `
   void main() {
     float fres = pow(1.0 - max(dot(vNormal, vView), 0.0), 2.2);
     float bands = smoothstep(0.92, 1.0, sin(vWave * 18.0 + uTime * 3.0)) * (0.25 + uLevel);
-    vec3 col = uColor * (0.18 + fres * 1.7) + vec3(1.0) * (fres * 0.35 + bands * 0.6) * (0.6 + uLevel);
-    gl_FragColor = vec4(col, 0.22 + fres * 0.8);
+    vec3 col = uColor * (0.18 + fres * 1.5) + vec3(1.0) * (fres * 0.25 + bands * 0.3) * (0.6 + uLevel * 0.4);
+    gl_FragColor = vec4(col, 0.2 + fres * 0.7);
   }
 `;
 
@@ -164,13 +164,13 @@ export function start(canvas, state) {
     coreUniforms.uColor.value.copy(color);
     core.rotation.y = spin * 0.35;
     core.rotation.x = Math.sin(t * 0.3) * 0.2;
-    heart.scale.setScalar(1 + level * 1.6 + Math.sin(t * 2) * 0.04);
-    heart.material.opacity = 0.35 + level * 0.6;
+    heart.scale.setScalar(1 + level * 0.7 + Math.sin(t * 2) * 0.04);
+    heart.material.opacity = 0.3 + level * 0.2;
 
     shell.rotation.y = -spin * 0.22;
     shell.rotation.z = spin * 0.08;
     shellMaterial.color.copy(color);
-    shellMaterial.opacity = 0.22 + level * 0.4;
+    shellMaterial.opacity = 0.22 + level * 0.18;
 
     for (const ring of rings) {
       ring.rotation.z += dt * ring.userData.speed * speed;
@@ -178,10 +178,10 @@ export function start(canvas, state) {
     }
     particles.rotation.y += dt * 0.05 * speed;
     particleMaterial.color.copy(color);
-    particleMaterial.size = 0.026 + level * 0.03;
+    particleMaterial.size = 0.026 + level * 0.012;
 
     group.position.y = Math.sin(t * 0.8) * 0.06;
-    bloom.strength = 1.0 + level * 1.2;
+    bloom.strength = 0.85 + level * 0.35;  // 说话时只稍微亮一点,不刺眼
 
     composer.render();
     requestAnimationFrame(frame);

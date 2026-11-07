@@ -37,7 +37,7 @@ body {
 }
 body[data-mode="thinking"] { --accent: var(--blue); }
 body[data-mode="listening"] { --accent: var(--magenta); }
-body[data-mode="speaking"] { --accent: #67e8f9; }
+body[data-mode="speaking"] { --accent: #38bdf8; }
 
 /* ---------- 背景:3D 全息球、网格地面、扫描线 ---------- */
 #orb, .css-orb { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 0; }
