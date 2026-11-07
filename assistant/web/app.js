@@ -8,6 +8,23 @@ import("./orb.js")
   .then((m) => m.start($("orb"), orbState))
   .catch(() => $("cssOrb").classList.add("on"));
 
+// 光球亮度(左边“系统”里的滑杆,记在本机)
+function setBrightness(percent) {
+  const filter = percent === 100 ? "" : `brightness(${percent / 100})`;
+  $("orb").style.filter = filter;
+  $("cssOrb").style.filter = filter;
+  $("brightness").value = percent;
+  $("brightOut").textContent = percent + "%";
+}
+let savedBright = 70;
+try { savedBright = Number(localStorage.getItem("friday-brightness")) || 70; } catch {}
+setBrightness(savedBright);
+$("brightness").addEventListener("input", (e) => {
+  const percent = Number(e.target.value);
+  setBrightness(percent);
+  try { localStorage.setItem("friday-brightness", String(percent)); } catch {}
+});
+
 // ---------- 状态 ----------
 const MODE_TEXT = { idle: "待机 STANDBY", thinking: "思考中 PROCESSING", speaking: "说话中 SPEAKING", listening: "聆听中 LISTENING" };
 let busy = false;
