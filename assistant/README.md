@@ -159,6 +159,32 @@
 | `/discord pair` | 生成配对码,添加一个新账号 |
 | `/discord remove 编号` | 移除某个账号 |
 
+### 云端模式:电脑关机也能用
+
+把“星期五”放到一台一直开着的云服务器上(比如 DigitalOcean 新加坡机房最便宜的 1GB 方案,约 5~6 美元/月),手机 Discord 随时能找它。
+
+| 云端能做 | 云端做不到(要回电脑上) |
+|---|---|
+| Discord 聊天、语音消息、记忆、上网、Google 各项服务、提醒和定时任务(到点私信你) | 执行命令、读写电脑文件、看屏幕、鼠标键盘、音量、打开程序和游戏、电脑上的语音模式 |
+
+**搬到云端的步骤**
+1. 在 DigitalOcean 创建一台服务器(Droplet):系统选 **Ubuntu 24.04**,机房选 **Singapore**,方案选最便宜的 **1GB 内存**,登录方式选 **Password** 并设一个密码。记下服务器的 IP 地址。
+2. 在电脑上打开 PowerShell,把整个 `assistant` 文件夹传上去(你的 Key、Google 授权、Discord 配对、记忆、提醒都会一起过去;IP 换成你的):
+   ```
+   scp -r "D:\Monday AI\AutoActionPro-claude-zealous-thompson-eoxylu\assistant" root@你的IP:/opt/friday
+   ```
+3. 登录服务器(DigitalOcean 网页上点 **Console**,或在 PowerShell 里 `ssh root@你的IP`),运行:
+   ```
+   cd /opt/friday && bash server-install.sh
+   ```
+   看到 `active (running)` 就成功了,以后服务器重启也会自动运行。
+4. 回到电脑上的“星期五”,输入 `/discord off` 再重新打开,把 Discord 交给云端(否则两边会同时回复)。想换回电脑负责,输入 `/discord on`。
+
+**注意**
+- 云端和电脑上的记忆、提醒是各自分开的。
+- Google 授权如果每 7 天过期(“发布应用”没开的话),在电脑上双击 `google-login.bat` 重新登录,再把 `google_token.json` 传上去:`scp "...\assistant\google_token.json" root@你的IP:/opt/friday/`,然后在服务器上 `chown friday /opt/friday/google_token.json && systemctl restart friday`。
+- 服务器上看日志:`journalctl -u friday -f`;重启:`systemctl restart friday`。
+
 ### 语音对话
 
 双击 `assistant\friday-voice.bat` 就能用嘴和“星期五”聊天,它的回答会读出来。第一次运行会自动安装语音相关的依赖。

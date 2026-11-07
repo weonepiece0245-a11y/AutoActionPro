@@ -3003,5 +3003,182 @@ class DiscordChatTest(TempDirTest):
         self.assertEqual(str(bridge.call_args.args[2]), os.path.join(self.tmp, "friday_discord.json"))
 
 
+class FakeDiscordForServer:
+    def __init__(self):
+        self.notified = []
+        self.tts = lambda text: b"MP3"
+
+    def notify_owners(self, text, audio=None):
+        self.notified.append((text, audio))
+        return 1
+
+
+class ServerModeTest(TempDirTest):
+    def make_toolbox(self, approve=None):
+        approver = approve or app.ServerApprover()
+        return tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m.json")), approver, workdir=self.tmp,
+                             reminders=daily.Reminders(os.path.join(self.tmp, "r.json")),
+                             confirm=approver.confirm, local_tools=False)
+
+    def test_no_pc_tools_on_server(self):
+        toolbox = self.make_toolbox()
+        names = [t["name"] for t in toolbox.definitions()]
+        for name in ("run_command", "read_file", "write_file", "computer", "screen", "control"):
+            self.assertNotIn(name, names)
+        self.assertIn("remember", names)
+        self.assertIn("reminder", names)
+        result = toolbox.run(tool_use("run_command", {"command": "rm -rf /", "reason": "x"}), lambda t: None)
+        self.assertTrue(result["is_error"])
+        system = app.friday_persona("老板", toolbox, server=True).system()
+        self.assertIn("## 运行在云端", system)
+        self.assertIn("碰不到用户的电脑", system)
+        self.assertNotIn("## 运行在云端", app.friday_persona("老板", toolbox).system())
+
+    def test_server_approver_only_asks_on_discord(self):
+        approver = app.ServerApprover()
+        self.assertFalse(approver("关机"))
+        self.assertFalse(approver.confirm("发邮件"))
+        approver.remote = mock.Mock(return_value=True)
+        self.assertTrue(approver("关机"))
+        approver.confirm("发邮件")
+        self.assertIn("每次都要确认", approver.remote.call_args.args[0])
+
+    def run_serve(self, events, bot, discord=None, clock=None, transcribe=None):
+        events.put(("eof", None))
+        with mock.patch("builtins.print") as fake_print:
+            app.serve(bot, app.default_persona(), events, discord or FakeDiscordForServer(), transcribe,
+                      clock=clock or (lambda: 0.0))
+        return [str(c.args[0]) for c in fake_print.call_args_list if c.args]
+
+    def test_serve_answers_discord_and_prints_status(self):
+        bot = app.Assistant(client=FakeClient(FakeStream(["晴"])))
+        replies = []
+        events = queue.Queue()
+        events.put(("status", "Discord 已连接:FRIDAY"))
+        events.put(("discord", dmod.DiscordMessage("天气?", reply=replies.append, ask=lambda q: False)))
+        printed = self.run_serve(events, bot)
+        self.assertEqual(replies, ["晴"])
+        self.assertIn("  〔Discord 已连接:FRIDAY〕", printed)
+
+    def test_notify_reminder_goes_to_discord_with_voice(self):
+        discord = FakeDiscordForServer()
+        events = queue.Queue()
+        events.put(("reminder", {"time": "2026-11-07 09:00", "message": "喝水", "kind": "notify", "missed": False}))
+        self.run_serve(events, app.Assistant(client=FakeClient()), discord)
+        self.assertEqual(discord.notified, [("⏰ 提醒:喝水", b"MP3")])
+
+    def test_task_reminder_runs_unattended_and_reports(self):
+        toolbox = self.make_toolbox()
+        seen = {}
+
+        class Recording(FakeClient):
+            def _stream(self, **kwargs):
+                seen["unattended"] = toolbox.unattended
+                return super()._stream(**kwargs)
+
+        bot = app.Assistant(client=Recording(FakeStream(["今天晴,没有安排"])), toolbox=toolbox)
+        discord = FakeDiscordForServer()
+        events = queue.Queue()
+        events.put(("reminder", {"time": "2026-11-07 09:00", "message": "做早报", "kind": "task", "missed": False}))
+        self.run_serve(events, bot, discord)
+        self.assertEqual(discord.notified, [("⏰ 做早报\n\n今天晴,没有安排", None)])
+        self.assertTrue(seen["unattended"])
+        self.assertFalse(toolbox.unattended)
+
+    def test_new_conversation_after_idle(self):
+        client = FakeClient(FakeStream(["A"]), FakeStream(["B"]))
+        bot = app.Assistant(client=client)
+        times = iter([0.0, 0.0, 10.0, app.SESSION_IDLE_RESET + 100.0, app.SESSION_IDLE_RESET + 100.0])
+        events = queue.Queue()
+        for text in ("第一句", "第二句"):
+            events.put(("discord", dmod.DiscordMessage(text, reply=lambda t: None, ask=lambda q: False)))
+        self.run_serve(events, bot, clock=lambda: next(times))
+        self.assertEqual(len(client.calls[1]["messages"]), 1)  # 第二句开始了新对话
+
+    def test_run_server_wiring(self):
+        env = {"ANTHROPIC_API_KEY": "sk-test", "FRIDAY_MEMORY_FILE": os.path.join(self.tmp, "m.json"),
+               "FRIDAY_DISCORD_TOKEN": FAKE_TOKEN}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(app, "DiscordBridge") as bridge, \
+                mock.patch.object(app, "ReminderScheduler") as scheduler, mock.patch.object(app, "serve") as serve:
+            app.main(["--server", "--env-file", os.devnull])
+        bot, persona, events, discord, transcribe = serve.call_args.args
+        self.assertFalse(bot.toolbox.local_tools)
+        self.assertIsNone(bot.toolbox.computer)
+        self.assertIsNone(bot.toolbox.screen)
+        self.assertIsInstance(bot.toolbox.approve, app.ServerApprover)
+        self.assertIn("## 运行在云端", bot.system)
+        self.assertEqual(bridge.call_args.args[0], FAKE_TOKEN)
+        bridge.return_value.start.assert_called_once()
+        scheduler.return_value.start.assert_called_once()
+        self.assertIs(discord, bridge.return_value)
+
+    def test_run_server_needs_token(self):
+        env = {"ANTHROPIC_API_KEY": "sk-test", "FRIDAY_MEMORY_FILE": os.path.join(self.tmp, "m.json")}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch("builtins.print"):
+            with self.assertRaises(SystemExit):
+                app.main(["--server", "--env-file", os.devnull])
+
+
+class DiscordEnvSwitchTest(TempDirTest):
+    def test_off_and_on(self):
+        env = Path(self.tmp, ".env")
+        env.write_text(f"ANTHROPIC_API_KEY=sk-1\nFRIDAY_DISCORD_TOKEN={FAKE_TOKEN}\n", encoding="utf-8")
+        self.assertTrue(dmod.set_discord_enabled(env, False))
+        self.assertIn(f"#FRIDAY_DISCORD_TOKEN={FAKE_TOKEN}", env.read_text(encoding="utf-8"))
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(dmod.read_token(env), FAKE_TOKEN)  # 云端模式也认注释掉的
+        self.assertTrue(dmod.set_discord_enabled(env, True))
+        self.assertIn(f"\nFRIDAY_DISCORD_TOKEN={FAKE_TOKEN}", env.read_text(encoding="utf-8"))
+        self.assertTrue(env.read_text(encoding="utf-8").startswith("ANTHROPIC_API_KEY=sk-1"))
+
+    def test_missing_token(self):
+        env = Path(self.tmp, ".env")
+        env.write_text("ANTHROPIC_API_KEY=sk-1\n# FRIDAY_DISCORD_TOKEN=\n", encoding="utf-8")
+        self.assertFalse(dmod.set_discord_enabled(env, False))
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(dmod.read_token(env))
+            self.assertIsNone(dmod.read_token(Path(self.tmp, "none.env")))
+        with mock.patch.dict(os.environ, {"FRIDAY_DISCORD_TOKEN": "from-env"}):
+            self.assertEqual(dmod.read_token(env), "from-env")
+
+    def test_console_commands(self):
+        env = Path(self.tmp, ".env")
+        env.write_text(f"FRIDAY_DISCORD_TOKEN={FAKE_TOKEN}\n", encoding="utf-8")
+        bot = app.Assistant(client=FakeClient())
+        with mock.patch.object(app, "CURRENT_ENV_FILE", str(env)), \
+                mock.patch("builtins.input", side_effect=["/discord off", "/exit"]), \
+                mock.patch("builtins.print") as fake_print:
+            app.chat(bot, None, None, queue.Queue(), None)
+        printed = "\n".join(str(c.args[0]) for c in fake_print.call_args_list if c.args)
+        self.assertIn("交给云端", printed)
+        self.assertTrue(env.read_text(encoding="utf-8").startswith("#FRIDAY_DISCORD_TOKEN="))
+
+
+class NotifyOwnersTest(DiscordSendTest):
+    def test_sends_to_every_owner(self):
+        self.bridge.gate.owners = {42: "main", 77: "alt", 99: "closed"}
+        test = self
+
+        class User:
+            def __init__(self, uid):
+                self.uid = uid
+
+            async def send(self, text=None, file=None):
+                if self.uid == 99:
+                    raise RuntimeError("对方关了私信")
+                test.received.append((self.uid, text))
+
+        async def fetch_user(uid):
+            return User(uid)
+
+        self.bridge.client = SimpleNamespace(get_user=lambda uid: User(uid) if uid == 42 else None, fetch_user=fetch_user)
+        self.assertEqual(self.bridge.notify_owners("⏰ 提醒:喝水"), 2)
+        self.assertEqual(sorted(self.received), [(42, "⏰ 提醒:喝水"), (77, "⏰ 提醒:喝水")])
+
+    def test_not_connected(self):
+        self.bridge.client = None
+        self.assertEqual(self.bridge.notify_owners("x"), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

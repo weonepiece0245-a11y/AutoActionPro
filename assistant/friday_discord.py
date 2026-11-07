@@ -238,6 +238,7 @@ class DiscordBridge:
         self.loop: asyncio.AbstractEventLoop | None = None
         self.gate = DiscordGate(state_file, events, self.send, on_status, send_voice=self.send_voice)
         self.tts: Callable[[str], bytes | None] | None = None  # 文字转 MP3,由主程序设置
+        self.client = None
 
     def start(self) -> None:
         try:
@@ -275,6 +276,7 @@ class DiscordBridge:
 
     def _make_client(self, discord, intents):
         client = discord.Client(intents=intents)
+        self.client = client
 
         @client.event
         async def on_ready():
@@ -340,6 +342,35 @@ class DiscordBridge:
         except Exception as e:
             self.on_status(f"发送 Discord 消息失败:{type(e).__name__}: {e}")
 
+    def notify_owners(self, text: str, audio: bytes | None = None) -> int:
+        """主动私信所有配对过的账号(比如提醒到点了),返回成功发出的个数。在聊天线程里调用。"""
+        if self.loop is None or self.client is None:
+            self.on_status(f"Discord 还没连上,这条消息没发出去:{text[:50]}")
+            return 0
+        owners = list(self.gate.owners)
+
+        async def send_all() -> int:
+            sent = 0
+            for owner_id in owners:
+                try:
+                    user = self.client.get_user(owner_id) or await self.client.fetch_user(owner_id)
+                    for part in split_message(text):
+                        await user.send(part)
+                    if audio:
+                        import discord
+
+                        await user.send(file=discord.File(io.BytesIO(audio), filename="friday.mp3"))
+                    sent += 1
+                except Exception as e:  # 比如对方关了私信
+                    self.on_status(f"私信 {owner_id} 失败:{type(e).__name__}: {e}")
+            return sent
+
+        try:
+            return asyncio.run_coroutine_threadsafe(send_all(), self.loop).result(timeout=120)
+        except Exception as e:
+            self.on_status(f"发送 Discord 私信失败:{type(e).__name__}: {e}")
+            return 0
+
     def _log_failure(self, task) -> None:
         if not task.cancelled() and task.exception() is not None:
             error = task.exception()
@@ -347,6 +378,48 @@ class DiscordBridge:
 
 
 # ======================== 设置向导 ========================
+
+
+TOKEN_KEY = "FRIDAY_DISCORD_TOKEN"
+
+
+def set_discord_enabled(env_file: str | os.PathLike, enabled: bool) -> bool:
+    """在 .env 里打开或关闭这台电脑上的 Discord 机器人(注释掉 Token 那一行),返回是否找到了 Token。
+
+    搬到云端后,电脑上要关掉,否则两个“星期五”会同时回复。
+    """
+    env_file = Path(env_file)
+    try:
+        lines = env_file.read_text(encoding="utf-8-sig").splitlines()
+    except FileNotFoundError:
+        return False
+    found = False
+    for i, line in enumerate(lines):
+        bare = line.strip().lstrip("#").strip()
+        if bare.startswith(f"{TOKEN_KEY}=") and bare != f"{TOKEN_KEY}=":
+            lines[i] = bare if enabled else f"#{bare}"
+            found = True
+    if found:
+        env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return found
+
+
+def read_token(env_file: str | os.PathLike) -> str | None:
+    """从环境变量或 .env 读 Token;被 /discord off 注释掉的也认(云端模式用)。"""
+    token = os.environ.get(TOKEN_KEY, "").strip()
+    if token:
+        return token
+    try:
+        lines = Path(env_file).read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        bare = line.strip().lstrip("#").strip()
+        if bare.startswith(f"{TOKEN_KEY}="):
+            value = bare.split("=", 1)[1].strip().strip('"').strip("'")
+            if value:
+                return value
+    return None
 
 
 def save_env_value(env_file: Path, key: str, value: str) -> None:

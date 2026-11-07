@@ -468,6 +468,7 @@ class Toolbox:
         screen: ScreenControl | None = None,
         google: GoogleTools | None = None,
         confirm: Approver | None = None,
+        local_tools: bool = True,
     ) -> None:
         self.memory = memory
         self.approve = approve
@@ -478,6 +479,8 @@ class Toolbox:
         self.computer = computer
         self.screen = screen
         self.google = google
+        # 云端模式下为 False:不提供执行命令、读写文件(服务器上的文件对用户没有意义)
+        self.local_tools = local_tools
         # confirm:每次都必须问用户的确认(发邮件、发邀请),不受“本次都允许”影响
         self.confirm = confirm or approve
         self.unattended = False  # 定时任务执行期间为 True:需要确认的操作一律不做
@@ -504,7 +507,9 @@ class Toolbox:
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
 
     def definitions(self) -> list[dict]:
-        tools = (SERVER_TOOLS if self.web else []) + CLIENT_TOOLS
+        client_tools = CLIENT_TOOLS if self.local_tools else [
+            t for t in CLIENT_TOOLS if t["name"] not in ("run_command", "read_file", "write_file")]
+        tools = (SERVER_TOOLS if self.web else []) + client_tools
         if self.reminders is not None:
             tools = tools + [REMINDER_TOOL]
         if self.todos is not None and self.google is None:  # 接了 Google 就用 Google Tasks 当待办清单
@@ -533,6 +538,8 @@ class Toolbox:
         return self.confirm(action)
 
     def describe(self) -> str:
+        if not self.local_tools:
+            return "你运行在云端服务器上,碰不到用户的电脑"
         return describe_computer(self.workdir)
 
     def run(self, block, on_status: StatusFn) -> dict:

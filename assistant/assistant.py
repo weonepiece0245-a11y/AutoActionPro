@@ -15,6 +15,7 @@ import os
 import queue
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -30,7 +31,7 @@ from friday_daily import (  # noqa: E402
     describe_todo,
     notify_popup,
 )
-from friday_discord import DiscordBridge  # noqa: E402
+from friday_discord import DiscordBridge, read_token, set_discord_enabled  # noqa: E402
 from friday_google import GoogleAccount, GoogleTools  # noqa: E402
 from friday_pc import Computer, ScreenControl, drain_console_input  # noqa: E402
 from friday_tools import SERVER_TOOL_LABELS, Memory, Toolbox  # noqa: E402
@@ -60,6 +61,7 @@ WEEKDAYS = "一二三四五六日"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_ENV_FILE = os.path.join(SCRIPT_DIR, ".env")
+CURRENT_ENV_FILE = DEFAULT_ENV_FILE  # main() 里会换成实际使用的 .env
 DEFAULT_MEMORY_FILE = os.path.join(SCRIPT_DIR, "friday_memory.json")
 PLACEHOLDER_KEY = "在这里填你的Key"  # 与 .env.example 中的占位符一致
 KEY_HINT = "请设置环境变量 ANTHROPIC_API_KEY,或在 assistant/.env 里写入 ANTHROPIC_API_KEY=你的Key。"
@@ -119,6 +121,18 @@ VOICE_PROMPT_SECTION = """## 语音对话
 """
 
 
+SERVER_PROMPT_SECTION = """## 运行在云端
+你现在运行在云端服务器上,{call_me}通过手机 Discord 找你,电脑可能是关着的。
+你碰不到{call_me}的电脑:不能执行命令、读写电脑上的文件、看屏幕、控制鼠标键盘、调音量、打开程序或游戏。
+被要求做这些时,直接说明做不到,请{call_me}回到电脑前用电脑上的星期五。
+提醒和定时任务到点时,会以 Discord 私信发给{call_me}。
+
+"""
+
+SESSION_IDLE_RESET = 2 * 60 * 60  # 云端模式:闲置这么久(秒)后开始新对话,记忆不受影响
+MAX_HISTORY_MESSAGES = 80  # 云端模式:对话太长就开始新对话,避免越来越慢、越来越贵
+
+
 def format_now(now: datetime.datetime) -> str:
     return f"{now:%Y-%m-%d} 星期{WEEKDAYS[now.weekday()]} {now:%H:%M}"
 
@@ -167,12 +181,16 @@ def friday_persona(
     toolbox: Optional[Toolbox] = None,
     clock: Callable[[], datetime.datetime] = datetime.datetime.now,
     voice: bool = False,
+    server: bool = False,
 ) -> Persona:
     def system() -> str:
+        extra = VOICE_PROMPT_SECTION.format(call_me=call_me) if voice else ""
+        if server:
+            extra += SERVER_PROMPT_SECTION.format(call_me=call_me)
         return FRIDAY_PROMPT.format(
             call_me=call_me,
             computer=f"用户的电脑:{toolbox.describe()}" if toolbox else "(本次没有开启电脑操作)",
-            voice=VOICE_PROMPT_SECTION.format(call_me=call_me) if voice else "",
+            voice=extra,
             memories=toolbox.memory.as_prompt() if toolbox else "(本次没有开启记忆)",
         )
 
@@ -386,6 +404,19 @@ class ConsoleApprover:
                 return False
 
 
+class ServerApprover:
+    """云端模式的确认:只能在 Discord 上问(没有键盘);没有正在处理的 Discord 消息时一律拒绝。"""
+
+    def __init__(self) -> None:
+        self.remote: Optional[Callable[[str], bool]] = None
+
+    def __call__(self, action: str) -> bool:
+        return self.remote(f"星期五请求{action}") if self.remote is not None else False
+
+    def confirm(self, action: str) -> bool:
+        return self.remote(f"星期五请求{action}(这一步每次都要确认)") if self.remote is not None else False
+
+
 def show_memory(toolbox: Toolbox) -> None:
     facts = toolbox.memory.facts
     if not facts:
@@ -545,11 +576,20 @@ def handle_reminder(item: dict, assistant: Assistant, persona: Persona, voice) -
 
 def handle_discord_command(question: str, discord) -> None:
     """/discord:查看配对的账号;/discord pair:生成新配对码;/discord remove 编号:移除账号。"""
+    parts = question.split(maxsplit=2)
+    if len(parts) >= 2 and parts[1] in ("off", "on"):
+        enabled = parts[1] == "on"
+        if not set_discord_enabled(CURRENT_ENV_FILE, enabled):
+            print("没有在 .env 里找到 Discord 机器人的 Token。双击 discord-setup.bat 设置。")
+        elif enabled:
+            print("已打开这台电脑上的 Discord 机器人,重新打开星期五后生效。(云端还在运行的话,两边会同时回复)")
+        else:
+            print("已关闭这台电脑上的 Discord 机器人,重新打开星期五后生效。手机上的消息交给云端的星期五回复。")
+        return
     if discord is None:
-        print("还没有设置 Discord 机器人。双击 discord-setup.bat 设置。")
+        print("这台电脑上的 Discord 机器人没有开。设置用 discord-setup.bat;关掉过的话输入 /discord on。")
         return
     gate = discord.gate
-    parts = question.split(maxsplit=2)
     if len(parts) >= 2 and parts[1] == "pair":
         code = gate.new_pair_code()
         print(f"新的配对码:{code}(10 分钟内有效,只能用一次)。用要添加的 Discord 账号私信机器人发送这个码。")
@@ -563,6 +603,7 @@ def handle_discord_command(question: str, discord) -> None:
         owners = gate.owner_list()
         print("\n".join(["已配对的 Discord 账号:"] + [f"  {o}" for o in owners]) if owners else "还没有配对任何账号。")
         print("  /discord pair 添加一个新账号    /discord remove 编号 移除账号")
+        print("  /discord off 关掉这台电脑上的机器人(交给云端)    /discord on 重新打开")
 
 
 def handle_command(question: str, assistant: Assistant, discord=None) -> bool:
@@ -685,6 +726,95 @@ def chat(assistant: Assistant, persona: Persona | None = None, voice=None, event
         reader.request(prompt)
 
 
+def handle_reminder_server(item: dict, assistant: Assistant, persona: Persona, discord) -> None:
+    """云端模式:提醒到点时私信主人;定时任务执行后把结果私信过去。"""
+    missed = f"(原定 {item['time'][11:]},当时服务器没在运行)" if item.get("missed") else ""
+    print(f"\n  ⏰ {item['time'][11:]} {item['message']}{missed}", flush=True)
+    if item.get("kind") != "task":
+        text = f"⏰ 提醒:{item['message']}{missed}"
+        audio = discord.tts(f"提醒你:{item['message']}") if discord.tts else None
+        discord.notify_owners(text, audio=audio)
+        return
+    toolbox = assistant.toolbox
+    toolbox.unattended = True
+    try:
+        answer(assistant, persona, f"[定时任务]{missed}{item['message']}", None,
+               reply=lambda text: discord.notify_owners(f"⏰ {item['message']}\n\n{text}"))
+    finally:
+        toolbox.unattended = False
+
+
+def serve(assistant: Assistant, persona: Persona, events: queue.Queue, discord, transcribe=None,
+          clock: Callable[[], float] = time.monotonic) -> None:
+    """云端模式的主循环:没有键盘输入,只处理 Discord 消息、提醒和后台提示。"""
+    print(f"星期五云端模式已启动,当前时间 {format_now(datetime.datetime.now())}", flush=True)
+    last_active = clock()
+    while True:
+        try:
+            kind, payload = next_event(events)
+        except KeyboardInterrupt:
+            print("星期五云端模式已停止", flush=True)
+            return
+        if kind == "status":
+            print(f"  〔{payload}〕", flush=True)
+            continue
+        if kind == "eof":
+            return
+        # 闲置太久或对话太长,就开始新对话(记忆、提醒、待办都还在)
+        if clock() - last_active > SESSION_IDLE_RESET or len(assistant.messages) > MAX_HISTORY_MESSAGES:
+            assistant.reset()
+        last_active = clock()
+        if kind == "discord":
+            if not handle_discord(payload, assistant, persona, transcribe):
+                return
+        elif kind == "reminder":
+            handle_reminder_server(payload, assistant, persona, discord)
+        sys.stdout.flush()
+
+
+def run_server(args) -> None:
+    """云端模式:读取配置,启动 Discord 机器人和提醒,然后一直运行。"""
+    token = read_token(args.env_file)
+    if not token:
+        print("云端模式需要 Discord 机器人的 Token(.env 里的 FRIDAY_DISCORD_TOKEN)。", file=sys.stderr)
+        sys.exit(1)
+    call_me = args.call_me or os.environ.get("FRIDAY_CALL_ME") or DEFAULT_CALL_ME
+    memory_file = args.memory_file or os.environ.get("FRIDAY_MEMORY_FILE") or DEFAULT_MEMORY_FILE
+    data_dir = os.path.dirname(os.path.abspath(memory_file))
+    account = GoogleAccount(os.path.join(data_dir, "credentials.json"), os.path.join(data_dir, "google_token.json"))
+    google = GoogleTools(account, downloads_dir=lambda: Path(data_dir) / "downloads") if account.configured else None
+    approver = ServerApprover()
+    toolbox = Toolbox(
+        Memory(memory_file),
+        approver,
+        workdir=data_dir,
+        web=not args.no_web,
+        reminders=Reminders(os.path.join(data_dir, "friday_reminders.json")),
+        todos=Todos(os.path.join(data_dir, "friday_todos.json")),
+        google=google,
+        confirm=approver.confirm,
+        local_tools=False,
+    )
+    persona = friday_persona(call_me, toolbox, server=True)
+    try:
+        assistant = Assistant(model=args.model, effort=args.effort or persona.effort, system=persona.system,
+                              context=persona.context, toolbox=toolbox)
+    except anthropic.AnthropicError:
+        print(f"未找到 API 凭据。{KEY_HINT}", file=sys.stderr)
+        sys.exit(1)
+
+    import voice as voice_module
+
+    events: queue.Queue = queue.Queue()
+    discord = DiscordBridge(token, events, os.path.join(data_dir, "friday_discord.json"),
+                            lambda text: events.put(("status", text)))
+    discord.tts = voice_module.synthesize_mp3
+    discord.gate.transcriber = voice_module.transcribe_audio
+    discord.start()
+    ReminderScheduler(toolbox.reminders, events).start()
+    serve(assistant, persona, events, discord, voice_module.transcribe_audio)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="AI 小助理:在终端里和 Claude 对话")
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"模型 ID(默认 {DEFAULT_MODEL})")
@@ -716,6 +846,11 @@ def main(argv: list[str] | None = None) -> None:
         help="“星期五”执行命令、读写文件的默认目录(默认是你的用户主目录)",
     )
     parser.add_argument("--no-web", action="store_true", help="不让“星期五”联网搜索")
+    parser.add_argument(
+        "--server",
+        action="store_true",
+        help="云端模式:在服务器上一直运行,只通过手机 Discord 聊天(不能操作电脑)",
+    )
     parser.add_argument("--voice", action="store_true", help="语音对话:回车后对着麦克风说话,回答会读出来")
     parser.add_argument(
         "--stt",
@@ -754,6 +889,12 @@ def main(argv: list[str] | None = None) -> None:
     if os.environ.get("ANTHROPIC_API_KEY") == PLACEHOLDER_KEY:
         print(f"还没有填写 API Key。请打开 {args.env_file},把“{PLACEHOLDER_KEY}”换成你的 Key。", file=sys.stderr)
         sys.exit(1)
+
+    global CURRENT_ENV_FILE
+    CURRENT_ENV_FILE = args.env_file
+    if args.server:
+        run_server(args)
+        return
 
     if args.persona == "friday":
         call_me = args.call_me or os.environ.get("FRIDAY_CALL_ME") or DEFAULT_CALL_ME
