@@ -12,6 +12,7 @@ import collections
 import json
 import os
 import queue
+import re
 import secrets
 import shutil
 import subprocess
@@ -93,6 +94,104 @@ class AudioStore:
     def get(self, key: str) -> bytes | None:
         with self.lock:
             return self.items.get(key)
+
+
+class SpeechStream:
+    """边出字边朗读:回答一边生成,一边按句子切开交给后台线程合成语音,按顺序推给窗口。
+
+    以前要等整段回答写完才开始合成,长回答要等十几秒甚至一分钟才出声。
+    现在第一句写完就开始合成;后台线程忙的时候,后面写好的句子会攒成一段一起合成,
+    这样请求次数少,而且窗口播放上一段时下一段已经在准备了。
+    """
+
+    SENTENCE_END = re.compile(r"[。！？!?；;…\n]|\.(?=\s)")
+    MORE = "其余内容请看文字。"
+
+    def __init__(self, synthesize: Callable[[str], bytes | None], publish: Callable[[bytes], None],
+                 max_chars: int = 800, batch_chars: int = 200) -> None:
+        self.synthesize = synthesize
+        self.publish = publish
+        self.max_chars = max_chars  # 一次回答最多读这么多字,太长的看文字
+        self.batch_chars = batch_chars
+        self.buffer = ""
+        self.pending: collections.deque[str] = collections.deque()
+        self.spoken = 0
+        self.full = False
+        self.finished = False
+        self.cancelled = False
+        self.wakeup = threading.Condition()
+        self.thread = threading.Thread(target=self._run, daemon=True, name="friday-speech")
+        self.thread.start()
+
+    def feed(self, text: str) -> None:
+        """收到回答的一小段文字。"""
+        if self.full or self.cancelled or not text:
+            return
+        self.buffer += text
+        while not self.full:
+            end = self._sentence_end()
+            if end is None:
+                break
+            sentence, self.buffer = self.buffer[:end], self.buffer[end:]
+            self._queue(sentence)
+
+    def _sentence_end(self) -> int | None:
+        for match in self.SENTENCE_END.finditer(self.buffer):
+            end = match.end()
+            if self.buffer.count("```", 0, end) % 2 == 0:  # 代码块没结束前不切
+                return end
+        return None
+
+    def _queue(self, sentence: str) -> None:
+        if self.full or not sentence.strip():
+            return
+        with self.wakeup:
+            if self.spoken + len(sentence) > self.max_chars:
+                self.pending.append(self.MORE)
+                self.full = True
+            else:
+                self.pending.append(sentence)
+                self.spoken += len(sentence)
+            self.wakeup.notify()
+
+    def finish(self) -> None:
+        """回答写完了:剩下没有标点结尾的部分也读出来。不等合成完就返回。"""
+        if not self.full and not self.cancelled:
+            rest, self.buffer = self.buffer, ""
+            self._queue(rest)
+        with self.wakeup:
+            self.finished = True
+            self.wakeup.notify()
+
+    def cancel(self) -> None:
+        """开始了新的问题:还没读的就不读了。"""
+        with self.wakeup:
+            self.cancelled = True
+            self.pending.clear()
+            self.wakeup.notify()
+
+    def _next_batch(self) -> str | None:
+        with self.wakeup:
+            while not self.pending and not self.finished and not self.cancelled:
+                self.wakeup.wait()
+            if self.cancelled or not self.pending:
+                return None
+            batch = self.pending.popleft()
+            while self.pending and len(batch) + len(self.pending[0]) <= self.batch_chars:
+                batch += self.pending.popleft()
+            return batch
+
+    def _run(self) -> None:
+        while True:
+            batch = self._next_batch()
+            if batch is None:
+                return
+            try:
+                audio = self.synthesize(batch)
+            except Exception:
+                audio = None
+            if audio and not self.cancelled:
+                self.publish(audio)
 
 
 class WebApprover:

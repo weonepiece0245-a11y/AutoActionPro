@@ -135,7 +135,7 @@ function handle(ev) {
       if (current) { current.remove(); current = null; }
       addLine(ev.text, "error"); refreshMode(); break;
     case "audio":
-      play(ev.url); break;
+      enqueueAudio(ev.url, ev.turn); break;
     case "reminder":
       addLine(ev.text, "reminder"); beep(880, 0.15); loadState(); break;
     case "approval":
@@ -198,6 +198,7 @@ $("speakBtn").onclick = () => {
   try { localStorage.setItem("friday-speak", speakOn ? "1" : "0"); } catch {}
   updateSpeakBtn();
   ensureAudio();
+  if (!speakOn) stopSpeaking();
 };
 
 $("form").onsubmit = async (e) => {
@@ -205,6 +206,7 @@ $("form").onsubmit = async (e) => {
   const text = $("input").value.trim();
   if (!text || busy) return;
   ensureAudio();
+  stopSpeaking();
   beep(660, 0.06);
   $("input").value = "";
   const r = await api("/api/ask", { text, speak: speakOn });
@@ -246,21 +248,42 @@ function rms(an) {
   for (const v of data) { const x = (v - 128) / 128; sum += x * x; }
   return Math.sqrt(sum / data.length);
 }
-function play(url) {
+// 回答是一句一句合成的,按顺序排队播放;新问题的语音来了,旧的就不读了
+const audioQueue = [];
+let audioTurn = null;
+let ignoreTurn = -1;  // 被打断的那次回答,后面陆续到的语音也不读了
+let levelLoop = false;
+function enqueueAudio(url, turn) {
   if (!speakOn) return;
+  if (turn !== undefined && turn <= ignoreTurn) return;
+  if (turn !== undefined && turn !== audioTurn) { stopSpeaking(); audioTurn = turn; }
+  audioQueue.push(url);
+  if (!speaking) playNext();
+}
+function stopSpeaking() {
+  if (audioTurn !== null) ignoreTurn = Math.max(ignoreTurn, audioTurn);
+  audioQueue.length = 0;
+  audioEl.pause();
+  speaking = false; orbState.level = 0; refreshMode();
+}
+function playNext() {
+  const url = audioQueue.shift();
+  if (!url) { speaking = false; orbState.level = 0; refreshMode(); return; }
   ensureAudio();
+  speaking = true; refreshMode();
   audioEl.src = `${url}?t=${encodeURIComponent(token)}`;
   audioEl.play().then(() => {
-    speaking = true; refreshMode();
+    if (levelLoop) return;
+    levelLoop = true;
     const loop = () => {
-      if (!speaking) return;
+      if (!speaking) { levelLoop = false; return; }
       orbState.level = Math.min(1, rms(analyser) * 4.5);
       requestAnimationFrame(loop);
     };
     loop();
-  }).catch(() => toast("点一下页面,才能播放声音"));
+  }).catch(() => { audioQueue.length = 0; speaking = false; refreshMode(); toast("点一下页面,才能播放声音"); });
 }
-audioEl.onended = audioEl.onerror = () => { speaking = false; orbState.level = 0; refreshMode(); };
+audioEl.onended = audioEl.onerror = () => { if (speaking) playNext(); };
 function beep(freq, dur) {
   if (!audioCtx) return;
   const o = audioCtx.createOscillator();
@@ -277,7 +300,7 @@ let recorder = null;
 $("micBtn").onclick = async () => {
   if (recorder) { recorder.stop(); return; }
   ensureAudio();
-  if (speaking) audioEl.pause();
+  stopSpeaking();
   let stream;
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
@@ -361,7 +384,7 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape" && approval
     greet.classList.add("greeting");
     if (speakOn) {
       const r = await api("/api/speak", { text: s.greeting.split("\n")[0] });
-      if (r.url) play(r.url);
+      if (r.url) enqueueAudio(r.url);
     }
   }
   setInterval(loadState, 30000);

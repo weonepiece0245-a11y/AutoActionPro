@@ -3281,6 +3281,69 @@ class WebHubTest(unittest.TestCase):
         self.assertEqual(store.get(keys[2]), b"\x02")
 
 
+class SpeechStreamTest(unittest.TestCase):
+    def run_stream(self, chunks, synthesize=None, **kwargs):
+        published = []
+        said = []
+
+        def default(text):
+            said.append(text)
+            return text.encode()
+
+        stream = friday_web.SpeechStream(synthesize or default, published.append, **kwargs)
+        for chunk in chunks:
+            stream.feed(chunk)
+        stream.finish()
+        stream.thread.join(2)
+        self.assertFalse(stream.thread.is_alive())
+        return said, published
+
+    def test_sentences_in_order_and_rest_at_end(self):
+        said, published = self.run_stream(["你好", "老板。今天", "晴天!明天", "下雨"])
+        self.assertEqual("".join(said), "你好老板。今天晴天!明天下雨")
+        self.assertTrue(said[0].startswith("你好老板。"))  # 不会在句子中间切开
+        self.assertTrue(said[-1].endswith("明天下雨"))  # 没有标点的结尾也会读
+        self.assertEqual(published, [t.encode() for t in said])
+
+    def test_batches_sentences_while_busy(self):
+        gate = threading.Event()
+        said = []
+
+        def slow(text):
+            said.append(text)
+            gate.wait(2)
+            return b"x"
+
+        stream = friday_web.SpeechStream(slow, lambda audio: None)
+        stream.feed("第一句。")
+        time.sleep(0.05)
+        stream.feed("第二句。第三句。第四句。")
+        stream.finish()
+        gate.set()
+        stream.thread.join(2)
+        self.assertEqual(said, ["第一句。", "第二句。第三句。第四句。"])  # 忙的时候攒成一段
+
+    def test_code_block_is_not_split(self):
+        said, _ = self.run_stream(["看这个:\n```\nprint(1)\nprint(2)\n```\n好了。"])
+        self.assertTrue(any("```\nprint(1)\nprint(2)\n```" in s for s in said))
+
+    def test_long_answer_is_cut(self):
+        said, _ = self.run_stream(["很长的一句话。" * 50], max_chars=30)
+        text = "".join(said)
+        self.assertTrue(text.endswith(friday_web.SpeechStream.MORE))
+        self.assertEqual(text.count(friday_web.SpeechStream.MORE), 1)
+        self.assertLessEqual(len(text) - len(friday_web.SpeechStream.MORE), 30)
+
+    def test_cancel_and_failures(self):
+        said, published = self.run_stream(["一。二。"], synthesize=lambda text: None)
+        self.assertEqual(published, [])
+        stream = friday_web.SpeechStream(lambda text: b"x", lambda audio: None)
+        stream.cancel()
+        stream.feed("还读吗。")
+        stream.thread.join(2)
+        self.assertFalse(stream.thread.is_alive())
+
+
 class WebApproverTest(unittest.TestCase):
     def make(self):
         hub = friday_web.Hub()
@@ -3436,8 +3499,45 @@ class WebSessionTest(TempDirTest):
     def test_streams_answer_and_speaks(self):
         session = self.make(FakeClient(FakeStream(["晴", "天"])))
         self.assertEqual(session.ask("天气?", speak=True), "晴天")
-        types = [e["type"] for e in self.drain()]
-        self.assertEqual(types, ["user", "thinking", "delta", "delta", "done", "audio"])
+        session._stream.thread.join(2)  # 语音在后台合成
+        events = self.drain()
+        self.assertEqual([e["type"] for e in events], ["user", "thinking", "delta", "delta", "done", "audio"])
+        self.assertEqual(events[-1]["turn"], 1)
+
+    def test_starts_speaking_before_answer_is_finished(self):
+        session = self.make(FakeClient(FakeStream(["好的,马上查。", "今天晴天"])))
+        spoken = []
+        first_sentence_spoken = threading.Event()
+
+        def synthesize(text):
+            spoken.append(text)
+            first_sentence_spoken.set()
+            return b"MP3"
+
+        session.synthesize = synthesize
+        original = session.assistant.ask
+
+        def slow_ask(question, on_text, on_status):
+            def watch(delta):
+                on_text(delta)
+                if delta == "好的,马上查。":  # 第二段文字出来之前,第一句已经开始合成了
+                    self.assertTrue(first_sentence_spoken.wait(2))
+            return original(question, watch, on_status)
+
+        session.assistant.ask = slow_ask
+        session.ask("天气?", speak=True)
+        session._stream.thread.join(2)
+        self.assertEqual(spoken, ["好的,马上查。", "今天晴天"])
+
+    def test_new_question_stops_old_speech(self):
+        session = self.make(FakeClient(FakeStream(["一。"]), FakeStream(["二。"])))
+        session.ask("1", speak=True)
+        first = session._stream
+        session.ask("2", speak=True)
+        self.assertTrue(first.cancelled)
+        session._stream.thread.join(2)
+        turns = [e["turn"] for e in self.drain() if e["type"] == "audio"]
+        self.assertEqual(turns[-1], 2)
 
     def test_errors_become_messages(self):
         session = self.make(FakeClient(FakeStream([], error=anthropic.APIConnectionError("断网"))))

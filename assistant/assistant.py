@@ -802,33 +802,58 @@ class WebSession:
             hub.broadcast({"type": "error", "text": self.startup_error or "星期五还没准备好"})
             return None
         hub.broadcast({"type": "thinking", "source": source})
+        stream = self._new_stream() if speak else None
+
+        def on_text(delta):
+            hub.broadcast({"type": "delta", "text": delta})
+            if stream is not None:
+                stream.feed(delta)  # 边写边读,不用等整段写完
+
         try:
             result = self.assistant.ask(
                 prefix + text,
-                lambda delta: hub.broadcast({"type": "delta", "text": delta}),
+                on_text,
                 lambda status: hub.broadcast({"type": "status", "text": status}),
             )
         except Exception as e:  # 界面里不能让异常把程序弄崩
+            if stream is not None:
+                stream.cancel()
             described = error_text(e)
             message = described[0] if described else f"出错了:{type(e).__name__}: {e}"
             print(f"回答出错:{type(e).__name__}: {e}", flush=True)
             hub.broadcast({"type": "error", "text": message})
             return None
         hub.broadcast({"type": "done", "text": result, "source": source})
-        if speak:
-            self.speak(result)
+        if stream is not None:
+            stream.finish()
         return result
 
     def speak(self, text: str) -> None:
-        if self.synthesize is None or self.hub_audio is None:
-            return
-        try:
-            audio = self.synthesize(text)
-        except Exception:
-            audio = None
-        if audio:
-            self.hub.broadcast({"type": "audio", "url": f"/audio/{self.hub_audio.put(audio)}.mp3"})
+        stream = self._new_stream()
+        if stream is not None:
+            stream.feed(text)
+            stream.finish()
 
+    def _new_stream(self):
+        """每次回答一个新的朗读流;上一次还没读完的就不读了。"""
+        import friday_web
+
+        if self._stream is not None:
+            self._stream.cancel()
+            self._stream = None
+        if self.synthesize is None or self.hub_audio is None:
+            return None
+        self._turn += 1
+        turn = self._turn
+
+        def publish(audio: bytes) -> None:
+            self.hub.broadcast({"type": "audio", "url": f"/audio/{self.hub_audio.put(audio)}.mp3", "turn": turn})
+
+        self._stream = friday_web.SpeechStream(self.synthesize, publish)
+        return self._stream
+
+    _stream = None
+    _turn = 0
     hub_audio = None  # 由 run_web 设置成 WebContext.audio
 
 
