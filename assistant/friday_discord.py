@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 import os
 import queue
@@ -67,13 +68,27 @@ def invite_url(bot_id: str) -> str:
     return f"https://discord.com/oauth2/authorize?client_id={bot_id}&scope=bot&permissions={INVITE_PERMISSIONS}"
 
 
-class DiscordMessage:
-    """一条来自主人的消息,附带回复和请求确认的方法(在聊天线程里调用)。"""
+AUDIO_SUFFIXES = (".ogg", ".oga", ".opus", ".mp3", ".m4a", ".wav", ".webm", ".aac", ".flac")
+MAX_AUDIO_BYTES = 20 * 1024 * 1024
 
-    def __init__(self, text: str, reply: Callable[[str], None], ask: Callable[[str], bool]) -> None:
+
+def is_audio_attachment(filename: str, content_type: str | None) -> bool:
+    return (content_type or "").lower().startswith("audio/") or filename.lower().endswith(AUDIO_SUFFIXES)
+
+
+class DiscordMessage:
+    """一条来自主人的消息,附带回复和请求确认的方法(在聊天线程里调用)。
+
+    audio:语音消息的原始音频(没有就是 None);reply_voice:回复文字并附上朗读的语音。
+    """
+
+    def __init__(self, text: str, reply: Callable[[str], None], ask: Callable[[str], bool],
+                 audio: bytes | None = None, reply_voice: Callable[[str], None] | None = None) -> None:
         self.text = text
         self.reply = reply
         self.ask = ask
+        self.audio = audio
+        self.reply_voice = reply_voice or reply
 
 
 class DiscordGate:
@@ -87,10 +102,13 @@ class DiscordGate:
     PAIR_MINUTES = 10
 
     def __init__(self, state_file: str | os.PathLike, events: queue.Queue, send, on_status: StatusFn = print,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic, send_voice=None,
+                 transcriber: Callable[[bytes], str | None] | None = None) -> None:
         self.state_file = Path(state_file)
         self.events = events
         self.send = send
+        self.send_voice = send_voice  # (channel, text):回复文字并附上语音
+        self.transcriber = transcriber  # 把语音消息转成文字(用于语音回答确认问题)
         self.on_status = on_status
         self.clock = clock
         self.owners: dict[int, str] = self._load_owners()
@@ -152,7 +170,7 @@ class DiscordGate:
 
     # ---- 收到私信 ----
     def handle(self, author_id: int, author_name: str, is_dm: bool, text: str, channel,
-               mentioned: bool = False, named_channel: bool = False) -> None:
+               mentioned: bool = False, named_channel: bool = False, audio: bytes | None = None) -> None:
         """is_dm:私信;mentioned:消息里 @ 了机器人;named_channel:频道名带 friday / 星期五。
 
         服务器频道里只有 @ 机器人,或在专用频道里说话时才处理,免得和朋友聊天时它插嘴。
@@ -172,15 +190,18 @@ class DiscordGate:
             else:
                 self.on_status(f"有没配对的账号({author_name})找机器人说话,已忽略")
             return
-        if not text:
+        if not text and not audio:
             return
         if self.waiting_for == author_id:
-            self.answers.put(text)
+            self.answers.put(audio if audio and not text else text)
             return
+        send_voice = self.send_voice
         self.events.put(("discord", DiscordMessage(
             text,
             reply=lambda answer: self.send(channel, answer),
             ask=lambda question: self.ask(channel, question, author_id),
+            audio=audio,
+            reply_voice=(lambda answer: send_voice(channel, answer)) if send_voice else None,
         )))
 
     def ask(self, channel, question: str, author_id: int | None = None, timeout: float = ASK_TIMEOUT) -> bool:
@@ -197,7 +218,14 @@ class DiscordGate:
                 return False
         finally:
             self.waiting_for = None
-        return answer.strip().lower() in YES
+        if isinstance(answer, bytes):  # 用语音回答的
+            try:
+                answer = (self.transcriber(answer) if self.transcriber else None) or ""
+            except Exception:
+                answer = ""
+            if answer:
+                self.send(channel, f"🎤 听到:{answer}")
+        return answer.strip().lower().rstrip("。.!!") in YES
 
 
 class DiscordBridge:
@@ -208,7 +236,8 @@ class DiscordBridge:
         self.token = token.strip()
         self.on_status = on_status
         self.loop: asyncio.AbstractEventLoop | None = None
-        self.gate = DiscordGate(state_file, events, self.send, on_status)
+        self.gate = DiscordGate(state_file, events, self.send, on_status, send_voice=self.send_voice)
+        self.tts: Callable[[str], bytes | None] | None = None  # 文字转 MP3,由主程序设置
 
     def start(self) -> None:
         try:
@@ -259,14 +288,31 @@ class DiscordBridge:
                 return
             mentioned = client.user in message.mentions
             text = re.sub(rf"<@!?{client.user.id}>", "", message.content or "").strip()
+            audio = None
+            for attachment in message.attachments:  # 语音消息是一个音频附件
+                if is_audio_attachment(attachment.filename, attachment.content_type):
+                    if attachment.size <= MAX_AUDIO_BYTES:
+                        audio = await attachment.read()
+                    break
             self.gate.handle(
                 message.author.id, str(message.author), isinstance(message.channel, discord.DMChannel), text,
                 message.channel, mentioned=mentioned, named_channel=is_friday_channel(getattr(message.channel, "name", "")),
+                audio=audio,
             )
 
         return client
 
-    def send(self, channel, text: str) -> None:
+    def send_voice(self, channel, text: str) -> None:
+        """回复文字,再附上一段朗读这段文字的语音(在聊天线程里调用)。"""
+        audio = None
+        if self.tts is not None:
+            try:
+                audio = self.tts(text)
+            except Exception:
+                audio = None
+        self.send(channel, text, audio=audio)
+
+    def send(self, channel, text: str, audio: bytes | None = None) -> None:
         """从任何线程发消息。在机器人自己的线程里调用时只安排发送、不等待(等待会把自己卡死)。"""
         if self.loop is None:
             return
@@ -275,6 +321,10 @@ class DiscordBridge:
         async def send_all():
             for part in parts:
                 await channel.send(part)
+            if audio:
+                import discord
+
+                await channel.send(file=discord.File(io.BytesIO(audio), filename="friday.mp3"))
 
         try:
             running = asyncio.get_running_loop()

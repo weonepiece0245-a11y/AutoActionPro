@@ -550,6 +550,89 @@ class EdgeSpeaker:
         self._fallback.speak(text)
 
 
+# ======================== 语音消息(Discord):整段音频转文字、文字转 MP3 ========================
+
+FFMPEG_HINT = "处理语音消息需要先安装依赖:python -m pip install -r assistant/requirements.txt"
+_vosk_model = None
+
+
+def decode_audio(data: bytes, rate: int = SAMPLE_RATE) -> bytes:
+    """把任意格式的音频(Discord 语音消息是 ogg/opus)解码成 16 位单声道 PCM。
+
+    用 imageio-ffmpeg 自带的 ffmpeg,不需要另外安装。
+    """
+    try:
+        import imageio_ffmpeg
+    except ImportError as e:
+        raise VoiceUnavailable(FFMPEG_HINT) from e
+    proc = subprocess.run(
+        [imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-i", "pipe:0",
+         "-f", "s16le", "-ac", "1", "-ar", str(rate), "pipe:1"],
+        input=data, capture_output=True, timeout=120,
+    )
+    if proc.returncode != 0 or not proc.stdout:
+        detail = proc.stderr.decode(errors="replace").strip()[-200:]
+        raise RuntimeError(f"无法解码这段语音{(':' + detail) if detail else ''}")
+    return proc.stdout
+
+
+def transcribe_audio(data: bytes, engine: str | None = None) -> str | None:
+    """把一整段音频转成文字;没听清时返回 None。engine:google(默认)或 vosk。"""
+    engine = engine or os.environ.get("FRIDAY_STT") or "google"
+    pcm = decode_audio(data)
+    if engine == "vosk":
+        global _vosk_model
+        try:
+            import vosk
+        except ImportError as e:
+            raise VoiceUnavailable(INSTALL_HINT) from e
+        if _vosk_model is None:
+            vosk.SetLogLevel(-1)
+            _vosk_model = vosk.Model(ensure_vosk_model(on_status=lambda t: None))
+        recognizer = vosk.KaldiRecognizer(_vosk_model, SAMPLE_RATE)
+        recognizer.AcceptWaveform(pcm)
+        return json.loads(recognizer.FinalResult()).get("text", "").replace(" ", "") or None
+    try:
+        import speech_recognition as sr
+    except ImportError as e:
+        raise VoiceUnavailable(FFMPEG_HINT) from e
+    try:
+        return sr.Recognizer().recognize_google(sr.AudioData(pcm, SAMPLE_RATE, 2), language="zh-CN") or None
+    except sr.UnknownValueError:
+        return None
+    except sr.RequestError as e:
+        raise VoiceUnavailable(f"在线语音识别连接失败({e})。可以在 .env 里写 FRIDAY_STT=vosk 改用离线识别") from e
+
+
+def synthesize_mp3(text: str, edge_voice: str | None = None, max_chars: int = 800) -> bytes | None:
+    """用微软 Edge 神经网络语音把文字转成 MP3;失败或没有可读内容时返回 None。"""
+    text = clean_for_speech(text)
+    if not text:
+        return None
+    if len(text) > max_chars:  # 太长的回答只读前面一段,完整内容看文字
+        cut = max(text.rfind("。", 0, max_chars), text.rfind("\n", 0, max_chars))
+        text = text[: cut + 1 if cut > max_chars // 2 else max_chars] + "……其余内容请看文字。"
+    try:
+        import edge_tts
+    except ImportError:
+        return None
+    voice_name = resolve_edge_voice(edge_voice or os.environ.get("FRIDAY_TTS_VOICE"))
+    fd, path = tempfile.mkstemp(prefix="friday_", suffix=".mp3")
+    os.close(fd)
+    try:
+        asyncio.run(edge_tts.Communicate(text, voice_name).save(path))
+        with open(path, "rb") as f:
+            data = f.read()
+        return data or None
+    except Exception:
+        return None
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def make_system_speaker():
     return WindowsSpeaker() if os.name == "nt" else Speaker()
 

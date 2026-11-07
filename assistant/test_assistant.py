@@ -2789,6 +2789,140 @@ class DiscordSendTest(TempDirTest):
         self.assertTrue(self.received[2].startswith("第2段"))
 
 
+class DiscordVoiceMessageTest(DiscordGateTest):
+    def test_voice_message_becomes_event_with_audio(self):
+        gate = self.paired((42, "main"))
+        voiced = []
+        gate.send_voice = lambda channel, text: voiced.append((channel, text))
+        gate.handle(42, "main", True, "", "dm", audio=b"OGG")
+        message = self.events.get_nowait()[1]
+        self.assertEqual((message.text, message.audio), ("", b"OGG"))
+        message.reply_voice("晴天")
+        self.assertEqual(voiced, [("dm", "晴天")])
+
+    def test_spoken_approval(self):
+        gate = self.paired((42, "main"))
+        gate.transcriber = lambda audio: "可以。"
+        threading.Timer(0.05, lambda: gate.handle(42, "main", True, "", "dm", audio=b"OGG")).start()
+        self.assertTrue(gate.ask("dm", "星期五请求关机", 42, timeout=2))
+        self.assertIn("🎤 听到:可以。", [t for _, t in self.sent])
+        gate.transcriber = lambda audio: None  # 没听清就当拒绝
+        threading.Timer(0.05, lambda: gate.handle(42, "main", True, "", "dm", audio=b"OGG")).start()
+        self.assertFalse(gate.ask("dm", "星期五请求关机", 42, timeout=2))
+
+    def test_audio_attachment_detection(self):
+        self.assertTrue(dmod.is_audio_attachment("voice-message.ogg", "audio/ogg"))
+        self.assertTrue(dmod.is_audio_attachment("录音.m4a", None))
+        self.assertFalse(dmod.is_audio_attachment("photo.png", "image/png"))
+
+
+class DiscordVoiceChatTest(TempDirTest):
+    def message(self, audio=b"OGG", text=""):
+        self.replies, self.voiced = [], []
+        return dmod.DiscordMessage(text, reply=self.replies.append, ask=lambda q: False, audio=audio,
+                                   reply_voice=self.voiced.append)
+
+    def test_voice_question_answered_with_voice(self):
+        client = FakeClient(FakeStream(["明天晴"]))
+        bot = app.Assistant(client=client)
+        with mock.patch("builtins.print"):
+            self.assertTrue(app.handle_discord(self.message(), bot, app.default_persona(), lambda a: "明天天气怎么样"))
+        self.assertEqual(self.replies, ["🎤 听到:明天天气怎么样"])
+        self.assertEqual(self.voiced, ["明天晴"])
+        self.assertEqual(client.calls[0]["messages"][0]["content"], "[来自手机 Discord 语音]明天天气怎么样")
+
+    def test_not_heard_or_failed(self):
+        bot = app.Assistant(client=FakeClient())
+        with mock.patch("builtins.print"):
+            app.handle_discord(self.message(), bot, app.default_persona(), lambda a: None)
+            self.assertIn("没听清", self.replies[0])
+
+            def broken(audio):
+                raise voice.VoiceUnavailable("在线语音识别连接失败")
+
+            app.handle_discord(self.message(), bot, app.default_persona(), broken)
+            self.assertIn("在线语音识别连接失败", self.replies[0])
+        self.assertEqual(bot.messages, [])
+
+
+class DiscordSendVoiceTest(DiscordSendTest):
+    def setUp(self):
+        super().setUp()
+        test = self
+
+        class Channel:
+            async def send(self, text=None, file=None):
+                test.received.append(text if file is None else ("file", file.filename, file.fp.read()))
+                if len(test.received) >= test.expected:
+                    test.done.set()
+
+        self.channel = Channel()
+        fake_discord = types.ModuleType("discord")
+        fake_discord.File = lambda fp, filename: SimpleNamespace(fp=fp, filename=filename)
+        patcher = mock.patch.dict(sys.modules, {"discord": fake_discord})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_text_then_audio(self):
+        self.expected = 2
+        self.bridge.tts = lambda text: b"MP3:" + text.encode()
+        self.bridge.send_voice(self.channel, "晴天")
+        self.assertEqual(self.received, ["晴天", ("file", "friday.mp3", "MP3:晴天".encode())])
+
+    def test_tts_failure_still_sends_text(self):
+        self.expected = 1
+
+        def broken(text):
+            raise RuntimeError("连不上")
+
+        self.bridge.tts = broken
+        self.bridge.send_voice(self.channel, "晴天")
+        self.assertEqual(self.received, ["晴天"])
+
+
+class AudioHelpersTest(unittest.TestCase):
+    def test_decode_audio_uses_bundled_ffmpeg(self):
+        ffmpeg = types.ModuleType("imageio_ffmpeg")
+        ffmpeg.get_ffmpeg_exe = lambda: "/bin/ffmpeg"
+        done = SimpleNamespace(returncode=0, stdout=b"PCM", stderr=b"")
+        with mock.patch.dict(sys.modules, {"imageio_ffmpeg": ffmpeg}), \
+                mock.patch.object(voice.subprocess, "run", return_value=done) as run:
+            self.assertEqual(voice.decode_audio(b"OGG"), b"PCM")
+        args = run.call_args.args[0]
+        self.assertEqual(args[0], "/bin/ffmpeg")
+        self.assertEqual(args[-7:], ["-f", "s16le", "-ac", "1", "-ar", "16000", "pipe:1"])  # 16kHz 单声道 16 位
+        self.assertEqual(run.call_args.kwargs["input"], b"OGG")
+        failed = SimpleNamespace(returncode=1, stdout=b"", stderr=b"Invalid data")
+        with mock.patch.dict(sys.modules, {"imageio_ffmpeg": ffmpeg}), \
+                mock.patch.object(voice.subprocess, "run", return_value=failed):
+            with self.assertRaises(RuntimeError):
+                voice.decode_audio(b"bad")
+        with mock.patch.dict(sys.modules, {"imageio_ffmpeg": None}):
+            with self.assertRaises(voice.VoiceUnavailable):
+                voice.decode_audio(b"OGG")
+
+    def test_transcribe_with_google(self):
+        sr = FakeSR(["今天天气怎么样", FakeSR.UnknownValueError()])
+        with mock.patch.object(voice, "decode_audio", return_value=b"PCM"), \
+                mock.patch.dict(sys.modules, {"speech_recognition": sr}), \
+                mock.patch.dict(os.environ, {"FRIDAY_STT": "google"}):
+            self.assertEqual(voice.transcribe_audio(b"OGG"), "今天天气怎么样")
+            self.assertEqual(sr.recognized[0], ((b"PCM", 16000, 2), "zh-CN"))
+            self.assertIsNone(voice.transcribe_audio(b"OGG"))
+
+    def test_synthesize_mp3(self):
+        with mock.patch.dict(sys.modules, {"edge_tts": fake_edge_tts()}), mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(voice.synthesize_mp3("**你好**"), b"ID3fake-mp3")
+            self.assertEqual(FakeCommunicate.calls[-1], ("你好", "zh-CN-XiaoxiaoNeural"))
+            voice.synthesize_mp3("很长。" * 500, max_chars=100)
+            spoken = FakeCommunicate.calls[-1][0]
+            self.assertTrue(spoken.endswith("其余内容请看文字。"))
+            self.assertLess(len(spoken), 130)
+            self.assertIsNone(voice.synthesize_mp3("** **"))
+            FakeCommunicate.fail_with = OSError("断网")
+            self.assertIsNone(voice.synthesize_mp3("你好"))
+
+
 class DiscordCommandTest(TempDirTest):
     def run_commands(self, inputs, discord):
         bot = app.Assistant(client=FakeClient())
