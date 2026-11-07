@@ -24,6 +24,9 @@
 
 ### 启动
 
+**装成应用(推荐)**:双击 `assistant\\install-app.bat`,选 1 安装。它会画一个专属图标,在**桌面**和**开始菜单**里放上“星期五”和“星期五 语音”,还会问你要不要**开机自动启动**(开机后最小化运行,Discord 一直在线)。之后在开始菜单搜“星期五”就能打开,也可以右键固定到任务栏。想撤销就再双击一次,选 2 卸载。
+
+
 - **Windows**:双击 `assistant\friday.bat`(首次运行的安装和填 Key 步骤和 `start.bat` 一样)
 - **命令行**:`python assistant/assistant.py --persona friday`
 

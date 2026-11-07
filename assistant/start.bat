@@ -1,5 +1,6 @@
 @echo off
-title AI Assistant
+if not defined ASSISTANT_TITLE set "ASSISTANT_TITLE=AI Assistant"
+title %ASSISTANT_TITLE%
 cd /d "%~dp0"
 
 rem ---- 1. Find Python: prefer the py launcher, then python ----

@@ -1,0 +1,175 @@
+"""把“星期五”装成一个 Windows 应用:专属图标、桌面和开始菜单快捷方式,可选开机自动启动。
+
+用法(在 assistant 文件夹里):
+    python friday_app.py install     安装(双击 install-app.bat 也一样)
+    python friday_app.py uninstall   删除这些快捷方式
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Callable
+
+SCRIPT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
+ICON_NAME = "friday.ico"
+
+# (快捷方式名称, 要启动的 bat, 说明)
+SHORTCUTS = [
+    ("星期五", "friday.bat", "私人 AI 助手星期五"),
+    ("星期五 语音", "friday-voice.bat", "用语音和星期五对话"),
+]
+AUTOSTART_NAME = "星期五(开机启动)"
+
+FONT_CANDIDATES = [
+    r"C:\Windows\Fonts\msyhbd.ttc",  # 微软雅黑 粗体
+    r"C:\Windows\Fonts\msyh.ttc",
+    r"C:\Windows\Fonts\simhei.ttf",
+    r"C:\Windows\Fonts\msjhbd.ttc",  # 微软正黑(繁体系统)
+]
+
+# 用 Windows 自带的 WScript.Shell 建快捷方式;路径和名字通过环境变量传,避免引号和中文转义问题
+CREATE_SHORTCUT = r"""
+$folder = [Environment]::GetFolderPath($env:FRIDAY_FOLDER)
+$path = Join-Path $folder ($env:FRIDAY_NAME + '.lnk')
+$shell = New-Object -ComObject WScript.Shell
+$lnk = $shell.CreateShortcut($path)
+$lnk.TargetPath = $env:FRIDAY_TARGET
+$lnk.WorkingDirectory = $env:FRIDAY_WORKDIR
+$lnk.IconLocation = $env:FRIDAY_ICON + ',0'
+$lnk.Description = $env:FRIDAY_DESC
+$lnk.WindowStyle = [int]$env:FRIDAY_WINDOW
+$lnk.Save()
+Write-Output $path
+"""
+
+REMOVE_SHORTCUT = r"""
+$folder = [Environment]::GetFolderPath($env:FRIDAY_FOLDER)
+$path = Join-Path $folder ($env:FRIDAY_NAME + '.lnk')
+if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path; Write-Output $path }
+"""
+
+
+def run_powershell(script: str, env: dict) -> str:
+    proc = subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+         "[Console]::OutputEncoding = [Text.Encoding]::UTF8;" + script],
+        capture_output=True, timeout=60, env={**os.environ, **env},
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.decode("utf-8", errors="replace").strip() or "PowerShell 出错")
+    return proc.stdout.decode("utf-8", errors="replace").strip()
+
+
+def make_icon(path: Path, fonts: list[str] | None = None) -> Path:
+    """画一个圆形渐变图标,中间写“五”(没有中文字体时写 F),保存成多尺寸的 .ico。"""
+    from PIL import Image, ImageDraw, ImageFont
+
+    size = 256
+    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    gradient = Image.new("RGBA", (size, size))
+    top, bottom = (40, 90, 220), (20, 200, 210)  # 深蓝到青色
+    for y in range(size):
+        t = y / (size - 1)
+        color = tuple(round(a + (b - a) * t) for a, b in zip(top, bottom)) + (255,)
+        ImageDraw.Draw(gradient).line([(0, y), (size, y)], fill=color)
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).ellipse((8, 8, size - 8, size - 8), fill=255)
+    image.paste(gradient, (0, 0), mask)
+
+    draw = ImageDraw.Draw(image)
+    text, font = "F", None
+    for candidate in fonts if fonts is not None else FONT_CANDIDATES:
+        if os.path.exists(candidate):
+            font, text = ImageFont.truetype(candidate, 150), "五"
+            break
+    if font is None:
+        try:
+            font = ImageFont.truetype("arialbd.ttf", 160)
+        except OSError:
+            font = ImageFont.load_default()
+    left, top_, right, bottom_ = draw.textbbox((0, 0), text, font=font)
+    x = (size - (right - left)) / 2 - left
+    y = (size - (bottom_ - top_)) / 2 - top_
+    draw.text((x, y), text, font=font, fill=(255, 255, 255, 255))
+
+    image.save(path, format="ICO", sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+    return path
+
+
+def _shortcut_env(folder: str, name: str, target: Path, icon: Path, desc: str, minimized: bool) -> dict:
+    return {
+        "FRIDAY_FOLDER": folder,
+        "FRIDAY_NAME": name,
+        "FRIDAY_TARGET": str(target),
+        "FRIDAY_WORKDIR": str(target.parent),
+        "FRIDAY_ICON": str(icon),
+        "FRIDAY_DESC": desc,
+        "FRIDAY_WINDOW": "7" if minimized else "1",  # 7 = 最小化启动
+    }
+
+
+def install(folder: Path = SCRIPT_DIR, ask: Callable[[str], str] = input,
+            powershell: Callable[[str, dict], str] = run_powershell,
+            icon_maker: Callable[[Path], Path] = make_icon) -> int:
+    if os.name != "nt" and powershell is run_powershell:
+        print("这个安装只支持 Windows。")
+        return 1
+    print("== 把星期五装成应用 ==")
+    icon = folder / ICON_NAME
+    try:
+        icon_maker(icon)
+        print(f"已画好图标:{icon}")
+    except Exception as e:
+        print(f"画图标失败({e}),快捷方式会用默认图标。")
+
+    for name, bat, desc in SHORTCUTS:
+        target = folder / bat
+        if not target.exists():
+            print(f"找不到 {bat},跳过“{name}”")
+            continue
+        for place, label in (("Desktop", "桌面"), ("Programs", "开始菜单")):
+            powershell(CREATE_SHORTCUT, _shortcut_env(place, name, target, icon, desc, minimized=False))
+            print(f"已在{label}创建“{name}”")
+
+    answer = ask("\n要不要开机自动启动星期五(启动后窗口会最小化,Discord 一直在线)?[y] 要  [n] 不要:")
+    if answer.strip().lower() in ("y", "yes", "是", "要", "好"):
+        powershell(CREATE_SHORTCUT, _shortcut_env(
+            "Startup", AUTOSTART_NAME, folder / "friday.bat", icon, "开机自动启动星期五", minimized=True))
+        print("已设置开机自动启动。不想要了,可以再运行一次选择卸载,或在“任务管理器 → 启动应用”里关掉。")
+    else:
+        powershell(REMOVE_SHORTCUT, {"FRIDAY_FOLDER": "Startup", "FRIDAY_NAME": AUTOSTART_NAME})
+        print("不开机自动启动。")
+
+    print("\n完成!桌面和开始菜单里都有“星期五”了,也可以在开始菜单里搜索“星期五”。")
+    print("想固定到任务栏:在开始菜单里右键“星期五” → 固定到任务栏。")
+    return 0
+
+
+def uninstall(powershell: Callable[[str, dict], str] = run_powershell) -> int:
+    removed = []
+    for name, _, _ in SHORTCUTS:
+        for place in ("Desktop", "Programs"):
+            out = powershell(REMOVE_SHORTCUT, {"FRIDAY_FOLDER": place, "FRIDAY_NAME": name})
+            if out:
+                removed.append(out)
+    out = powershell(REMOVE_SHORTCUT, {"FRIDAY_FOLDER": "Startup", "FRIDAY_NAME": AUTOSTART_NAME})
+    if out:
+        removed.append(out)
+    print("已删除:\n" + "\n".join(removed) if removed else "没有找到星期五的快捷方式。")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if argv and argv[0] == "uninstall":
+        return uninstall()
+    if argv and argv[0] == "install":
+        return install()
+    choice = input("[1] 安装(桌面、开始菜单快捷方式和图标)  [2] 卸载  请选择:").strip()
+    return uninstall() if choice == "2" else install()
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

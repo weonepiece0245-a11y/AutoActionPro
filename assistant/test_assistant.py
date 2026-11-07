@@ -70,6 +70,7 @@ daily = sys.modules["friday_daily"]
 pcmod = sys.modules["friday_pc"]
 gmod = sys.modules["friday_google"]
 dmod = sys.modules["friday_discord"]
+import friday_app  # noqa: E402
 import voice  # noqa: E402  assistant.py 已把所在目录加入 sys.path
 
 
@@ -3178,6 +3179,78 @@ class NotifyOwnersTest(DiscordSendTest):
     def test_not_connected(self):
         self.bridge.client = None
         self.assertEqual(self.bridge.notify_owners("x"), 0)
+
+
+class FridayAppInstallTest(TempDirTest):
+    def setUp(self):
+        super().setUp()
+        for bat in ("friday.bat", "friday-voice.bat"):
+            Path(self.tmp, bat).write_text("@echo off")
+        self.calls = []
+
+    def powershell(self, script, env):
+        self.calls.append(("create" if "CreateShortcut" in script else "remove", env))
+        return env.get("FRIDAY_NAME", "")
+
+    def install(self, answer="n", icon_maker=None):
+        with mock.patch("builtins.print") as fake_print:
+            code = friday_app.install(Path(self.tmp), ask=lambda prompt: answer, powershell=self.powershell,
+                                      icon_maker=icon_maker or (lambda path: path))
+        self.printed = "\n".join(str(c.args[0]) for c in fake_print.call_args_list if c.args)
+        return code
+
+    def test_creates_desktop_and_start_menu_shortcuts(self):
+        self.assertEqual(self.install("n"), 0)
+        created = [(env["FRIDAY_FOLDER"], env["FRIDAY_NAME"]) for kind, env in self.calls if kind == "create"]
+        self.assertEqual(created, [("Desktop", "星期五"), ("Programs", "星期五"),
+                                   ("Desktop", "星期五 语音"), ("Programs", "星期五 语音")])
+        first = self.calls[0][1]
+        self.assertEqual(first["FRIDAY_TARGET"], str(Path(self.tmp, "friday.bat")))
+        self.assertEqual(first["FRIDAY_WORKDIR"], self.tmp)
+        self.assertEqual(first["FRIDAY_ICON"], str(Path(self.tmp, "friday.ico")))
+        self.assertEqual(first["FRIDAY_WINDOW"], "1")
+        self.assertEqual(self.calls[-1], ("remove", {"FRIDAY_FOLDER": "Startup", "FRIDAY_NAME": "星期五(开机启动)"}))
+
+    def test_autostart_starts_minimized(self):
+        self.install("y")
+        kind, env = self.calls[-1]
+        self.assertEqual((kind, env["FRIDAY_FOLDER"], env["FRIDAY_WINDOW"]), ("create", "Startup", "7"))
+        self.assertIn("开机自动启动", self.printed)
+
+    def test_missing_bat_and_icon_failure(self):
+        Path(self.tmp, "friday-voice.bat").unlink()
+
+        def broken_icon(path):
+            raise OSError("没有 Pillow")
+
+        self.install("n", icon_maker=broken_icon)
+        self.assertIn("画图标失败", self.printed)
+        self.assertIn("跳过“星期五 语音”", self.printed)
+        names = {env["FRIDAY_NAME"] for kind, env in self.calls if kind == "create"}
+        self.assertEqual(names, {"星期五"})
+
+    def test_uninstall_removes_everything(self):
+        with mock.patch("builtins.print") as fake_print:
+            friday_app.uninstall(powershell=self.powershell)
+        removed = {(env["FRIDAY_FOLDER"], env["FRIDAY_NAME"]) for kind, env in self.calls}
+        self.assertEqual(len(removed), 5)
+        self.assertIn(("Startup", "星期五(开机启动)"), removed)
+
+    def test_only_windows(self):
+        with mock.patch.object(friday_app.os, "name", "posix"), mock.patch("builtins.print"):
+            self.assertEqual(friday_app.install(Path(self.tmp), ask=lambda p: "n"), 1)
+
+    def test_powershell_script_uses_env_vars_only(self):
+        # 中文名字和路径只通过环境变量传进 PowerShell,脚本里不拼接任何用户内容
+        for name in ("星期五", self.tmp):
+            self.assertNotIn(name, friday_app.CREATE_SHORTCUT)
+        self.assertIn("$env:FRIDAY_NAME", friday_app.CREATE_SHORTCUT)
+
+    @unittest.skipUnless(importlib.util.find_spec("PIL"), "没有安装 Pillow")
+    def test_make_icon(self):
+        icon = friday_app.make_icon(Path(self.tmp, "friday.ico"), fonts=[])
+        self.assertTrue(icon.exists())
+        self.assertEqual(icon.read_bytes()[:4], b"\x00\x00\x01\x00")  # ICO 文件头
 
 
 if __name__ == "__main__":
