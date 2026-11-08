@@ -44,6 +44,11 @@ DEFAULT_EFFORT = "low"
 FRIDAY_EFFORT = "medium"  # 星期五要上网、执行命令,多想一点更稳
 MAX_TOKENS = 64000
 MAX_STEPS = 30  # 一个问题里最多调用多少轮工具,防止死循环
+# 提示缓存:重复发送的内容(设定、工具说明、之前的对话)第二次起只收约 5% 的价钱。
+# 设定和工具说明整个会话都不变,缓存 1 小时;对话每轮都在变长,用默认的 5 分钟。
+SYSTEM_CACHE = {"type": "ephemeral", "ttl": "1h"}
+TURN_CACHE = {"type": "ephemeral"}
+CACHEABLE_BLOCKS = {"text", "tool_result", "image", "document"}
 
 SYSTEM_PROMPT = (
     "你是一个友好、耐心的 AI 小助理。"
@@ -271,6 +276,7 @@ class Assistant:
         self.toolbox = toolbox
         self.messages: list[dict] = []
         self.system = self._build_system()
+        self.on_usage: Optional[Callable] = None  # 每次请求后收到 usage(用来统计花费)
 
     def _build_system(self) -> str:
         return self._system_factory() if callable(self._system_factory) else self._system_factory
@@ -326,12 +332,28 @@ class Assistant:
             self.messages.append({"role": "user", "content": results})
         raise IncompleteAnswerError(f"连续调用工具超过 {MAX_STEPS} 轮")
 
+    def _cached_messages(self) -> list:
+        """在最后一条用户消息的最后一块上加缓存标记;保存的历史本身不改。"""
+        messages = list(self.messages)
+        for i in range(len(messages) - 1, -1, -1):
+            message = messages[i]
+            if message["role"] != "user":
+                continue  # 搜索轮数到上限(pause_turn)时最后一条是助手消息,标在前一条用户消息上
+            content = message["content"]
+            blocks = [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
+            if blocks and isinstance(blocks[-1], dict) and blocks[-1].get("type") in CACHEABLE_BLOCKS:
+                blocks[-1] = {**blocks[-1], "cache_control": TURN_CACHE}
+                messages[i] = {**message, "content": blocks}
+            break
+        return messages
+
     def _stream_once(self, on_text, on_status):
         params = dict(
             model=self.model,
             max_tokens=MAX_TOKENS,
-            system=self.system,
-            messages=self.messages,
+            # 工具说明排在设定前面,这个标记把两者一起缓存
+            system=[{"type": "text", "text": self.system, "cache_control": SYSTEM_CACHE}],
+            messages=self._cached_messages(),
             output_config={"effort": self.effort},
             betas=["server-side-fallback-2026-07-01"],
             fallbacks="default",
@@ -345,7 +367,13 @@ class Assistant:
                     on_text(event.text)
                 elif event.type == "content_block_stop":
                     self._report_server_tool(event.content_block, on_status)
-            return stream.get_final_message()
+            final = stream.get_final_message()
+        if self.on_usage is not None and getattr(final, "usage", None) is not None:
+            try:
+                self.on_usage(final.usage)
+            except Exception:
+                pass  # 统计花费出错不能影响回答
+        return final
 
     @staticmethod
     def _report_server_tool(block, on_status) -> None:
@@ -858,6 +886,7 @@ class WebSession:
     _stream = None
     _turn = 0
     restart = False  # 更新完要重启
+    meter = None  # 花费统计
     hub_audio = None  # 由 run_web 设置成 WebContext.audio
 
 
@@ -954,6 +983,21 @@ def web_update(session: WebSession, updater=None) -> bool:
     return True
 
 
+def attach_meter(assistant: Assistant, data_dir: str, log: bool = False):
+    """统计花费:每次请求后累加到 friday_usage.json;log=True 时把用量写进运行记录。"""
+    from friday_usage import UsageMeter
+
+    meter = UsageMeter(os.path.join(data_dir, "friday_usage.json"))
+
+    def on_usage(usage) -> None:
+        cost = meter.add(usage)
+        if log:
+            print(meter.describe(usage, cost), flush=True)
+
+    assistant.on_usage = on_usage
+    return meter
+
+
 def restart_command(argv: list[str], port: int) -> list[str]:
     """更新后重启:同一个端口,不再开新窗口(原来的窗口会自己刷新)。"""
     args = [a for a in argv if a != "--no-browser"]
@@ -986,6 +1030,9 @@ def web_state(session: WebSession, toolbox: Toolbox, discord, cache: dict) -> di
         ("Google", toolbox.google is not None, "ONLINE" if toolbox.google else "OFF"),
         ("联网搜索", toolbox.web, "ON" if toolbox.web else "OFF"),
     ]
+    meter = getattr(session, "meter", None)
+    if meter is not None:
+        system.append(("本月花费", True, f"约 RM {meter.month_myr():.2f}"))
     import friday_update
 
     version = friday_update.current_version(Path(SCRIPT_DIR))[:7]
@@ -1050,9 +1097,11 @@ def run_web(args) -> None:
                                   context=persona.context, toolbox=toolbox)
         except anthropic.AnthropicError as e:
             startup_error = f"无法连接 Claude:{e}"
+    meter = attach_meter(assistant, data_dir, log=True) if assistant is not None else None
 
     events: queue.Queue = queue.Queue()
     session = WebSession(assistant, persona, hub, voice_module.synthesize_mp3, startup_error)
+    session.meter = meter
     port = args.port or int(os.environ.get("FRIDAY_WEB_PORT") or friday_web.DEFAULT_PORT)
     token = os.environ.get("FRIDAY_WEB_TOKEN") or friday_web.new_token()  # 更新后重启沿用原来的口令
     discord = None  # 下面启动;界面状态接口会读到它
@@ -1137,6 +1186,7 @@ def run_server(args) -> None:
     except anthropic.AnthropicError:
         print(f"未找到 API 凭据。{KEY_HINT}", file=sys.stderr)
         sys.exit(1)
+    attach_meter(assistant, data_dir, log=True)
 
     import voice as voice_module
 
@@ -1292,6 +1342,8 @@ def main(argv: list[str] | None = None) -> None:
     except anthropic.AnthropicError:
         print(f"未找到 API 凭据。{KEY_HINT}", file=sys.stderr)
         sys.exit(1)
+    if persona.toolbox is not None:  # 星期五:也把花费记下来(命令行里不显示)
+        attach_meter(assistant, os.path.dirname(os.path.abspath(persona.toolbox.memory.path)))
     events: queue.Queue = queue.Queue()
     if persona.toolbox is not None and persona.toolbox.reminders is not None:
         ReminderScheduler(persona.toolbox.reminders, events).start()

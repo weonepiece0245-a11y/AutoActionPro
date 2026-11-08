@@ -77,6 +77,7 @@ dmod = sys.modules["friday_discord"]
 import friday_app  # noqa: E402
 import friday_web  # noqa: E402
 import friday_update  # noqa: E402
+import friday_usage  # noqa: E402
 import voice  # noqa: E402  assistant.py 已把所在目录加入 sys.path
 
 
@@ -114,6 +115,12 @@ class FakeStream:
     def get_final_message(self):
         content = [text_block("".join(self.chunks))] if self.chunks else []
         return SimpleNamespace(stop_reason=self.stop_reason, content=content + self.blocks)
+
+
+def question_sent(call) -> str:
+    """请求里第一条用户消息的文字(去掉缓存标记)。"""
+    content = call["messages"][0]["content"]
+    return content if isinstance(content, str) else content[-1]["text"]
 
 
 class FakeClient:
@@ -184,6 +191,92 @@ class AssistantTest(unittest.TestCase):
         bot.ask("Q", lambda t: None)
         bot.reset()
         self.assertEqual(bot.messages, [])
+
+
+class PromptCachingTest(unittest.TestCase):
+    def test_system_and_last_user_block_are_cached(self):
+        client = FakeClient(FakeStream(["A1"]), FakeStream(["A2"]))
+        bot = app.Assistant(client=client)
+        bot.ask("Q1", lambda t: None)
+        bot.ask("Q2", lambda t: None)
+        first, second = client.calls
+        # 设定(连同排在前面的工具说明)缓存 1 小时
+        self.assertEqual(first["system"], [{"type": "text", "text": app.SYSTEM_PROMPT,
+                                            "cache_control": {"type": "ephemeral", "ttl": "1h"}}])
+        self.assertEqual(first["system"], second["system"])  # 每次都一样,才能命中缓存
+        # 对话:标记打在最新一条用户消息上,前面的不带标记
+        self.assertEqual(second["messages"][-1]["content"], [{"type": "text", "text": "Q2",
+                                                              "cache_control": {"type": "ephemeral"}}])
+        self.assertEqual(second["messages"][0]["content"], "Q1")
+        self.assertEqual(bot.messages[2]["content"], "Q2")  # 保存的历史不带标记
+
+    def test_tool_results_get_the_marker(self):
+        client = FakeClient(
+            FakeStream([], stop_reason="tool_use", blocks=[tool_use("remember", {"fact": "喜欢猫"})]),
+            FakeStream(["记住了"]),
+        )
+        toolbox = tools.Toolbox(tools.Memory(os.path.join(tempfile.mkdtemp(), "m.json")), lambda a: True)
+        bot = app.Assistant(client=client, toolbox=toolbox)
+        bot.ask("记住我喜欢猫", lambda t: None)
+        last = client.calls[1]["messages"][-1]["content"][-1]
+        self.assertEqual((last["type"], last["cache_control"]), ("tool_result", {"type": "ephemeral"}))
+        self.assertNotIn("cache_control", bot.messages[2]["content"][-1])
+
+    def test_pause_turn_marks_previous_user_message(self):
+        bot = app.Assistant(client=FakeClient())
+        bot.messages = [{"role": "user", "content": [{"type": "text", "text": "查天气"}]},
+                        {"role": "assistant", "content": [text_block("搜索中")]}]
+        messages = bot._cached_messages()
+        self.assertEqual(messages[0]["content"][-1]["cache_control"], {"type": "ephemeral"})
+        self.assertIs(messages[1], bot.messages[1])
+
+    def test_usage_is_reported(self):
+        stream = FakeStream(["ok"])
+        usage = SimpleNamespace(input_tokens=10, output_tokens=5)
+        original = stream.get_final_message
+        stream.get_final_message = lambda: SimpleNamespace(**vars(original()), usage=usage)
+        bot = app.Assistant(client=FakeClient(stream))
+        seen = []
+        bot.on_usage = seen.append
+        bot.ask("hi", lambda t: None)
+        self.assertEqual(seen, [usage])
+
+
+class UsageMeterTest(unittest.TestCase):
+    def test_cost_counts_cache_and_searches(self):
+        usage = SimpleNamespace(
+            input_tokens=1_000_000, output_tokens=100_000, cache_read_input_tokens=1_000_000,
+            cache_creation_input_tokens=300_000,
+            cache_creation=SimpleNamespace(ephemeral_5m_input_tokens=200_000, ephemeral_1h_input_tokens=100_000),
+            server_tool_use=SimpleNamespace(web_search_requests=3),
+        )
+        # 4 + 2 + 0.2 + 1.0 + 0.8 + 0.03
+        self.assertAlmostEqual(friday_usage.request_cost(usage), 8.03)
+        self.assertAlmostEqual(friday_usage.request_cost({"input_tokens": 500_000}), 2.0)
+
+    def test_month_total_persists_and_resets(self):
+        path = Path(tempfile.mkdtemp(), "usage.json")
+        now = [datetime.datetime(2026, 11, 8)]
+        meter = friday_usage.UsageMeter(path, clock=lambda: now[0], usd_to_myr=4.0)
+        meter.add({"output_tokens": 1_000_000})  # 20 美元
+        self.assertAlmostEqual(meter.month_myr(), 80.0)
+        again = friday_usage.UsageMeter(path, clock=lambda: now[0], usd_to_myr=4.0)
+        self.assertAlmostEqual(again.month_myr(), 80.0)
+        now[0] = datetime.datetime(2026, 12, 1)
+        self.assertEqual(again.month_myr(), 0.0)
+        again.add({"input_tokens": 1_000_000})
+        self.assertAlmostEqual(again.month_myr(), 16.0)
+        self.assertIn("本月约 RM 16.00", again.describe({"input_tokens": 1}, 0.0))
+
+    def test_meter_shows_in_window(self):
+        hub = friday_web.Hub()
+        session = app.WebSession(None, app.default_persona(), hub)
+        meter = friday_usage.UsageMeter(Path(tempfile.mkdtemp(), "u.json"), usd_to_myr=4.0)
+        meter.add({"output_tokens": 50_000})
+        session.meter = meter
+        toolbox = tools.Toolbox(tools.Memory(os.path.join(tempfile.mkdtemp(), "m.json")), lambda a: True)
+        state = app.web_state(session, toolbox, None, {})
+        self.assertEqual(state["system"][-1], ("本月花费", True, "约 RM 4.00"))
 
 
 class TempDirTest(unittest.TestCase):
@@ -262,7 +355,7 @@ class FridayPersonaTest(TempDirTest):
         client = FakeClient(FakeStream(["ok"]))
         bot = app.Assistant(client=client)
         bot.ask("hi", lambda t: None)
-        self.assertEqual(client.calls[0]["system"], app.SYSTEM_PROMPT)
+        self.assertEqual(client.calls[0]["system"][0]["text"], app.SYSTEM_PROMPT)
         self.assertNotIn("tools", client.calls[0])
         self.assertEqual(bot.messages[0]["content"], "hi")
 
@@ -511,7 +604,7 @@ class ChatLoopTest(unittest.TestCase):
         client = FakeClient(FakeStream(["A"]))
         bot = app.Assistant(client=client)
         self.run_chat(["/memory", "/exit"], bot)
-        self.assertEqual(client.calls[0]["messages"][0]["content"], "/memory")
+        self.assertEqual(question_sent(client.calls[0]), "/memory")
 
     def test_eof_exits(self):
         bot = app.Assistant(client=FakeClient())
@@ -610,7 +703,7 @@ class VoiceChatTest(unittest.TestCase):
 
         printed = self.run_chat(["", "/exit"], bot, fake_voice)
 
-        self.assertEqual(client.calls[0]["messages"][0]["content"], "明天天气怎么样")
+        self.assertEqual(question_sent(client.calls[0]), "明天天气怎么样")
         self.assertIn("你(语音):明天天气怎么样", printed)
         greeting = app.default_persona().greeting
         self.assertEqual(fake_voice.spoken, [greeting, "明天晴", "再见!"])
@@ -619,7 +712,7 @@ class VoiceChatTest(unittest.TestCase):
         client = FakeClient(FakeStream(["好"]))
         fake_voice = FakeVoice()
         self.run_chat(["打字的问题", "/exit"], app.Assistant(client=client), fake_voice)
-        self.assertEqual(client.calls[0]["messages"][0]["content"], "打字的问题")
+        self.assertEqual(question_sent(client.calls[0]), "打字的问题")
 
     def test_unheard_and_recognition_errors_keep_going(self):
         client = FakeClient(FakeStream(["好"]))
@@ -627,7 +720,7 @@ class VoiceChatTest(unittest.TestCase):
         printed = self.run_chat(["", "", "", "/exit"], app.Assistant(client=client), fake_voice)
         self.assertIn("  没听清,再说一次?", printed)
         self.assertTrue(any("连不上" in p for p in printed))
-        self.assertEqual(client.calls[0]["messages"][0]["content"], "你好")
+        self.assertEqual(question_sent(client.calls[0]), "你好")
 
     def test_saying_goodbye_exits(self):
         client = FakeClient()
@@ -2836,7 +2929,7 @@ class DiscordVoiceChatTest(TempDirTest):
             self.assertTrue(app.handle_discord(self.message(), bot, app.default_persona(), lambda a: "明天天气怎么样"))
         self.assertEqual(self.replies, ["🎤 听到:明天天气怎么样"])
         self.assertEqual(self.voiced, ["明天晴"])
-        self.assertEqual(client.calls[0]["messages"][0]["content"], "[来自手机 Discord 语音]明天天气怎么样")
+        self.assertEqual(question_sent(client.calls[0]), "[来自手机 Discord 语音]明天天气怎么样")
 
     def test_not_heard_or_failed(self):
         bot = app.Assistant(client=FakeClient())
@@ -2973,7 +3066,7 @@ class DiscordChatTest(TempDirTest):
         self.assertEqual(replies, ["做好了"])
         self.assertIn("echo hi", asked[0])  # 确认请求发到了 Discord,而不是在电脑上问
         self.assertIsNone(approver.remote)  # 处理完恢复
-        self.assertEqual(client.calls[0]["messages"][0]["content"], "[来自手机 Discord]帮我跑个命令")
+        self.assertEqual(question_sent(client.calls[0]), "[来自手机 Discord]帮我跑个命令")
         self.assertNotIn("做好了", voice_mock.spoken)  # 手机上的问答不在电脑上读出来
 
     def test_errors_are_reported_to_discord(self):
