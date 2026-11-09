@@ -462,6 +462,11 @@ function fillSettings() {
     $("setCareBreak").value = String(care.break_minutes);
     $("setCareNight").checked = care.night;
   }
+  $("gameGroup").hidden = !care;
+  if (care) {
+    $("setGameQuiet").checked = care.game_quiet !== false;
+    if (document.activeElement !== $("setGameClose")) $("setGameClose").value = (care.game_close || []).join(", ");
+  }
   const c = s.cloud;
   $("cloudGroup").hidden = !c;
   if (c) {
@@ -544,6 +549,33 @@ $("setPush").onchange = (e) => saveSetting({ push: e.target.value });
 $("setCareWelcome").onchange = (e) => saveSetting({ care_welcome: e.target.checked });
 $("setCareBreak").onchange = (e) => saveSetting({ care_break: Number(e.target.value) });
 $("setCareNight").onchange = (e) => saveSetting({ care_night: e.target.checked });
+$("setGameQuiet").onchange = (e) => saveSetting({ game_quiet: e.target.checked });
+$("saveGameClose").onclick = () => saveSetting({ game_close: $("setGameClose").value });
+$("setGameClose").addEventListener("keydown", (e) => { if (e.key === "Enter") $("saveGameClose").click(); });
+$("gameCandidates").onclick = async () => {
+  const btn = $("gameCandidates");
+  btn.disabled = true; btn.textContent = "读取中…";
+  const r = await api("/api/settings", { game_candidates: true }).catch(() => ({ error: "星期五没有响应" }));
+  btn.disabled = false; btn.textContent = "列出程序";
+  if (r.error) { toast(r.error, 4000); return; }
+  const box = $("gameChips");
+  box.replaceChildren();
+  for (const p of r.candidates || []) {
+    const chip = document.createElement("button");
+    chip.type = "button"; chip.className = "chip";
+    chip.textContent = `${p.name} ${p.mb >= 1024 ? (p.mb / 1024).toFixed(1) + "GB" : p.mb + "MB"}`;
+    chip.onclick = () => {
+      const names = $("setGameClose").value.split(/[,，、]/).map((n) => n.trim()).filter(Boolean);
+      if (!names.some((n) => n.toLowerCase() === p.name.toLowerCase())) names.push(p.name);
+      $("setGameClose").value = names.join(", ");
+      chip.disabled = true;
+    };
+    box.append(chip);
+  }
+  box.hidden = !box.children.length;
+  if (!box.children.length) toast("没有找到开着窗口的程序");
+  else toast("点程序名加进去,再按保存", 3000);
+};
 $("saveCloud").onclick = async () => {
   const code = $("setCloud").value.trim();
   if (!code) { toast("先把配对码贴进来"); return; }

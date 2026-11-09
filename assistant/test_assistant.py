@@ -87,6 +87,7 @@ import friday_desktop  # noqa: E402
 import friday_wake  # noqa: E402
 import friday_cloud  # noqa: E402
 import friday_care  # noqa: E402
+import friday_pc  # noqa: E402
 import friday_weather  # noqa: E402
 import voice  # noqa: E402  assistant.py 已把所在目录加入 sys.path
 
@@ -5207,7 +5208,7 @@ class CareTest(unittest.TestCase):
         self.assertIsNone(care.tick())
 
     def test_break_reminder_names_the_game(self):
-        care = self.make()
+        care = self.make(settings={"welcome": True, "break_minutes": 120, "night": True, "game_quiet": False})
         self.app[0] = "r5apex.exe"
         self.advance(care, 119 * 60)
         self.assertEqual(self.said, [])
@@ -5260,7 +5261,56 @@ class CareTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=False):
             self.assertIn("error", app.apply_settings({"care_break": 45}, session, None, env))
             self.assertTrue(app.apply_settings({"care_break": 90, "care_night": False}, session, None, env)["ok"])
-            self.assertEqual(friday_care.care_settings(), {"welcome": True, "break_minutes": 90, "night": False})
+            settings = friday_care.care_settings()
+            self.assertEqual((settings["welcome"], settings["break_minutes"], settings["night"]), (True, 90, False))
+
+
+    def test_quiet_while_gaming_then_tell_afterwards(self):
+        toasts, games = [], []
+        care = self.make()
+        care.toast, care.on_game = toasts.append, games.append
+        self.app[0] = "r5apex.exe"
+        care.tick()
+        self.assertEqual((care.game, games), ("Apex", ["Apex"]))
+        self.assertTrue(care.quiet_now())
+        care.hold("⏰ 15:00 开会", short="15:00 开会")
+        self.advance(care, 121 * 60)  # 打了 2 小时:只弹小通知,不读出来
+        self.assertEqual(self.said, [])
+        self.assertEqual(toasts[0], "⏰ 15:00 开会")
+        self.assertIn("Apex 已经打了2个小时", toasts[1])
+        self.app[0] = "chrome.exe"
+        self.advance(care, 60)  # 切出去一下不算打完
+        self.assertEqual(self.said, [])
+        self.advance(care, 60)
+        self.assertEqual(self.said, ["老板,刚才你在打Apex,有 1 条提醒我先替你记着:15:00 开会。"])
+        self.assertIsNone(care.game)
+        self.assertEqual(games, ["Apex"])  # 自动游戏模式只在开始时一次
+
+    def test_unknown_fullscreen_program_counts_as_game_and_video_counts_as_present(self):
+        snap = friday_care.look(idle=lambda: 900, app=lambda: "eldenring.exe", fullscreen=lambda: True,
+                                display=lambda: False)
+        self.assertEqual((snap["game"], snap["present_idle"]), ("eldenring", 0.0))
+        snap = friday_care.look(idle=lambda: 900, app=lambda: "msedge.exe", fullscreen=lambda: False,
+                                display=lambda: True)  # 在浏览器里看视频
+        self.assertEqual((snap["game"], snap["watching"], snap["present_idle"]), (None, True, 0.0))
+        snap = friday_care.look(idle=lambda: 900, app=lambda: "msedge.exe", fullscreen=lambda: False,
+                                display=lambda: False)
+        self.assertEqual(snap["present_idle"], 900)
+        self.assertIsNone(friday_care.game_name("chrome.exe", True))  # 全屏看视频不算游戏
+
+    def test_watching_video_is_not_away(self):
+        care = self.make()
+        care.fullscreen = lambda: True
+        self.app[0] = "vlc.exe"
+        self.advance(care, 40 * 60, idle=40 * 60)  # 40 分钟没碰键盘鼠标,但在全屏看视频
+        self.assertFalse(care.away)
+        self.idle[0] = 1
+        care.tick()
+        self.assertEqual(self.said, [])  # 没离开,不用说欢迎回来
+
+    def test_game_close_list(self):
+        with mock.patch.dict(os.environ, {"FRIDAY_GAME_CLOSE": "Chrome.exe, spotify,,explorer,bad;name"}):
+            self.assertEqual(friday_care.game_close_list(), ["chrome", "spotify"])
 
 
 def open_meteo_sample(start_hour=0):
@@ -5446,6 +5496,55 @@ class ReminderPushTest(unittest.TestCase):
             self.assertTrue(app.apply_settings({"push": "away"}, session, None, env)["ok"])
             self.assertEqual(app.push_mode(), "away")
             self.assertIn("FRIDAY_REMIND_PUSH=away", Path(env).read_text(encoding="utf-8"))
+
+
+class GameModeTest(unittest.TestCase):
+    def test_game_mode_closes_preselected_programs_without_asking(self):
+        pc = FakePC(outputs={"FRIDAY_APP_NAMES": lambda env: (0, "chrome\nchrome\nSpotify")})
+        computer = friday_pc.Computer(backend=pc)
+        with mock.patch.dict(os.environ, {"FRIDAY_GAME_CLOSE": ""}):
+            self.assertIn("还没在齿轮设定里选好", computer.do("game_mode", approve=lambda t: False))
+        with mock.patch.dict(os.environ, {"FRIDAY_GAME_CLOSE": "chrome,spotify"}):
+            result = computer.do("game_mode", approve=lambda t: False)  # 事先选好的:不用再确认
+        self.assertEqual(result, "游戏模式:已关掉 Spotify、chrome")
+        self.assertEqual(pc.calls[-1][3], {"FRIDAY_APP_NAMES": "chrome,spotify"})
+
+    def test_window_programs(self):
+        pc = FakePC(outputs={"MainWindowHandle": (0, '[{"name":"chrome","mem":2147483648},{"name":"Spotify","mem":314572800}]')})
+        self.assertEqual(friday_pc.Computer(backend=pc).window_programs(),
+                         [{"name": "chrome", "mb": 2048}, {"name": "Spotify", "mb": 300}])
+
+    def test_settings(self):
+        env = str(Path(tempfile.mkdtemp(), ".env"))
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        computer = SimpleNamespace(available=True, window_programs=lambda: [
+            {"name": "chrome", "mb": 2048}, {"name": "explorer", "mb": 200}, {"name": "Spotify", "mb": 300}])
+        toolbox = SimpleNamespace(computer=computer)
+        with mock.patch.dict(os.environ, {"FRIDAY_GAME_CLOSE": "", "FRIDAY_GAME_QUIET": "on"}):
+            self.assertIn("error", app.apply_settings({"game_close": "chrome; rm -rf"}, session, toolbox, env))
+            self.assertIn("error", app.apply_settings({"game_close": "explorer"}, session, toolbox, env))
+            self.assertTrue(app.apply_settings({"game_close": "Chrome.exe、spotify, chrome"}, session, toolbox, env)["ok"])
+            self.assertEqual(friday_care.game_close_list(), ["chrome", "spotify"])
+            self.assertTrue(app.apply_settings({"game_quiet": False}, session, toolbox, env)["ok"])
+            self.assertFalse(friday_care.care_settings()["game_quiet"])
+            result = app.apply_settings({"game_candidates": True}, session, toolbox, env)
+            self.assertEqual([r["name"] for r in result["candidates"]], ["chrome", "Spotify"])
+
+    def test_reminder_while_gaming_is_held(self):
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.speak_enabled = True
+        toasts, popups, spoken = [], [], []
+        care = friday_care.Care(lambda t: True, name=lambda: "老板", idle=lambda: 0, app=lambda: "dota2.exe",
+                                settings=lambda: {"welcome": True, "break_minutes": 0, "night": False, "game_quiet": True},
+                                fullscreen=lambda: True, display=lambda: False, toast=toasts.append)
+        care.tick()
+        session.care = care
+        session.speak = spoken.append
+        with mock.patch.object(app, "notify_popup", lambda *a: popups.append(a)):
+            app.web_reminder({"time": "2026-11-10 21:00", "message": "倒垃圾", "kind": "notify"}, session)
+        self.assertEqual((popups, spoken), ([], []))  # 不弹窗、不读
+        self.assertEqual(toasts, ["⏰ 21:00 倒垃圾"])
+        self.assertEqual(care.held, ["21:00 倒垃圾"])
 
 
 if __name__ == "__main__":

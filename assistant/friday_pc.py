@@ -435,6 +435,24 @@ if ($procs.Count -eq 0) { exit 3 }
 foreach ($p in $procs) { $null = $p.CloseMainWindow(); Write-Output $p.ProcessName }
 """
 
+CLOSE_PROCESSES = r"""
+foreach ($n in ($env:FRIDAY_APP_NAMES -split ',')) {
+  if (-not $n) { continue }
+  foreach ($p in @(Get-Process -Name $n -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 })) {
+    $null = $p.CloseMainWindow(); Write-Output $p.ProcessName
+  }
+}
+"""
+
+WINDOW_PROGRAMS = r"""
+$names = @(Get-Process | Where-Object { $_.MainWindowHandle -ne 0 } | ForEach-Object { $_.ProcessName } | Sort-Object -Unique)
+$rows = foreach ($n in $names) {
+  $m = (Get-Process -Name $n -ErrorAction SilentlyContinue | Measure-Object WorkingSet64 -Sum).Sum
+  [pscustomobject]@{ name = $n; mem = [int64]$m }
+}
+ConvertTo-Json -InputObject @($rows | Sort-Object mem -Descending | Select-Object -First 15) -Compress
+"""
+
 EMPTY_RECYCLE_BIN = "Clear-RecycleBin -Force -ErrorAction SilentlyContinue"
 
 SLEEP = r"""
@@ -492,6 +510,7 @@ COMPUTER_ACTIONS = {
     "focus_window": "切到某个窗口,value 是窗口标题里的关键词",
     "show_desktop": "最小化全部窗口 / 显示桌面",
     "close_app": "关闭程序(正常关闭,会提示保存),value 是程序名或窗口标题关键词,需要用户确认",
+    "game_mode": "一键游戏模式:关掉用户在齿轮设定里事先选好的程序(已经同意过,不用再确认)",
     # 状态
     "system_status": "查看 CPU、内存、硬盘剩余空间、电池、最占内存的程序、IP、网络",
     # 显示
@@ -670,6 +689,33 @@ class Computer:
         if code == 3 or not out:
             return f"没有找到名字包含“{value}”的程序窗口"
         return "已关闭:" + "、".join(sorted(set(out.split())))
+
+    def close_programs(self, names: list[str]) -> list[str]:
+        """按进程名正常关掉这些程序(不问,用于用户事先选好的游戏模式)。返回关掉了哪些。"""
+        names = [n for n in names if n]
+        if not names:
+            return []
+        _, out = self._pc().powershell(CLOSE_PROCESSES, env={"FRIDAY_APP_NAMES": ",".join(names)})
+        return sorted(set((out or "").split()))
+
+    def window_programs(self) -> list[dict]:
+        """开着窗口的程序,按占用内存从多到少:[{name, mb}]。"""
+        _, out = self._pc().powershell(WINDOW_PROGRAMS)
+        rows = json.loads(out or "[]")
+        rows = rows if isinstance(rows, list) else [rows]
+        return [{"name": str(r["name"]), "mb": round(int(r.get("mem") or 0) / 1024 ** 2)} for r in rows if r.get("name")]
+
+    def _do_game_mode(self, pc, value, approve, **_):
+        import friday_care
+
+        names = friday_care.game_close_list()
+        if not names:
+            return ("还没在齿轮设定里选好游戏模式要关的程序。先用 system_status 看看哪些最占内存,"
+                    "问用户要关哪些,确认后用 close_app 关;也可以告诉用户去齿轮设定→打游戏时 选好,以后开游戏会自动关。")
+        closed = self.close_programs(names)
+        if not closed:
+            return f"游戏模式:要关的程序({'、'.join(names)})现在都没开着"
+        return "游戏模式:已关掉 " + "、".join(closed)
 
     # ---- 状态 ----
     def _do_system_status(self, pc, value, approve, **_):

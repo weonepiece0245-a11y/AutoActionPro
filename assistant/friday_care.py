@@ -29,6 +29,18 @@ GAMES = {
     "genshinimpact.exe": "原神", "yuanshen.exe": "原神",
 }
 
+# 这些全屏了也不算游戏(看视频、放幻灯片、星期五自己的窗口)
+NOT_GAMES = {
+    "chrome.exe", "msedge.exe", "firefox.exe", "opera.exe", "brave.exe", "vivaldi.exe",
+    "vlc.exe", "potplayermini64.exe", "potplayermini.exe", "mpc-hc64.exe", "mpc-be64.exe", "wmplayer.exe",
+    "video.ui.exe", "microsoft.media.player.exe", "applicationframehost.exe", "netflix.exe",
+    "powerpnt.exe", "explorer.exe", "python.exe", "pythonw.exe", "discord.exe", "spotify.exe",
+}
+VIDEO_APPS = NOT_GAMES - {"powerpnt.exe", "explorer.exe", "python.exe", "pythonw.exe"}
+# 游戏模式绝不自动关掉的(系统和星期五自己)
+NEVER_CLOSE = {"explorer", "python", "pythonw", "dwm", "csrss", "winlogon", "svchost", "system", "steam"}
+GAME_GRACE = 90  # 秒:游戏离开最前面这么久才算打完(切出去回个消息不算)
+
 WELCOME = [
     "{name},欢迎回来。", "{name}回来啦。", "欢迎回来,{name},我一直在。", "{name},你回来了,有什么要我做的吗?",
 ]
@@ -46,6 +58,7 @@ NIGHT = [
     "{name},已经 {time} 了,早点休息吧,明天再继续。",
     "{name},现在 {time},夜深了,别太晚睡哦。",
 ]
+HELD = "{name},刚才你在打{game},有 {count} 条提醒我先替你记着:{items}。"
 
 
 def care_settings() -> dict:
@@ -58,7 +71,23 @@ def care_settings() -> dict:
         "welcome": os.environ.get("FRIDAY_CARE_WELCOME", "on") != "off",
         "break_minutes": minutes if minutes in (0, 60, 90, 120, 180) else DEFAULT_BREAK_MINUTES,
         "night": os.environ.get("FRIDAY_CARE_NIGHT", "on") != "off",
+        "game_quiet": os.environ.get("FRIDAY_GAME_QUIET", "on") != "off",
+        "game_close": game_close_list(),
     }
+
+
+def clean_program_name(name: str) -> str:
+    """“Chrome.exe ” -> “chrome”;不像程序名的返回空字符串。"""
+    name = str(name).strip().strip('"').lower()
+    if name.endswith(".exe"):
+        name = name[:-4]
+    return name if name and len(name) <= 60 and all(c.isalnum() or c in "-_. " for c in name) else ""
+
+
+def game_close_list() -> list[str]:
+    """开游戏时自动关掉的程序(进程名,不带 .exe)。"""
+    names = [clean_program_name(n) for n in os.environ.get("FRIDAY_GAME_CLOSE", "").split(",")]
+    return list(dict.fromkeys(n for n in names if n and n not in NEVER_CLOSE))
 
 
 def hours_text(seconds: float) -> str:
@@ -117,21 +146,116 @@ def foreground_app() -> str | None:
         return None
 
 
+def is_fullscreen() -> bool:
+    """最前面的窗口是不是占满了整个屏幕(全屏游戏、全屏视频)。"""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                        ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+        user32 = ctypes.windll.user32
+        user32.GetForegroundWindow.restype = ctypes.c_void_p
+        user32.MonitorFromWindow.restype = ctypes.c_void_p
+        user32.MonitorFromWindow.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+        user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(MONITORINFO)]
+        user32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.RECT)]
+        user32.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return False
+        name = ctypes.create_unicode_buffer(64)
+        user32.GetClassNameW(hwnd, name, 64)
+        if name.value in ("Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"):
+            return False  # 桌面和任务栏
+        rect, info = wintypes.RECT(), MONITORINFO()
+        info.cbSize = ctypes.sizeof(info)
+        monitor = user32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)) or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return False
+        m = info.rcMonitor
+        return rect.left <= m.left and rect.top <= m.top and rect.right >= m.right and rect.bottom >= m.bottom
+    except Exception:
+        return False
+
+
+def display_requested() -> bool:
+    """有没有程序要求屏幕别熄灭(浏览器、播放器在放视频时会这样要求)。"""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+
+        state = ctypes.c_ulong(0)
+        status = ctypes.windll.powrprof.CallNtPowerInformation(16, None, 0, ctypes.byref(state), ctypes.sizeof(state))
+        return status == 0 and bool(state.value & 0x2)  # SystemExecutionState / ES_DISPLAY_REQUIRED
+    except Exception:
+        return False
+
+
+def game_name(exe: str, fullscreen: bool) -> str | None:
+    """认识的游戏用名字;不认识但全屏的程序也当游戏(用程序名)。"""
+    exe = (exe or "").lower()
+    if exe in GAMES:
+        return GAMES[exe]
+    if fullscreen and exe and exe not in NOT_GAMES:
+        return os.path.splitext(exe)[0]
+    return None
+
+
+def look(idle: Callable[[], float | None] = idle_seconds, app: Callable[[], str | None] = foreground_app,
+         fullscreen: Callable[[], bool] = is_fullscreen, display: Callable[[], bool] = display_requested) -> dict | None:
+    """看一眼你在干什么:{idle 没碰键盘鼠标几秒, app, game 在玩的游戏, watching 在看视频/全屏, present_idle}。
+
+    看视频、打游戏时不碰键盘鼠标也算你在电脑前(present_idle 记为 0)。
+    """
+    seconds = idle()
+    if seconds is None:
+        return None
+    exe = (app() or "").lower()
+    full = bool(fullscreen())
+    game = game_name(exe, full)
+    watching = full or (exe in VIDEO_APPS and bool(display()))
+    return {"idle": seconds, "app": exe, "game": game, "watching": watching,
+            "present_idle": 0.0 if (game or watching) else seconds}
+
+
+def presence_idle() -> float | None:
+    """当成“离开多久了”的秒数:看视频、打游戏时是 0;不是 Windows 返回 None。"""
+    snapshot = look()
+    return None if snapshot is None else snapshot["present_idle"]
+
+
 # ======================== 判断 ========================
 
 
 class Care:
-    """每 30 秒看一次你在不在用电脑,该说话时调用 say(文字) -> 有没有说出去(忙的时候返回 False,下次再说)。"""
+    """每 30 秒看一次你在不在用电脑,该说话时调用 say(文字) -> 有没有说出去(忙的时候返回 False,下次再说)。
+
+    打游戏时(设定“游戏时别打扰”开着):不读出来,改成右下角小通知 toast(文字);
+    提醒先记着,打完(游戏离开最前面一阵子)再一起说。刚开游戏时调用 on_game(游戏名)(自动游戏模式)。
+    """
 
     def __init__(self, say: Callable[[str], bool], name: Callable[[], str],
                  idle: Callable[[], float | None] = idle_seconds, app: Callable[[], str | None] = foreground_app,
                  reminders: Callable[[], list[str]] = lambda: [], settings: Callable[[], dict] = care_settings,
                  clock: Callable[[], float] = time.time,
-                 now: Callable[[], datetime.datetime] = datetime.datetime.now, rng=random) -> None:
+                 now: Callable[[], datetime.datetime] = datetime.datetime.now, rng=random,
+                 fullscreen: Callable[[], bool] = is_fullscreen, display: Callable[[], bool] = display_requested,
+                 toast: Callable[[str], None] = lambda text: None,
+                 on_game: Callable[[str], None] = lambda game: None) -> None:
         self.say = say
         self.name = name
         self.idle = idle
         self.app = app
+        self.fullscreen = fullscreen
+        self.display = display
+        self.toast = toast
+        self.on_game = on_game
         self.reminders = reminders  # 今天接下来的提醒(给“欢迎回来”用)
         self.settings = settings
         self.clock = clock
@@ -141,17 +265,77 @@ class Care:
         self.last_break_nudge: float | None = None
         self.away = False
         self.night_done = ""  # 哪一晚提醒过了
+        self.game: str | None = None  # 正在玩的游戏
+        self.game_seen = 0.0
+        self.held: list[str] = []  # 打游戏时先记着的提醒
 
     def _line(self, options: list[str], **values) -> str:
         return self.rng.choice(options).format(name=self.name(), **values)
 
+    # ---------- 打游戏时 ----------
+    def quiet_now(self) -> bool:
+        """现在在打游戏、而且开着“游戏时别打扰”。"""
+        return bool(self.game) and self.settings().get("game_quiet", True)
+
+    def hold(self, text: str, short: str | None = None) -> None:
+        """打游戏时来的提醒:右下角小通知,先记着,打完再说。"""
+        try:
+            self.toast(text)
+        except Exception:
+            pass
+        self.held.append(short or text)
+
+    def _tell(self, text: str) -> bool:
+        """关心的话:打游戏时只弹小通知(过时了就不补说),平时读出来。"""
+        if self.quiet_now():
+            try:
+                self.toast(text)
+            except Exception:
+                pass
+            return True
+        return self.say(text)
+
+    def _watch_game(self, game: str | None, now: float) -> str | None:
+        if game:
+            self.game_seen = now
+            if self.game != game:
+                started = self.game is None
+                self.game = game
+                if started:
+                    try:
+                        self.on_game(game)
+                    except Exception:
+                        pass
+            return None
+        if self.game is None or now - self.game_seen < GAME_GRACE:
+            return None
+        finished, self.game = self.game, None
+        if not self.held:
+            return None
+        text = HELD.format(name=self.name(), game=finished, count=len(self.held), items=";".join(self.held))
+        if self.say(text):
+            self.held = []
+            return text
+        self.game = None
+        return None
+
+    # ---------- 每 30 秒 ----------
     def tick(self) -> str | None:
         """看一次;说了话就返回那句话。"""
-        idle = self.idle()
-        if idle is None:
+        snapshot = look(self.idle, self.app, self.fullscreen, self.display)
+        if snapshot is None:
             return None
         now = self.clock()
         settings = self.settings()
+        said = self._watch_game(snapshot["game"], now)
+        if said:
+            return said
+        if self.held and not self.game:  # 上次没说出去(正忙),再试
+            text = HELD.format(name=self.name(), game="游戏", count=len(self.held), items=";".join(self.held))
+            if self.say(text):
+                self.held = []
+                return text
+        idle = snapshot["present_idle"]  # 看视频、打游戏时不算离开
         if idle >= AWAY_SECONDS:
             self.away = True
         if idle >= BREAK_SECONDS:
@@ -163,7 +347,7 @@ class Care:
 
         # 1. 离开一阵子后回来
         if self.away:
-            if not settings["welcome"]:
+            if not settings["welcome"] or self.quiet_now():  # 回来就直接开游戏:不打扰
                 self.away = False
             else:
                 text = self._line(WELCOME)
@@ -180,7 +364,7 @@ class Care:
         night_key = (local - datetime.timedelta(hours=5)).strftime("%Y-%m-%d")
         if settings["night"] and local.hour in NIGHT_HOURS and self.night_done != night_key:
             text = self._line(NIGHT, time=local.strftime("%H:%M"))
-            if self.say(text):
+            if self._tell(text):
                 self.night_done = night_key
                 return text
             return None
@@ -191,10 +375,10 @@ class Care:
             used = now - self.active_since
             since_nudge = now - (self.last_break_nudge or self.active_since)
             if used >= minutes * 60 and since_nudge >= minutes * 60:
-                game = GAMES.get((self.app() or "").lower())
+                game = self.game or GAMES.get(snapshot["app"])
                 hours = hours_text(used)
                 text = self._line(BREAK_GAME, game=game, hours=hours) if game else self._line(BREAK, hours=hours)
-                if self.say(text):
+                if self._tell(text):
                     self.last_break_nudge = now
                     return text
         return None

@@ -143,6 +143,16 @@ class TrayIcon:
         threading.Thread(target=self.icon.run, daemon=True, name="friday-tray").start()
         return True
 
+    def notify(self, text: str, title: str = "星期五") -> bool:
+        """右下角的小通知(不抢焦点,打游戏时用)。"""
+        if self.icon is None:
+            return False
+        try:
+            self.icon.notify(text[:250], title)
+            return True
+        except Exception:
+            return False
+
     def stop(self) -> None:
         if self.icon is not None:
             try:

@@ -114,7 +114,8 @@ FRIDAY_PROMPT = """你是“星期五”,{call_me}的私人 AI 助手。
 - 执行命令和写文件前{call_me}会逐一确认;如果被拒绝,换个办法或说明还需要什么。
 - 用 computer 工具做一句话就能完成的电脑操作:音量、切歌、切换耳机/音箱、打开程序和游戏、窗口、
   电脑状态、亮度、深色模式、壁纸、找文件、剪贴板、锁屏、关机睡眠等。
-  “游戏模式”就是:用 system_status 看哪些程序最占内存,问{call_me}关哪些,确认后用 close_app 关掉。
+  “游戏模式”:先用 computer 的 game_mode(关掉{call_me}在设定里选好的程序);还没选过就用 system_status 看哪些最占内存,
+  问{call_me}关哪些,确认后用 close_app 关掉,并提醒可以在齿轮设定→打游戏时 选好,以后开游戏自动关。
 - 授权了 Google 的话:calendar 看和安排日程;gmail 看邮件、回邮件(发送前{call_me}会确认);
   google_tasks 管待办(手机上也能看到);contacts 查联系人邮箱电话;drive 找、读、上传、下载云端硬盘文件;
   docs 写 Google 文档;sheets 用 Google 表格(比如记账);youtube 搜视频、看订阅频道的新视频。
@@ -1115,6 +1116,7 @@ class WebSession:
     hotkey = None  # 全局快捷键(friday_desktop.GlobalHotkey)
     wake = None  # 喊“星期五”唤醒(friday_wake.WakeWord)
     care = None  # 主动关心(friday_care.Care)
+    tray = None  # 右下角托盘图标(打游戏时弹小通知用)
     discord = None  # Discord 机器人(提醒推到手机)
     cloud = None  # 云端后备的连接(friday_cloud.CloudClient)
     start_cloud = None  # 用配对码连接云端
@@ -1143,7 +1145,7 @@ def push_to_phone(session, text: str, idle: Callable[[], float | None] | None = 
     if mode == "away":
         import friday_care
 
-        seconds = (idle or friday_care.idle_seconds)()
+        seconds = (idle or friday_care.presence_idle)()  # 看视频、打游戏也算在电脑前
         if seconds is not None and seconds < PUSH_AWAY_SECONDS:
             return False  # 人就在电脑前
     threading.Thread(target=lambda: _quietly(lambda: discord.notify_owners(text)), daemon=True).start()
@@ -1151,9 +1153,32 @@ def push_to_phone(session, text: str, idle: Callable[[], float | None] | None = 
 
 
 def web_reminder(item: dict, session: WebSession) -> None:
-    """图形界面模式:提醒弹窗 + 界面提示 + 读出来 + 推到手机 Discord;定时任务交给星期五执行。"""
+    """图形界面模式:提醒弹窗 + 界面提示 + 读出来 + 推到手机 Discord;定时任务交给星期五执行。
+
+    打游戏时(开着“游戏时别打扰”):不弹窗、不读,只在右下角弹小通知,打完游戏再一起说。
+    """
     missed = f"(原定 {item['time'][11:]},星期五当时没开)" if item.get("missed") else ""
     session.hub.broadcast({"type": "reminder", "text": f"⏰ {item['time'][11:]} {item['message']}{missed}"})
+    care = getattr(session, "care", None)
+    quiet = care is not None and care.quiet_now()
+    if item.get("kind") == "task" and quiet:
+        toolbox = session.assistant.toolbox if session.assistant else None
+        if toolbox is not None:
+            toolbox.unattended = True
+        try:
+            result = session.ask(item["message"], source="task", speak=False,
+                                 prefix=f"[定时任务]{missed}", show_user=False)
+        finally:
+            if toolbox is not None:
+                toolbox.unattended = False
+        if result:
+            push_to_phone(session, f"⏰ {item['message']}\n\n{result}")
+            care.hold(f"⏰ {item['message']}:{result}", short=f"定时任务“{item['message']}”做完了,结果在窗口里")
+        return
+    if quiet:
+        push_to_phone(session, f"⏰ 提醒:{item['message']}{missed}")
+        care.hold(f"⏰ {item['time'][11:]} {item['message']}", short=f"{item['time'][11:]} {item['message']}")
+        return
     if item.get("kind") == "task":
         toolbox = session.assistant.toolbox if session.assistant else None
         if toolbox is not None:
@@ -1491,6 +1516,39 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         os.environ["FRIDAY_REMIND_PUSH"] = mode
         done.append({"always": "提醒会同时推到手机 Discord", "away": "不在电脑前时,提醒才推到手机 Discord",
                      "off": "提醒不推到手机了"}[mode])
+    if "game_quiet" in payload:
+        on = bool(payload["game_quiet"])
+        save_env_value(env, "FRIDAY_GAME_QUIET", "on" if on else "off")
+        os.environ["FRIDAY_GAME_QUIET"] = "on" if on else "off"
+        done.append("打游戏时提醒改成右下角小通知,打完再说" if on else "打游戏时提醒照常读出来")
+    if "game_close" in payload:
+        import friday_care
+
+        raw = payload["game_close"]
+        items = raw if isinstance(raw, list) else str(raw).replace("，", ",").replace("、", ",").split(",")
+        names = [friday_care.clean_program_name(n) for n in items]
+        if any(str(n).strip() and not c for n, c in zip(items, names)):
+            return {"error": "程序名只能有字母、数字、横线、点,用逗号分开(例如 chrome, spotify)"}
+        blocked = [n for n in names if n in friday_care.NEVER_CLOSE]
+        if blocked:
+            return {"error": f"{'、'.join(blocked)} 是系统或星期五自己要用的,不能关"}
+        value = ",".join(dict.fromkeys(n for n in names if n))
+        save_env_value(env, "FRIDAY_GAME_CLOSE", value)
+        os.environ["FRIDAY_GAME_CLOSE"] = value
+        done.append(f"开游戏时会自动关掉:{value.replace(',', '、')}" if value else "开游戏时不自动关程序")
+    if payload.get("game_candidates"):
+        import friday_care
+
+        computer = getattr(toolbox, "computer", None)
+        if computer is None or not computer.available:
+            return {"error": "这台电脑不能用电脑操作"}
+        try:
+            rows = computer.window_programs()
+        except Exception as e:
+            return {"error": f"没能读到正在运行的程序:{e}"}
+        rows = [r for r in rows if friday_care.clean_program_name(r["name"]) not in friday_care.NEVER_CLOSE
+                and r["name"].lower() not in ("applicationframehost", "textinputhost", "systemsettings", "shellexperiencehost")]
+        return {"ok": True, "candidates": rows[:12], "message": "点一下程序名就加进去"}
     if "care_break" in payload:
         try:
             minutes = int(payload["care_break"])
@@ -1673,9 +1731,34 @@ def start_care(session, ctx, hub, toolbox: Toolbox, voice_module):
         return [f"{r['time'][11:]} {r['message']}" for r in toolbox.reminders.upcoming()
                 if r["time"][:10] == now[:10] and r["time"] >= now][:3]
 
+    def toast(text: str) -> None:
+        tray = getattr(session, "tray", None)
+        if tray is not None:
+            tray.notify(text)
+
+    def game_started(game: str) -> None:
+        """开游戏了:自动关掉事先选好的程序(游戏模式)。"""
+        names = friday_care.game_close_list()
+        computer = getattr(toolbox, "computer", None)
+        if not names or computer is None or not computer.available:
+            return
+
+        def run() -> None:
+            try:
+                closed = computer.close_programs(names)
+            except Exception as e:
+                print(f"游戏模式没关成程序:{e}", flush=True)
+                return
+            if closed:
+                text = f"游戏模式:已帮你关掉 {'、'.join(closed)}"
+                toast(text)
+                hub.broadcast({"type": "status", "text": f"🎮 {game} " + text})
+
+        threading.Thread(target=run, daemon=True, name="friday-game-mode").start()
+
     care = friday_care.Care(
         say, name=lambda: os.environ.get("FRIDAY_CALL_ME") or session.call_me or DEFAULT_CALL_ME,
-        reminders=todays_reminders)
+        reminders=todays_reminders, toast=toast, on_game=game_started)
     care.start()
     session.care = care
     return care
@@ -1933,6 +2016,7 @@ def run_web(args) -> None:
         "quit": lambda: events.put(("eof", None)),
     })
     tray.start()
+    session.tray = tray
 
     def cloud_pull(changes: dict) -> None:
         text = merge_cloud_changes(changes, toolbox, assistant, hub)

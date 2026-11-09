@@ -296,3 +296,5 @@ body.focus .console { width: min(960px, 100%); justify-self: center; }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; }
 }
+#gameChips { margin: 2px 0 8px; }
+.chip:disabled { opacity: .4; cursor: default; }
