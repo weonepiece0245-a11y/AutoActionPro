@@ -116,6 +116,18 @@ function finishAnswer(text, source) {
   scrollDown();
 }
 
+// ---------- 快捷键:叫出窗口后直接开始听 ----------
+const params = new URLSearchParams(location.search);
+let listenOnOpen = params.get("listen") === "1";
+if (listenOnOpen) {  // 只在这一次生效,刷新页面不会又开始录音
+  params.delete("listen");
+  history.replaceState(null, "", `${location.pathname}?${params}`);
+}
+function startListening() {
+  window.focus();
+  if (!recorder && !$("micBtn").disabled) $("micBtn").onclick();
+}
+
 // ---------- 打招呼:只在窗口里还没有对话时(第一次打开或点了新话题之后) ----------
 let greeting = "";
 let greeted = false;
@@ -163,7 +175,11 @@ function handle(ev) {
     case "restarting":
       waitForRestart(); break;
     case "ready":
-      greet(); scrollDown(); break;
+      greet(); scrollDown();
+      if (listenOnOpen) { listenOnOpen = false; setTimeout(startListening, 400); }
+      break;
+    case "listen":
+      startListening(); break;
     case "cleared":
       log.innerHTML = ""; current = null; addLine("已开始新话题"); break;
   }
@@ -322,6 +338,22 @@ function fillSettings() {
   voice.value = s.voice;
   $("setRate").value = s.rate ?? "";
   $("autostartRow").hidden = s.autostart === null || s.autostart === undefined;
+  const h = s.hotkey;
+  $("hotkeyRow").hidden = !h;
+  if (h) {
+    const select = $("setHotkey");
+    if (!select.options.length) {
+      for (const [key, label] of [...h.options, ["off", "不用快捷键"]]) {
+        const opt = document.createElement("option");
+        opt.value = key; opt.textContent = label;
+        select.append(opt);
+      }
+    }
+    select.value = h.value;
+    $("hotkeyNote").hidden = !h.error;
+    $("hotkeyNote").textContent = h.error ? "⚠ " + h.error : "";
+    $("hotkeyNote").className = "set-note warn";
+  }
   const b = s.budget;
   $("budgetGroup").hidden = !b;
   if (b) {
@@ -388,6 +420,7 @@ $("previewVoice").onclick = async () => {
 $("saveRate").onclick = () => saveSetting({ rate: $("setRate").value.trim() });
 $("setAutostart").onchange = (e) => saveSetting({ autostart: e.target.checked });
 $("googleLogin").onclick = () => saveSetting({ google_login: true }, 9000);
+$("setHotkey").onchange = (e) => saveSetting({ hotkey: e.target.value });
 $("setBackup").onchange = (e) => saveSetting({ backup_auto: e.target.checked });
 $("backupNow").onclick = () => saveSetting({ backup_now: true }, 4000);
 $("backupRestore").onclick = () => {

@@ -975,6 +975,7 @@ class WebSession:
     call_me = ""  # 现在的称呼(齿轮设定里显示)
     google_account = None  # Google 登录状态(齿轮设定里显示、重新登录)
     backup = None  # Google Drive 备份(friday_backup.DriveBackup)
+    hotkey = None  # 全局快捷键(friday_desktop.GlobalHotkey)
     events = None  # 主循环的事件队列(还原后要重启)
     budget = None  # 每月预算和余额
     meter = None  # 花费统计
@@ -1145,6 +1146,16 @@ class GoogleWatcher:
         threading.Thread(target=run, daemon=True, name="friday-google-watch").start()
 
 
+def hotkey_state(session) -> dict | None:
+    import friday_desktop
+
+    hotkey = getattr(session, "hotkey", None)
+    if hotkey is None or os.name != "nt":
+        return None
+    return {"value": friday_desktop.hotkey_name(), "error": hotkey.error,
+            "options": [[key, label] for key, (label, _, _) in friday_desktop.HOTKEYS.items()]}
+
+
 def settings_state(session, meter=None) -> dict:
     """齿轮设定里要显示的当前值。"""
     import friday_app
@@ -1162,6 +1173,7 @@ def settings_state(session, meter=None) -> dict:
         "autostart": friday_app.autostart_enabled(),
         "google": session.google_account.status() if getattr(session, "google_account", None) else None,
         "budget": session.budget.state() if getattr(session, "budget", None) else None,
+        "hotkey": hotkey_state(session),
         "backup": {"enabled": os.environ.get("FRIDAY_BACKUP", "on") != "off",
                    "last": session.backup.last_backup()} if getattr(session, "backup", None) else None,
     }
@@ -1259,6 +1271,21 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         done.append("已保存 Admin Key,正在读取 Console 的花费" if key else "已删除 Admin Key,改回星期五自己估算")
     if refresh_console and budget is not None:
         threading.Thread(target=budget.refresh_console, daemon=True).start()
+    if "hotkey" in payload:
+        import friday_desktop
+
+        name = str(payload["hotkey"]).strip().lower()
+        if name not in friday_desktop.HOTKEYS and name != "off":
+            return {"error": "没有这个快捷键"}
+        hotkey = getattr(session, "hotkey", None)
+        previous = friday_desktop.hotkey_name()
+        if hotkey is not None and not hotkey.start(name):
+            error = hotkey.error
+            hotkey.start(previous)  # 换不成功就换回原来的
+            return {"error": error}
+        save_env_value(env, "FRIDAY_HOTKEY", name)
+        os.environ["FRIDAY_HOTKEY"] = name
+        done.append("已关闭快捷键" if name == "off" else f"快捷键改成 {friday_desktop.HOTKEYS[name][0]}")
     backup = getattr(session, "backup", None)
     if "backup_auto" in payload:
         on = bool(payload["backup_auto"])
@@ -1542,9 +1569,30 @@ def run_web(args) -> None:
     print(f"星期五界面已启动:{url}", flush=True)
     if not args.no_browser:
         friday_web.open_window(url, profile_dir)
+
+    # 全局快捷键和托盘图标(只在 Windows 上;不花 Claude 的钱)
+    import friday_desktop
+
+    def summon_now() -> None:
+        friday_desktop.summon(lambda: hub.connected, friday_web.focus_window,
+                              lambda: hub.broadcast({"type": "listen"}),
+                              lambda: friday_web.open_window(url + "&listen=1", profile_dir))
+
+    session.hotkey = friday_desktop.GlobalHotkey(summon_now)
+    if not session.hotkey.start(friday_desktop.hotkey_name()):
+        print(f"快捷键没有设置成功:{session.hotkey.error}", flush=True)
+    tray = friday_desktop.TrayIcon(Path(SCRIPT_DIR) / "friday.ico", {
+        "open": lambda: friday_web.show_window(url, profile_dir),
+        "listen": summon_now,
+        "update": lambda: events.put(("command", "update")),
+        "quit": lambda: events.put(("eof", None)),
+    })
+    tray.start()
     try:
         web_loop(session, events, voice_module.transcribe_audio)
     finally:
+        session.hotkey.stop()
+        tray.stop()
         server.shutdown()
         server.server_close()
         try:

@@ -14,7 +14,7 @@ where pyw >nul 2>nul && set "PYW=pyw -3"
 if not defined PYW where pythonw >nul 2>nul && set "PYW=pythonw"
 if not defined PYW set "PYW=%PY%"
 
-%PY% -c "import anthropic, PIL, googleapiclient, google_auth_oauthlib, discord, speech_recognition, edge_tts, imageio_ffmpeg" >nul 2>nul
+%PY% -c "import anthropic, PIL, googleapiclient, google_auth_oauthlib, discord, speech_recognition, edge_tts, imageio_ffmpeg, pystray" >nul 2>nul
 if not errorlevel 1 goto deps_ok
 echo First run: installing dependencies, please wait...
 %PY% -m pip install -r requirements.txt

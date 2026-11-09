@@ -81,6 +81,7 @@ import friday_usage  # noqa: E402
 import friday_router  # noqa: E402
 import friday_budget  # noqa: E402
 import friday_backup  # noqa: E402
+import friday_desktop  # noqa: E402
 import voice  # noqa: E402  assistant.py 已把所在目录加入 sys.path
 
 
@@ -4675,6 +4676,65 @@ class BackupTest(unittest.TestCase):
         events.put(("web", {"text": "不会处理"}))
         app.web_loop(session, events)
         self.assertTrue(session.restart)
+
+
+class DesktopTest(unittest.TestCase):
+    def test_summon_focuses_or_opens(self):
+        calls = []
+        listen = lambda: calls.append("listen")
+        open_listening = lambda: calls.append("open")
+        self.assertEqual(friday_desktop.summon(lambda: 1, lambda: True, listen, open_listening), "focused")
+        self.assertEqual(friday_desktop.summon(lambda: 0, lambda: True, listen, open_listening), "opened")
+        self.assertEqual(friday_desktop.summon(lambda: 1, lambda: False, listen, open_listening), "opened")
+        self.assertEqual(calls, ["listen", "open", "open"])
+
+    def test_hotkey_name(self):
+        with mock.patch.dict(os.environ, {"FRIDAY_HOTKEY": ""}):
+            self.assertEqual(friday_desktop.hotkey_name(), "ctrl+alt+f")
+        with mock.patch.dict(os.environ, {"FRIDAY_HOTKEY": "Ctrl+Shift+Space"}):
+            self.assertEqual(friday_desktop.hotkey_name(), "ctrl+shift+space")
+        with mock.patch.dict(os.environ, {"FRIDAY_HOTKEY": "off"}):
+            self.assertEqual(friday_desktop.hotkey_name(), "off")
+        with mock.patch.dict(os.environ, {"FRIDAY_HOTKEY": "f13"}):
+            self.assertEqual(friday_desktop.hotkey_name(), "ctrl+alt+f")
+        self.assertNotIn("ctrl+space", friday_desktop.HOTKEYS)  # 输入法会用到
+
+    def test_not_windows(self):
+        hotkey = friday_desktop.GlobalHotkey(lambda: None)
+        self.assertTrue(hotkey.start("off"))
+        if os.name != "nt":
+            self.assertFalse(hotkey.start("ctrl+alt+f"))
+            self.assertIn("Windows", hotkey.error)
+            self.assertFalse(friday_desktop.TrayIcon(Path("x.ico"), {}).start())
+
+    def test_change_hotkey_in_settings(self):
+        env = str(Path(tempfile.mkdtemp(), ".env"))
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        started = []
+
+        class FakeHotkey:
+            error = ""
+
+            def start(self, name):
+                started.append(name)
+                if name == "ctrl+alt+space":
+                    self.error = "Ctrl + Alt + 空格 已经被别的程序占用了,换一个试试"
+                    return False
+                self.error = ""
+                return True
+
+        session.hotkey = FakeHotkey()
+        with mock.patch.dict(os.environ, {"FRIDAY_HOTKEY": "ctrl+alt+f"}):
+            self.assertIn("error", app.apply_settings({"hotkey": "alt+tab"}, session, None, env))
+            result = app.apply_settings({"hotkey": "ctrl+alt+space"}, session, None, env)
+            self.assertIn("占用", result["error"])
+            self.assertEqual(started[-1], "ctrl+alt+f")  # 换回原来的
+            self.assertTrue(app.apply_settings({"hotkey": "ctrl+shift+space"}, session, None, env)["ok"])
+            self.assertEqual(os.environ["FRIDAY_HOTKEY"], "ctrl+shift+space")
+            with mock.patch.object(app.os, "name", "nt"):
+                state = app.hotkey_state(session)
+            self.assertEqual(state["value"], "ctrl+shift+space")
+            self.assertIn(["ctrl+alt+f", "Ctrl + Alt + F"], state["options"])
 
 if __name__ == "__main__":
     unittest.main()

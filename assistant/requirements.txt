@@ -6,3 +6,4 @@ discord.py
 SpeechRecognition
 edge-tts
 imageio-ffmpeg
+pystray; sys_platform == 'win32'

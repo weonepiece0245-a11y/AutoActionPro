@@ -11,7 +11,7 @@ if not defined PY (
   exit /b 1
 )
 rem The shortcuts start Python directly, so install everything Friday needs now
-%PY% -c "import anthropic, PIL, googleapiclient, google_auth_oauthlib, discord, speech_recognition, edge_tts, imageio_ffmpeg" >nul 2>nul
+%PY% -c "import anthropic, PIL, googleapiclient, google_auth_oauthlib, discord, speech_recognition, edge_tts, imageio_ffmpeg, pystray" >nul 2>nul
 if errorlevel 1 (
   echo Installing what Friday needs, please wait...
   %PY% -m pip install -r requirements.txt
