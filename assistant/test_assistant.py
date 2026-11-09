@@ -78,6 +78,7 @@ import friday_app  # noqa: E402
 import friday_web  # noqa: E402
 import friday_update  # noqa: E402
 import friday_usage  # noqa: E402
+import friday_router  # noqa: E402
 import voice  # noqa: E402  assistant.py 已把所在目录加入 sys.path
 
 
@@ -237,9 +238,9 @@ class PromptCachingTest(unittest.TestCase):
         stream.get_final_message = lambda: SimpleNamespace(**vars(original()), usage=usage)
         bot = app.Assistant(client=FakeClient(stream))
         seen = []
-        bot.on_usage = seen.append
+        bot.on_usage = lambda u, model: seen.append((u, model))
         bot.ask("hi", lambda t: None)
-        self.assertEqual(seen, [usage])
+        self.assertEqual(seen, [(usage, app.DEFAULT_MODEL)])
 
 
 class UsageMeterTest(unittest.TestCase):
@@ -277,6 +278,147 @@ class UsageMeterTest(unittest.TestCase):
         toolbox = tools.Toolbox(tools.Memory(os.path.join(tempfile.mkdtemp(), "m.json")), lambda a: True)
         state = app.web_state(session, toolbox, None, {})
         self.assertEqual(state["system"][-1], ("本月花费", True, "约 RM 4.00"))
+
+
+class FakeHaiku:
+    """假的 Haiku:按顺序返回预设的判断。"""
+
+    def __init__(self, *answers):
+        self.answers = list(answers)
+        self.calls = []
+        self.messages = SimpleNamespace(create=self._create)
+
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        if answer == "refusal":
+            return SimpleNamespace(stop_reason="refusal", content=[], usage=None)
+        return SimpleNamespace(stop_reason="end_turn", usage={"input_tokens": 500, "output_tokens": 30},
+                               content=[SimpleNamespace(type="text", text=json.dumps(answer))])
+
+
+class RouterTest(unittest.TestCase):
+    def make(self, *answers, path=None):
+        self.now = [1000.0]
+        self.haiku = FakeHaiku(*answers)
+        self.changes = []
+        return friday_router.Router(self.haiku, path, clock=lambda: self.now[0],
+                                    on_change=lambda label, mode: self.changes.append((label, mode)))
+
+    def test_rules(self):
+        self.assertEqual(friday_router.rule("提醒我八点开会"), friday_router.SONNET)
+        self.assertEqual(friday_router.rule("现在几点"), friday_router.SONNET)
+        self.assertEqual(friday_router.rule("帮我分析一下这个月的开销"), friday_router.OPUS)
+        self.assertEqual(friday_router.rule("我最近一直头痛,吃什么药好"), friday_router.OPUS)
+        self.assertEqual(friday_router.rule("长" * 200), friday_router.OPUS)
+        self.assertIsNone(friday_router.rule("周末去哪里玩"))
+        # 简单的词出现在难的事情里,还是按难的算
+        self.assertEqual(friday_router.rule("打开 Excel 帮我分析销售数据"), friday_router.OPUS)
+
+    def test_rules_decide_without_asking_haiku(self):
+        router = self.make()
+        self.assertEqual(router.choose("提醒我八点开会", history_empty=True), friday_router.SONNET)
+        self.assertEqual(router.choose("帮我规划下个月的预算", history_empty=True), friday_router.OPUS)
+        self.assertEqual(self.haiku.calls, [])
+
+    def test_haiku_must_be_confident_to_pick_sonnet(self):
+        router = self.make({"model": "sonnet", "confidence": 92, "reason": "闲聊"},
+                           {"model": "sonnet", "confidence": 60, "reason": "不太确定"},
+                           {"model": "opus", "confidence": 90, "reason": "需要建议"},
+                           RuntimeError("断网"), "refusal")
+        results = [router.choose("周末去哪里玩", history_empty=True) for _ in range(5)]
+        self.assertEqual(results, [friday_router.SONNET] + [friday_router.OPUS] * 4)
+        call = self.haiku.calls[0]
+        self.assertEqual(call["model"], friday_router.HAIKU)
+        self.assertEqual(call["output_config"]["format"]["type"], "json_schema")
+        self.assertIn("帮我想想要不要换工作", call["system"])  # 带上例子
+
+    def test_same_topic_only_upgrades(self):
+        router = self.make()
+        self.assertEqual(router.choose("现在几点", history_empty=True), friday_router.SONNET)
+        self.now[0] += 60
+        self.assertEqual(router.choose("周末去哪里玩", history_empty=False), friday_router.SONNET)  # 不问 Haiku
+        self.assertEqual(router.choose("那帮我规划一下行程", history_empty=False), friday_router.OPUS)
+        self.assertEqual(router.choose("谢谢", history_empty=False), friday_router.OPUS)  # 同一话题不降级
+        self.assertEqual(self.haiku.calls, [])
+        # 隔了很久再问:新话题,重新判断
+        self.now[0] += friday_router.NEW_TOPIC_IDLE + 1
+        self.assertEqual(router.choose("谢谢", history_empty=False), friday_router.SONNET)
+        self.assertEqual(self.changes, [("Sonnet 5.5", "auto"), ("Opus 5.5", "auto"), ("Sonnet 5.5", "auto")])
+
+    def test_asking_to_think_harder_upgrades_and_learns(self):
+        path = Path(tempfile.mkdtemp(), "router.json")
+        router = self.make(path=path)
+        router.choose("现在几点", history_empty=True)
+        router.choose("周末去 KL 哪里吃饭好", history_empty=False)
+        self.assertEqual(router.choose("你再认真想想", history_empty=False), friday_router.OPUS)
+        self.assertEqual(router.examples, [{"text": "周末去 KL 哪里吃饭好", "model": "opus"}])
+        # 记住了,下次给 Haiku 当例子
+        again = friday_router.Router(FakeHaiku({"model": "opus", "confidence": 90, "reason": ""}), path)
+        again.choose("周末去哪逛街", history_empty=True)
+        self.assertIn("周末去 KL 哪里吃饭好", again.client.calls[0]["system"])
+
+    def test_fixed_modes(self):
+        path = Path(tempfile.mkdtemp(), "router.json")
+        router = self.make(path=path)
+        router.set_mode("sonnet")
+        self.assertEqual(router.choose("帮我分析一下", history_empty=True), friday_router.SONNET)
+        router.set_mode("opus")
+        self.assertEqual(router.choose("现在几点", history_empty=True), friday_router.OPUS)
+        self.assertEqual(friday_router.Router(None, path).mode, "opus")  # 记住设置
+        with self.assertRaises(ValueError):
+            router.set_mode("gpt")
+
+
+class RoutedAssistantTest(unittest.TestCase):
+    def test_sonnet_hands_hard_question_to_opus(self):
+        client = FakeClient(
+            FakeStream([], stop_reason="tool_use",
+                       blocks=[tool_use("switch_to_opus", {"reason": "需要深入分析"})]),
+            FakeStream(["深入的回答"]),
+        )
+        client.messages = FakeHaiku({"model": "sonnet", "confidence": 95, "reason": ""}).messages
+        toolbox = tools.Toolbox(tools.Memory(os.path.join(tempfile.mkdtemp(), "m.json")), lambda a: True)
+        bot = app.Assistant(client=client, toolbox=toolbox)
+        bot.router = friday_router.Router(client)
+        statuses = []
+        answer = bot.ask("周末去哪里玩", lambda t: None, statuses.append)
+        self.assertEqual(answer, "深入的回答")
+        self.assertEqual([c["model"] for c in client.calls], [friday_router.SONNET, friday_router.OPUS])
+        names = lambda call: [t.get("name") for t in call["tools"]]
+        self.assertIn("switch_to_opus", names(client.calls[0]))
+        self.assertNotIn("switch_to_opus", names(client.calls[1]))
+        self.assertEqual([m["role"] for m in bot.messages], ["user", "assistant"])  # Sonnet 那一轮撤回了
+        self.assertIn("Opus", statuses[-1])
+        self.assertEqual(bot.router.examples[0]["text"], "周末去哪里玩")
+
+    def test_cli_defaults_to_auto(self):
+        self.assertEqual(app.start_model(SimpleNamespace(model="auto")), app.DEFAULT_MODEL)
+        self.assertEqual(app.start_model(SimpleNamespace(model="claude-sonnet-5-5")), "claude-sonnet-5-5")
+        bot = app.Assistant(client=FakeClient())
+        self.assertIsNotNone(app.attach_router(bot, SimpleNamespace(model="auto"), tempfile.mkdtemp()))
+        bot2 = app.Assistant(client=FakeClient())
+        self.assertIsNone(app.attach_router(bot2, SimpleNamespace(model="claude-sonnet-5-5"), tempfile.mkdtemp()))
+        self.assertIsNone(bot2.router)
+
+    def test_window_can_switch_mode(self):
+        hub = friday_web.Hub()
+        client, _ = hub.subscribe()
+        session = app.WebSession(None, app.default_persona(), hub)
+        session.router = friday_router.Router(None, on_change=lambda label, mode: hub.broadcast(
+            {"type": "model", "model": label, "mode": mode}))
+        events = queue.Queue()
+        events.put(("command", "model:sonnet"))
+        events.put(("eof", None))
+        app.web_loop(session, events)
+        self.assertEqual(session.router.mode, "sonnet")
+        model_events = [e for e in iter(lambda: None if client.empty() else client.get_nowait(), None)
+                        if e["type"] == "model"]
+        self.assertEqual(model_events[0]["mode"], "sonnet")
+        toolbox = tools.Toolbox(tools.Memory(os.path.join(tempfile.mkdtemp(), "m.json")), lambda a: True)
+        self.assertEqual(app.web_state(session, toolbox, None, {})["model"], {"model": "Opus 5.5", "mode": "sonnet"})
 
 
 class TempDirTest(unittest.TestCase):

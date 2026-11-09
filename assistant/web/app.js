@@ -142,6 +142,8 @@ function handle(ev) {
       showApproval(ev); break;
     case "approval_done":
       if (approvalId === ev.id) hideApproval(); break;
+    case "model":
+      showModel(ev.model, ev.mode); break;
     case "update_done":
       resetUpdateBtn(); break;
     case "restarting":
@@ -177,6 +179,7 @@ async function loadState() {
   const s = await api("/api/state");
   if (!s || s.error) return;
   $("versionText").textContent = s.version || "未记录";
+  if (s.model) showModel(s.model.model, s.model.mode);
   if (s.startup_error) { $("banner").hidden = false; $("banner").textContent = s.startup_error; }
   fillList("memoryList", s.memories, "还没有记忆,多跟我聊聊你自己", (m) => li(m.text, m.added));
   fillList("reminderList", s.reminders, "没有提醒", (r) => li(r.text, r.when));
@@ -217,6 +220,19 @@ $("form").onsubmit = async (e) => {
   const r = await api("/api/ask", { text, speak: speakOn });
   if (r.error) toast(r.error);
 };
+// ---------- 模型:自动 / 只用 Opus / 只用 Sonnet ----------
+function showModel(label, mode) {
+  $("modelChip").hidden = !label;
+  $("modelChip").textContent = (label || "").toUpperCase();
+  $("modelRow").hidden = false;
+  if (mode) $("modelMode").value = mode;
+}
+$("modelMode").onchange = async (e) => {
+  const r = await api("/api/command", { command: "model:" + e.target.value }).catch(() => ({ error: "星期五没有响应" }));
+  if (r.error) toast(r.error);
+  else toast(e.target.value === "auto" ? "自动选模型:日常用 Sonnet,难题用 Opus" : "已固定使用 " + e.target.selectedOptions[0].textContent.replace("只用 ", ""));
+};
+
 // ---------- 检查更新:下载新版本后星期五自动重启,这个窗口自己刷新 ----------
 function resetUpdateBtn() { $("updateBtn").disabled = false; $("updateBtn").textContent = "检查更新"; }
 $("updateBtn").onclick = async () => {

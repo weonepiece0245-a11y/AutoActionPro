@@ -30,7 +30,7 @@
       <div class="brand-sub">星期五 · 私人 AI 助手</div>
     </div>
   </div>
-  <div class="status-pill" id="modePill"><span class="dot"></span><span id="modeText">待机 STANDBY</span></div>
+  <div class="status-pill" id="modePill"><span class="dot"></span><span id="modeText">待机 STANDBY</span><span class="model-chip" id="modelChip" hidden></span></div>
   <div class="clock">
     <div id="clockTime">--:--:--</div>
     <div id="clockDate" class="clock-date">----</div>
@@ -42,6 +42,9 @@
     <h2><span>SYSTEM</span>系统</h2>
     <ul class="sys" id="sysList"></ul>
     <label class="bright">亮度 <input type="range" id="brightness" min="20" max="120" step="5" value="70" aria-label="光球亮度"><output id="brightOut">70%</output></label>
+    <div class="update-row" id="modelRow" hidden><span>模型</span><select class="mini-select" id="modelMode" title="自动:日常用 Sonnet 5.5(便宜一半),难题用 Opus 5.5" aria-label="选择模型">
+      <option value="auto">自动(推荐)</option><option value="opus">只用 Opus 5.5</option><option value="sonnet">只用 Sonnet 5.5</option>
+    </select></div>
     <div class="update-row"><span>版本 <b id="versionText">—</b></span><button type="button" class="mini-btn" id="updateBtn" title="从 GitHub 下载最新的星期五并自动重启">检查更新</button></div>
   </section>
   <section class="panel grow">

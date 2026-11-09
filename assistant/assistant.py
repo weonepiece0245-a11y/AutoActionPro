@@ -37,6 +37,7 @@ from friday_daily import (  # noqa: E402
 from friday_discord import DiscordBridge, read_token, set_discord_enabled  # noqa: E402
 from friday_google import GoogleAccount, GoogleTools  # noqa: E402
 from friday_pc import Computer, ScreenControl, drain_console_input  # noqa: E402
+from friday_router import SONNET, UPGRADE_TOOL, Router  # noqa: E402
 from friday_tools import SERVER_TOOL_LABELS, Memory, Toolbox  # noqa: E402
 
 DEFAULT_MODEL = "claude-opus-5-5"
@@ -248,6 +249,10 @@ class RefusalError(Exception):
     """模型拒绝回答本轮问题。"""
 
 
+class SwitchToOpus(Exception):
+    """Sonnet 要求把问题转给 Opus。"""
+
+
 class IncompleteAnswerError(Exception):
     """回答没能完成(工具参数被截断,或工具调用轮数超过上限)。"""
 
@@ -276,7 +281,8 @@ class Assistant:
         self.toolbox = toolbox
         self.messages: list[dict] = []
         self.system = self._build_system()
-        self.on_usage: Optional[Callable] = None  # 每次请求后收到 usage(用来统计花费)
+        self.on_usage: Optional[Callable] = None  # 每次请求后收到 (usage, 模型),用来统计花费
+        self.router = None  # 自动选模型(friday_router.Router);None 就一直用 self.model
 
     def _build_system(self) -> str:
         return self._system_factory() if callable(self._system_factory) else self._system_factory
@@ -293,6 +299,8 @@ class Assistant:
         出错或被拒绝时撤回本轮的全部消息,保证历史仍然完整有效。
         """
         start = len(self.messages)
+        if self.router is not None:
+            self.model = self.router.choose(question, history_empty=not self.messages)
         if self.toolbox is not None:
             self.toolbox.begin_turn()
         if self.context is not None:
@@ -304,7 +312,15 @@ class Assistant:
             content = question
         self.messages.append({"role": "user", "content": content})
         try:
-            return self._run(on_text, on_status)
+            try:
+                return self._run(on_text, on_status)
+            except SwitchToOpus:
+                # Sonnet 觉得这题太难:撤回这一轮,换 Opus 重新回答
+                del self.messages[start + 1:]
+                self.router.upgrade(question)
+                self.model = self.router.current
+                on_status("这个问题比较难,交给 Opus 5.5 认真想想")
+                return self._run(on_text, on_status)
         except BaseException:
             del self.messages[start:]
             raise
@@ -325,6 +341,8 @@ class Assistant:
             tool_uses = [b for b in final.content if b.type == "tool_use"]
             if not tool_uses:
                 return "".join(texts)
+            if self.router is not None and any(b.name == UPGRADE_TOOL["name"] for b in tool_uses):
+                raise SwitchToOpus()
             if final.stop_reason == "max_tokens":
                 raise IncompleteAnswerError("工具参数太长被截断了")
 
@@ -360,6 +378,8 @@ class Assistant:
         )
         if self.toolbox is not None:
             params["tools"] = self.toolbox.definitions()
+            if self.router is not None and self.model == SONNET:
+                params["tools"] = params["tools"] + [UPGRADE_TOOL]  # Sonnet 发现太难可以转给 Opus
 
         with self.client.beta.messages.stream(**params) as stream:
             for event in stream:
@@ -370,7 +390,7 @@ class Assistant:
             final = stream.get_final_message()
         if self.on_usage is not None and getattr(final, "usage", None) is not None:
             try:
-                self.on_usage(final.usage)
+                self.on_usage(final.usage, getattr(final, "model", None) or self.model)
             except Exception:
                 pass  # 统计花费出错不能影响回答
         return final
@@ -887,6 +907,7 @@ class WebSession:
     _turn = 0
     restart = False  # 更新完要重启
     meter = None  # 花费统计
+    router = None  # 自动选模型
     hub_audio = None  # 由 run_web 设置成 WebContext.audio
 
 
@@ -948,6 +969,10 @@ def web_loop(session: WebSession, events: queue.Queue, transcribe=None) -> None:
             if session.assistant is not None:
                 session.assistant.reset()
             session.hub.broadcast({"type": "cleared"})
+        elif kind == "command" and str(payload).startswith("model:"):
+            router = getattr(session, "router", None)
+            if router is not None:
+                router.set_mode(payload.split(":", 1)[1])
         elif kind == "command" and payload == "update":
             if web_update(session):
                 return  # run_web 会用新代码重新启动
@@ -989,13 +1014,28 @@ def attach_meter(assistant: Assistant, data_dir: str, log: bool = False):
 
     meter = UsageMeter(os.path.join(data_dir, "friday_usage.json"))
 
-    def on_usage(usage) -> None:
-        cost = meter.add(usage)
+    def on_usage(usage, model=None) -> None:
+        cost = meter.add(usage, model)
         if log:
-            print(meter.describe(usage, cost), flush=True)
+            print(meter.describe(usage, cost, model), flush=True)
 
     assistant.on_usage = on_usage
     return meter
+
+
+def start_model(args) -> str:
+    """--model auto(默认)时先用 Opus,之后由自动选模型决定。"""
+    return DEFAULT_MODEL if args.model in (None, "auto") else args.model
+
+
+def attach_router(assistant: Assistant, args, data_dir: str, on_change=None):
+    """--model auto 时开启自动选模型(日常用 Sonnet,难题用 Opus);指定了模型就一直用那个。"""
+    if args.model not in (None, "auto"):
+        return None
+    router = Router(assistant.client, os.path.join(data_dir, "friday_router.json"),
+                    on_change=on_change, on_usage=assistant.on_usage)
+    assistant.router = router
+    return router
 
 
 def restart_command(argv: list[str], port: int) -> list[str]:
@@ -1033,11 +1073,13 @@ def web_state(session: WebSession, toolbox: Toolbox, discord, cache: dict) -> di
     meter = getattr(session, "meter", None)
     if meter is not None:
         system.append(("本月花费", True, f"约 RM {meter.month_myr():.2f}"))
+    router = getattr(session, "router", None)
+    model = {"model": router.label(), "mode": router.mode} if router is not None else None
     import friday_update
 
     version = friday_update.current_version(Path(SCRIPT_DIR))[:7]
     return {"memories": memories[:40], "reminders": reminders, "todos": todos[:20], "system": system,
-            "startup_error": session.startup_error, "version": version}
+            "startup_error": session.startup_error, "version": version, "model": model}
 
 
 def redirect_output(log_file: str) -> None:
@@ -1093,15 +1135,20 @@ def run_web(args) -> None:
         startup_error = f"还没有填写 API Key:请用记事本打开 {args.env_file},把“{PLACEHOLDER_KEY}”换成你的 Key,保存后重新打开星期五。"
     else:
         try:
-            assistant = Assistant(model=args.model, effort=args.effort or persona.effort, system=persona.system,
-                                  context=persona.context, toolbox=toolbox)
+            assistant = Assistant(model=start_model(args), effort=args.effort or persona.effort,
+                                  system=persona.system, context=persona.context, toolbox=toolbox)
         except anthropic.AnthropicError as e:
             startup_error = f"无法连接 Claude:{e}"
     meter = attach_meter(assistant, data_dir, log=True) if assistant is not None else None
+    router = None
+    if assistant is not None:
+        router = attach_router(assistant, args, data_dir, on_change=lambda label, mode: hub.broadcast(
+            {"type": "model", "model": label, "mode": mode}))
 
     events: queue.Queue = queue.Queue()
     session = WebSession(assistant, persona, hub, voice_module.synthesize_mp3, startup_error)
     session.meter = meter
+    session.router = router
     port = args.port or int(os.environ.get("FRIDAY_WEB_PORT") or friday_web.DEFAULT_PORT)
     token = os.environ.get("FRIDAY_WEB_TOKEN") or friday_web.new_token()  # 更新后重启沿用原来的口令
     discord = None  # 下面启动;界面状态接口会读到它
@@ -1181,12 +1228,14 @@ def run_server(args) -> None:
     )
     persona = friday_persona(call_me, toolbox, server=True)
     try:
-        assistant = Assistant(model=args.model, effort=args.effort or persona.effort, system=persona.system,
-                              context=persona.context, toolbox=toolbox)
+        assistant = Assistant(model=start_model(args), effort=args.effort or persona.effort,
+                              system=persona.system, context=persona.context, toolbox=toolbox)
     except anthropic.AnthropicError:
         print(f"未找到 API 凭据。{KEY_HINT}", file=sys.stderr)
         sys.exit(1)
     attach_meter(assistant, data_dir, log=True)
+    attach_router(assistant, args, data_dir,
+                  on_change=lambda label, mode: print(f"改用 {label}", flush=True))
 
     import voice as voice_module
 
@@ -1202,7 +1251,8 @@ def run_server(args) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="AI 小助理:在终端里和 Claude 对话")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"模型 ID(默认 {DEFAULT_MODEL})")
+    parser.add_argument("--model", default="auto",
+                        help="模型 ID;默认 auto:星期五日常用 Sonnet 5.5、难题用 Opus 5.5(普通助手用 Opus 5.5)")
     parser.add_argument(
         "--effort",
         default=None,
@@ -1333,7 +1383,8 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         assistant = Assistant(
-            model=args.model,
+            model=start_model(args) if args.persona == "friday" else (
+                DEFAULT_MODEL if args.model in (None, "auto") else args.model),
             effort=args.effort or persona.effort,
             system=persona.system,
             context=persona.context,
@@ -1342,8 +1393,10 @@ def main(argv: list[str] | None = None) -> None:
     except anthropic.AnthropicError:
         print(f"未找到 API 凭据。{KEY_HINT}", file=sys.stderr)
         sys.exit(1)
-    if persona.toolbox is not None:  # 星期五:也把花费记下来(命令行里不显示)
-        attach_meter(assistant, os.path.dirname(os.path.abspath(persona.toolbox.memory.path)))
+    if persona.toolbox is not None:  # 星期五:也把花费记下来(命令行里不显示),并自动选模型
+        friday_dir = os.path.dirname(os.path.abspath(persona.toolbox.memory.path))
+        attach_meter(assistant, friday_dir)
+        attach_router(assistant, args, friday_dir, on_change=lambda label, mode: print_status(f"改用 {label}"))
     events: queue.Queue = queue.Queue()
     if persona.toolbox is not None and persona.toolbox.reminders is not None:
         ReminderScheduler(persona.toolbox.reminders, events).start()

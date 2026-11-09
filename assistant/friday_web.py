@@ -385,7 +385,7 @@ def make_handler(ctx: WebContext):
                 return self._json(200 if ok else 404, {"ok": ok})
             if url.path == "/api/command":
                 command = str(data.get("command") or "")
-                if command not in ("clear", "update"):
+                if command not in ("clear", "update", "model:auto", "model:opus", "model:sonnet"):
                     return self._json(400, {"error": "不支持的命令"})
                 ctx.events.put(("command", command))
                 return self._json(202, {"ok": True})
