@@ -100,6 +100,8 @@ class DiscordGate:
     """
 
     PAIR_MINUTES = 10
+    MAX_WRONG_PER_ACCOUNT = 5  # 一个账号猜错这么多次配对码:以后不理它
+    MAX_WRONG_TOTAL = 20  # 所有人加起来猜错这么多次:配对码作废,要在电脑上重新生成
 
     def __init__(self, state_file: str | os.PathLike, events: queue.Queue, send, on_status: StatusFn = print,
                  clock: Callable[[], float] = time.monotonic, send_voice=None,
@@ -115,6 +117,9 @@ class DiscordGate:
         self.pair_code: str | None = None
         self.pair_expires: float | None = None
         self.pairing_disabled = False  # 云端后备:只认电脑同步过来的配对,不跟陌生人说话
+        self.wrong: dict[int, int] = {}  # 每个账号猜错配对码几次
+        self.wrong_total = 0
+        self.blocked: set[int] = self._load_blocked()
         if not self.owners:
             self.pair_code = self._code()  # 第一次:一直有效,直到配对成功
         self.answers: queue.Queue = queue.Queue()
@@ -140,12 +145,21 @@ class DiscordGate:
             owners.setdefault(int(old), str(data.get("owner_name", "")))
         return owners
 
+    def _load_blocked(self) -> set[int]:
+        try:
+            data = json.loads(self.state_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return set()
+        return {int(i) for i in (data.get("blocked") or []) if str(i).isdigit()} if isinstance(data, dict) else set()
+
     def _save_owners(self) -> None:
-        data = {"owners": [{"id": i, "name": n} for i, n in self.owners.items()]}
+        data = {"owners": [{"id": i, "name": n} for i, n in self.owners.items()],
+                "blocked": sorted(getattr(self, "blocked", set()))}
         self.state_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # ---- 电脑上的管理命令 ----
     def new_pair_code(self) -> str:
+        self.wrong_total = 0
         self.pair_code = self._code()
         self.pair_expires = self.clock() + self.PAIR_MINUTES * 60
         return self.pair_code
@@ -180,18 +194,7 @@ class DiscordGate:
             return
         text = (text or "").strip()
         if author_id not in self.owners:
-            if self.pairing_disabled:
-                return
-            if self._pair_code_valid() and text == self.pair_code:
-                self.owners[author_id] = author_name
-                self.pair_code = self.pair_expires = None
-                self._save_owners()
-                self.on_status(f"已和 Discord 账号 {author_name} 配对(现在共 {len(self.owners)} 个账号)")
-                self.send(channel, "配对成功!以后私信我,或在名字带 friday / 星期五 的频道里说话,或 @我 都可以。")
-            elif not self.owners:
-                self.send(channel, "还没有配对。请发送“星期五”电脑窗口里显示的 6 位配对码。")
-            else:
-                self.on_status(f"有没配对的账号({author_name})找机器人说话,已忽略")
+            self._stranger(author_id, author_name, is_dm, text, channel)
             return
         if not text and not audio:
             return
@@ -206,6 +209,48 @@ class DiscordGate:
             audio=audio,
             reply_voice=(lambda answer: send_voice(channel, answer)) if send_voice else None,
         )))
+
+    def _stranger(self, author_id: int, author_name: str, is_dm: bool, text: str, channel) -> None:
+        """没配对的账号:只能私信配对码;猜错太多次就不理它,并提醒主人。"""
+        import friday_security
+
+        if self.pairing_disabled or author_id in self.blocked:
+            return
+        looks_like_code = text.isdigit() and len(text) == 6
+        if not is_dm:  # 频道里大家都看得到:不在这里配对
+            if looks_like_code:
+                friday_security.record("discord_pair_channel", f"有人({author_name})在频道里发配对码,已忽略(只能私信配对)")
+            return
+        if self._pair_code_valid() and secrets.compare_digest(text.encode(), (self.pair_code or "").encode()):
+            self.owners[author_id] = author_name
+            self.pair_code = self.pair_expires = None
+            self.wrong.pop(author_id, None)
+            self._save_owners()
+            self.on_status(f"已和 Discord 账号 {author_name} 配对(现在共 {len(self.owners)} 个账号)")
+            friday_security.record("discord_paired", f"Discord 账号“{author_name}”(id {author_id})和星期五配对了。"
+                                   "如果不是你自己,马上到齿轮设定 → 安全 里移除它。", "alert")
+            self.send(channel, "配对成功!以后私信我,或在名字带 friday / 星期五 的频道里说话,或 @我 都可以。")
+            return
+        if looks_like_code:
+            self.wrong[author_id] = self.wrong.get(author_id, 0) + 1
+            self.wrong_total += 1
+            friday_security.record("discord_wrong_code", f"Discord 账号“{author_name}”(id {author_id})发了错的配对码"
+                                   f"(第 {self.wrong[author_id]} 次)", "info")
+            if self.wrong[author_id] >= self.MAX_WRONG_PER_ACCOUNT:
+                self.blocked.add(author_id)
+                self._save_owners()
+                friday_security.record("discord_blocked", f"Discord 账号“{author_name}”(id {author_id})猜错配对码 "
+                                       f"{self.wrong[author_id]} 次,已拉黑,以后不理它", "alert")
+            if self.wrong_total >= self.MAX_WRONG_TOTAL and self.pair_code is not None:
+                self.pair_code = self.pair_expires = None
+                friday_security.record("discord_code_void", f"配对码被猜错 {self.wrong_total} 次,已作废。"
+                                       "要配对新账号,请在齿轮设定 → 安全 里重新生成配对码", "alert")
+        if not self.owners and self.pair_code is not None and author_id not in self.blocked:
+            self.send(channel, "还没有配对。请发送“星期五”电脑窗口里显示的 6 位配对码。")
+        elif not looks_like_code:
+            self.on_status(f"有没配对的账号({author_name})找机器人说话,已忽略")
+            friday_security.record("discord_stranger", f"没配对的 Discord 账号“{author_name}”(id {author_id})私信机器人,已忽略",
+                                   "info")
 
     def ask(self, channel, question: str, author_id: int | None = None, timeout: float = ASK_TIMEOUT) -> bool:
         """在 Discord 上请发消息的那个账号确认,等它回复;超时算拒绝。"""

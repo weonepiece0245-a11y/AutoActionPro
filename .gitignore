@@ -52,3 +52,5 @@ assistant/friday_before_restore.zip
 assistant/cloud_cert.pem
 assistant/cloud_key.pem
 assistant/friday_cloud_state.json
+assistant/web/vendor/
+assistant/friday_security.log*

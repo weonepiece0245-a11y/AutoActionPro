@@ -311,6 +311,11 @@ def make_handler(ctx: WebContext):
             host = (self.headers.get("Host") or "").lower()
             return host in (f"127.0.0.1:{ctx.port}", f"localhost:{ctx.port}")
 
+        def _origin_ok(self) -> bool:
+            # 别的网站发来的请求会带上它自己的 Origin:一律拒绝
+            origin = (self.headers.get("Origin") or "").lower()
+            return not origin or origin in (f"http://127.0.0.1:{ctx.port}", f"http://localhost:{ctx.port}")
+
         def _token_ok(self, query: dict) -> bool:
             given = self.headers.get("X-Friday-Token") or (query.get("t") or [""])[0]
             return secrets.compare_digest(given, ctx.token)
@@ -341,6 +346,23 @@ def make_handler(ctx: WebContext):
                 return self._send(403, b"forbidden", "text/plain")
             url = urlparse(self.path)
             query = parse_qs(url.query)
+            if url.path in ("/", "/index.html"):
+                import friday_vendor
+
+                try:
+                    body, csp = friday_vendor.page(WEB_DIR)
+                except OSError:
+                    return self._send(404, b"not found", "text/plain")
+                return self._send(200, body, "text/html; charset=utf-8", {
+                    "Content-Security-Policy": csp, "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer",
+                    "Cross-Origin-Opener-Policy": "same-origin"})
+            if url.path.startswith("/vendor/"):
+                import friday_vendor
+
+                local = friday_vendor.local_file(WEB_DIR, url.path)
+                if local is None:
+                    return self._send(404, b"not found", "text/plain")
+                return self._send(200, local.read_bytes(), "text/javascript; charset=utf-8")
             if url.path in STATIC_FILES:
                 name, content_type = STATIC_FILES[url.path]
                 try:
@@ -394,10 +416,13 @@ def make_handler(ctx: WebContext):
 
         # ---- POST ----
         def do_POST(self):  # noqa: N802
-            if not self._host_ok():
+            if not self._host_ok() or not self._origin_ok():
                 return self._send(403, b"forbidden", "text/plain")
             url = urlparse(self.path)
             if not self._token_ok(parse_qs(url.query)):
+                import friday_security
+
+                friday_security.record("web_bad_token", "有程序用错的口令连星期五的窗口接口,已拒绝", "warn")
                 return self._send(403, b"forbidden", "text/plain")
             try:
                 body = self._body()

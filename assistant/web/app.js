@@ -453,6 +453,40 @@ function fillSettings() {
       : "没有 Admin Key 时用星期五自己的估算。Admin Key 只在你的电脑上保存,只用来读花费报表。";
     $("consoleNote").className = "set-note" + (b.console_error ? " warn" : "");
   }
+  const sec = s.security;
+  $("securityGroup").hidden = !sec;
+  if (sec) {
+    const owners = $("discordOwners");
+    owners.replaceChildren();
+    $("discordPair").hidden = !sec.discord;
+    for (const o of sec.discord || []) {
+      const row = document.createElement("div");
+      row.className = "set-row sub";
+      const name = document.createElement("span");
+      name.textContent = `${o.name || "(没有名字)"} · id ${o.id}`;
+      const btn = document.createElement("button");
+      btn.type = "button"; btn.className = "mini-btn"; btn.textContent = "移除";
+      btn.onclick = () => { if (confirm(`移除“${o.name || o.id}”?它以后不能再用 Discord 控制星期五。`)) saveSetting({ discord_remove: o.id }, 5000); };
+      row.append(name, btn);
+      owners.append(row);
+    }
+    if (sec.discord && !sec.discord.length) owners.textContent = "还没有配对任何账号";
+    $("pairNote").hidden = !sec.pair_code;
+    if (sec.pair_code) $("pairNote").textContent = `配对码 ${sec.pair_code}:10 分钟内,用要添加的账号私信机器人发送。只能私信配对,频道里发无效。`;
+    const list = $("securityEvents");
+    list.replaceChildren();
+    for (const e of sec.events || []) {
+      const line = document.createElement("div");
+      line.className = "sec-event " + (e.severity || "info");
+      line.textContent = `${(e.time || "").slice(5, 16)}  ${e.text}`;
+      list.append(line);
+    }
+    if (!(sec.events || []).length) list.textContent = "没有可疑的事 ✓";
+    const notes = ["钥匙和密码文件星期五不读不碰", "网页、邮件里的指令不照做", "Discord 配对码猜错 5 次就拉黑"];
+    notes.push(sec.vendor_local ? "光球的程序库已存在本机" : "光球的程序库还在从网站读取(下次打开会存到本机)");
+    if (sec.blocked) notes.push(`已拉黑 ${sec.blocked} 个乱猜配对码的账号`);
+    $("securityNote").textContent = "✓ " + notes.join(" · ");
+  }
   $("rainRow").hidden = !s.rain_alert;
   if (s.rain_alert) $("setRain").value = s.rain_alert;
   $("weeklyRow").hidden = s.weekly_report === null || s.weekly_report === undefined;
@@ -557,6 +591,7 @@ $("setPush").onchange = (e) => saveSetting({ push: e.target.value });
 $("setCareWelcome").onchange = (e) => saveSetting({ care_welcome: e.target.checked });
 $("setCareBreak").onchange = (e) => saveSetting({ care_break: Number(e.target.value) });
 $("setCareNight").onchange = (e) => saveSetting({ care_night: e.target.checked });
+$("discordPair").onclick = () => saveSetting({ discord_pair: true }, 8000);
 $("setRain").onchange = (e) => saveSetting({ rain_alert: e.target.value });
 $("setWeekly").onchange = (e) => saveSetting({ weekly_report: e.target.checked });
 $("setQuick").onchange = (e) => saveSetting({ quick: e.target.checked });

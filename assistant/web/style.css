@@ -298,3 +298,8 @@ body.focus .console { width: min(960px, 100%); justify-self: center; }
 }
 #gameChips { margin: 2px 0 8px; }
 .chip:disabled { opacity: .4; cursor: default; }
+.sec-events { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted, #8aa); margin: 2px 0 8px; max-height: 150px; overflow-y: auto; }
+.sec-event { padding: 4px 8px; border-left: 2px solid var(--cyan-line); background: rgba(34,211,238,.04); border-radius: 4px; overflow-wrap: anywhere; }
+.sec-event.warn { border-left-color: #f59e0b; }
+.sec-event.alert { border-left-color: #ef4444; color: #fecaca; }
+.set-row.sub { padding-left: 12px; font-size: 13px; min-height: 30px; }
