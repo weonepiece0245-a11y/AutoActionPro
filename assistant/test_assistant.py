@@ -3625,8 +3625,9 @@ class FridayAppInstallTest(TempDirTest):
     def test_creates_desktop_and_start_menu_shortcuts(self):
         self.assertEqual(self.install("n"), 0)
         created = [(env["FRIDAY_FOLDER"], env["FRIDAY_NAME"]) for kind, env in self.calls if kind == "create"]
-        self.assertEqual(created, [("Desktop", "星期五"), ("Programs", "星期五"),
-                                   ("Desktop", "星期五 命令行"), ("Programs", "星期五 命令行")])
+        # 命令行版只放开始菜单,桌面上旧的那个顺手删掉
+        self.assertEqual(created, [("Desktop", "星期五"), ("Programs", "星期五"), ("Programs", "星期五 命令行")])
+        self.assertIn(("remove", {"FRIDAY_FOLDER": "Desktop", "FRIDAY_NAME": "星期五 命令行"}), self.calls)
         removed_legacy = [env["FRIDAY_NAME"] for kind, env in self.calls[:2]]
         self.assertEqual(removed_legacy, ["星期五 语音", "星期五 语音"])  # 旧版的快捷方式顺手删掉
         app_shortcut = next(env for kind, env in self.calls if kind == "create")

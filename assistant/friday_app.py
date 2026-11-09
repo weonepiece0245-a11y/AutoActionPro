@@ -16,10 +16,10 @@ from typing import Callable
 SCRIPT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 ICON_NAME = "friday.ico"
 
-# (快捷方式名称, 要启动的 bat, 参数, 说明, 是否最小化启动)
+# (快捷方式名称, 要启动的 bat, 参数, 说明, 是否最小化启动, 是否放桌面)
 SHORTCUTS = [
-    ("星期五", "friday-app.bat", "", "私人 AI 助手星期五(图形界面)", True),
-    ("星期五 命令行", "friday.bat", "", "星期五(黑色命令行窗口版)", False),
+    ("星期五", "friday-app.bat", "", "私人 AI 助手星期五(图形界面)", True, True),
+    ("星期五 命令行", "friday.bat", "", "星期五(黑色命令行窗口版)", False, False),  # 备用,只放开始菜单
 ]
 LEGACY_SHORTCUTS = ["星期五 语音"]  # 旧版本建过的快捷方式,安装时顺手删掉
 AUTOSTART_NAME = "星期五(开机启动)"
@@ -152,14 +152,17 @@ def install(folder: Path = SCRIPT_DIR, ask: Callable[[str], str] = input,
 
     if pythonw == "auto":
         pythonw = find_pythonw()
-    for name, bat, args, desc, minimized in SHORTCUTS:
+    for name, bat, args, desc, minimized, on_desktop in SHORTCUTS:
         target = folder / bat
         if not target.exists():
             print(f"找不到 {bat},跳过“{name}”")
             continue
         if bat == "friday-app.bat":
             target, args, minimized = app_launcher(folder, pythonw)
-        for place, label in (("Desktop", "桌面"), ("Programs", "开始菜单")):
+        places = (("Desktop", "桌面"), ("Programs", "开始菜单")) if on_desktop else (("Programs", "开始菜单"),)
+        if not on_desktop:  # 以前的版本放过桌面,删掉
+            powershell(REMOVE_SHORTCUT, {"FRIDAY_FOLDER": "Desktop", "FRIDAY_NAME": name})
+        for place, label in places:
             powershell(CREATE_SHORTCUT, _shortcut_env(place, name, target, icon, desc, minimized, args, folder))
             print(f"已在{label}创建“{name}”")
 
@@ -175,7 +178,7 @@ def install(folder: Path = SCRIPT_DIR, ask: Callable[[str], str] = input,
         print("不开机自动启动。")
 
     print("\n完成!桌面和开始菜单里都有“星期五”了(科技风界面),也可以在开始菜单里搜索“星期五”。")
-    print("想用以前的黑色窗口版,点“星期五 命令行”。")
+    print("想用以前的黑色窗口版,在开始菜单里找“星期五 命令行”。")
     print("想固定到任务栏:在开始菜单里右键“星期五” → 固定到任务栏。")
     return 0
 
