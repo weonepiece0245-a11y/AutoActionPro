@@ -86,6 +86,7 @@ import friday_backup  # noqa: E402
 import friday_desktop  # noqa: E402
 import friday_wake  # noqa: E402
 import friday_cloud  # noqa: E402
+import friday_care  # noqa: E402
 import voice  # noqa: E402  assistant.py 已把所在目录加入 sys.path
 
 
@@ -5120,6 +5121,111 @@ class CloudStandbyTest(TempDirTest):
             app.apply_settings({"cloud_code": ""}, session, None, env)
             self.assertEqual(started[-1], "stop")
             self.assertIsNone(session.cloud)
+
+
+class CareTest(unittest.TestCase):
+    def make(self, settings=None, busy=None):
+        self.t = [1_000_000.0]
+        self.idle = [0.0]
+        self.app = [None]
+        self.local = [datetime.datetime(2026, 11, 10, 15, 0)]
+        self.said = []
+        self.busy = busy or [False]
+        self.coming = []
+
+        def say(text):
+            if self.busy[0]:
+                return False
+            self.said.append(text)
+            return True
+
+        first = lambda options: options[0]
+        return friday_care.Care(say, name=lambda: "老板", idle=lambda: self.idle[0], app=lambda: self.app[0],
+                                reminders=lambda: self.coming,
+                                settings=lambda: settings or {"welcome": True, "break_minutes": 120, "night": True},
+                                clock=lambda: self.t[0], now=lambda: self.local[0], rng=SimpleNamespace(choice=first))
+
+    def advance(self, care, seconds, idle=0.0, step=30):
+        result = None
+        for _ in range(int(seconds // step)):
+            self.t[0] += step
+            self.local[0] += datetime.timedelta(seconds=step)
+            self.idle[0] = idle
+            result = care.tick() or result
+        return result
+
+    def test_welcome_back_after_being_away(self):
+        care = self.make()
+        care.tick()
+        self.coming = ["16:00 开会"]
+        self.advance(care, 25 * 60, idle=25 * 60)  # 离开 25 分钟
+        self.assertEqual(self.said, [])
+        self.idle[0] = 1
+        text = care.tick()
+        self.assertEqual(text, "老板,欢迎回来。今天还有 1 个提醒,下一个是 16:00 开会。")
+        self.assertIsNone(care.tick())  # 只说一次
+
+    def test_short_break_is_not_away(self):
+        care = self.make()
+        self.advance(care, 10 * 60, idle=10 * 60)
+        self.idle[0] = 0
+        self.assertIsNone(care.tick())
+
+    def test_break_reminder_names_the_game(self):
+        care = self.make()
+        self.app[0] = "r5apex.exe"
+        self.advance(care, 119 * 60)
+        self.assertEqual(self.said, [])
+        self.advance(care, 2 * 60)
+        self.assertEqual(self.said, ["老板,Apex 已经打了2个小时了,这局结束休息一下,喝口水吧。"])
+        self.advance(care, 60 * 60)
+        self.assertEqual(len(self.said), 1)  # 下一次要再过 2 小时
+        self.advance(care, 61 * 60)
+        self.assertEqual(len(self.said), 2)
+        self.assertIn("4个小时", self.said[1])
+
+    def test_rest_resets_the_timer(self):
+        care = self.make()
+        self.advance(care, 100 * 60)
+        self.advance(care, 6 * 60, idle=6 * 60)  # 起来休息了 6 分钟
+        self.advance(care, 100 * 60)
+        self.assertEqual(self.said, [])
+
+    def test_busy_waits_and_retries(self):
+        busy = [True]
+        care = self.make(busy=busy)
+        self.advance(care, 121 * 60)
+        self.assertEqual(self.said, [])
+        busy[0] = False
+        self.advance(care, 60)
+        self.assertEqual(len(self.said), 1)
+
+    def test_late_night_once_per_night(self):
+        care = self.make()
+        self.local[0] = datetime.datetime(2026, 11, 11, 0, 58)
+        self.advance(care, 5 * 60)
+        self.assertEqual(len(self.said), 1)
+        self.assertIn("01:", self.said[0])
+        self.advance(care, 60 * 60)
+        self.assertEqual(len(self.said), 1)
+
+    def test_everything_off(self):
+        care = self.make(settings={"welcome": False, "break_minutes": 0, "night": False})
+        self.local[0] = datetime.datetime(2026, 11, 11, 2, 0)
+        self.advance(care, 25 * 60, idle=25 * 60)
+        self.advance(care, 5 * 60 * 60)
+        self.assertEqual(self.said, [])
+
+    def test_hours_text_and_settings(self):
+        self.assertEqual(friday_care.hours_text(2 * 3600), "2个小时")
+        self.assertEqual(friday_care.hours_text(2.5 * 3600), "2个半小时")
+        self.assertEqual(friday_care.hours_text(30 * 60), "30分钟")
+        env = str(Path(tempfile.mkdtemp(), ".env"))
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        with mock.patch.dict(os.environ, {}, clear=False):
+            self.assertIn("error", app.apply_settings({"care_break": 45}, session, None, env))
+            self.assertTrue(app.apply_settings({"care_break": 90, "care_night": False}, session, None, env)["ok"])
+            self.assertEqual(friday_care.care_settings(), {"welcome": True, "break_minutes": 90, "night": False})
 
 if __name__ == "__main__":
     unittest.main()

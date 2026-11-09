@@ -1012,8 +1012,17 @@ class WebSession:
         self.startup_error = startup_error
         self.speak_enabled = True  # 跟着界面上“朗读回答”开关走
 
-    def ask(self, text: str, source: str = "web", speak: bool = False, prefix: str = "",
-            show_user: bool = True) -> str | None:
+    busy = False  # 正在回答(主动关心这时不插嘴)
+
+    def ask(self, *args, **kwargs) -> str | None:
+        self.busy = True
+        try:
+            return self._ask(*args, **kwargs)
+        finally:
+            self.busy = False
+
+    def _ask(self, text: str, source: str = "web", speak: bool = False, prefix: str = "",
+             show_user: bool = True) -> str | None:
         hub = self.hub
         if show_user:
             hub.broadcast({"type": "user", "text": text, "source": source})
@@ -1079,6 +1088,7 @@ class WebSession:
     backup = None  # Google Drive 备份(friday_backup.DriveBackup)
     hotkey = None  # 全局快捷键(friday_desktop.GlobalHotkey)
     wake = None  # 喊“星期五”唤醒(friday_wake.WakeWord)
+    care = None  # 主动关心(friday_care.Care)
     cloud = None  # 云端后备的连接(friday_cloud.CloudClient)
     start_cloud = None  # 用配对码连接云端
     events = None  # 主循环的事件队列(还原后要重启)
@@ -1265,6 +1275,14 @@ def wake_state(session) -> dict | None:
             "sensitivity": friday_wake.wake_sensitivity()}
 
 
+def care_state(session) -> dict | None:
+    import friday_care
+
+    if getattr(session, "care", None) is None or os.name != "nt":
+        return None
+    return friday_care.care_settings()
+
+
 def cloud_state(session) -> dict | None:
     if getattr(session, "start_cloud", None) is None:
         return None
@@ -1303,6 +1321,7 @@ def settings_state(session, meter=None) -> dict:
         "budget": session.budget.state() if getattr(session, "budget", None) else None,
         "hotkey": hotkey_state(session),
         "cloud": cloud_state(session),
+        "care": care_state(session),
         "wake": wake_state(session),
         "backup": {"enabled": os.environ.get("FRIDAY_BACKUP", "on") != "off",
                    "last": session.backup.last_backup()} if getattr(session, "backup", None) else None,
@@ -1401,6 +1420,24 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         done.append("已保存 Admin Key,正在读取 Console 的花费" if key else "已删除 Admin Key,改回星期五自己估算")
     if refresh_console and budget is not None:
         threading.Thread(target=budget.refresh_console, daemon=True).start()
+    for key, env_name, label in (("care_welcome", "FRIDAY_CARE_WELCOME", "离开回来打招呼"),
+                                 ("care_night", "FRIDAY_CARE_NIGHT", "太晚提醒睡觉")):
+        if key in payload:
+            on = bool(payload[key])
+            save_env_value(env, env_name, "on" if on else "off")
+            os.environ[env_name] = "on" if on else "off"
+            done.append(("已开启" if on else "已关闭") + label)
+    if "care_break" in payload:
+        try:
+            minutes = int(payload["care_break"])
+        except (TypeError, ValueError):
+            return {"error": "休息提醒的时间不对"}
+        if minutes not in (0, 60, 90, 120, 180):
+            return {"error": "休息提醒的时间不对"}
+        save_env_value(env, "FRIDAY_CARE_BREAK", str(minutes))
+        os.environ["FRIDAY_CARE_BREAK"] = str(minutes)
+        done.append(f"连续用电脑 {minutes // 60 if minutes % 60 == 0 else minutes / 60} 小时提醒休息" if minutes
+                    else "已关闭休息提醒")
     if "cloud_code" in payload:
         import friday_cloud
 
@@ -1538,6 +1575,46 @@ def _quietly(call: Callable[[], object]) -> None:
         call()
     except Exception:
         pass
+
+
+def start_care(session, ctx, hub, toolbox: Toolbox, voice_module):
+    """主动关心:离开回来打招呼、用太久提醒休息、太晚提醒睡觉(固定的话,不花钱)。"""
+    import friday_care
+
+    speaker = {}
+
+    def say_without_window(text: str) -> None:
+        try:
+            if "speaker" not in speaker:
+                speaker["speaker"] = voice_module.make_speaker()
+            speaker["speaker"].speak(text)
+        except Exception:
+            pass
+
+    def say(text: str) -> bool:
+        if session.busy or ctx.activity.get("listening") or ctx.activity.get("speaking"):
+            return False  # 正忙:下次再说
+        hub.broadcast({"type": "reminder", "text": "💬 " + text})
+        if hub.connected:
+            if session.speak_enabled:
+                session.speak(text)
+        else:  # 窗口关着(比如在打游戏):直接读出来,不弹窗打扰
+            threading.Thread(target=say_without_window, args=(text,), daemon=True).start()
+        return True
+
+    def todays_reminders() -> list[str]:
+        if toolbox.reminders is None:
+            return []
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        return [f"{r['time'][11:]} {r['message']}" for r in toolbox.reminders.upcoming()
+                if r["time"][:10] == now[:10] and r["time"] >= now][:3]
+
+    care = friday_care.Care(
+        say, name=lambda: os.environ.get("FRIDAY_CALL_ME") or session.call_me or DEFAULT_CALL_ME,
+        reminders=todays_reminders)
+    care.start()
+    session.care = care
+    return care
 
 
 def start_cloud_client(code: str, folder: Path, on_pull, on_status):
@@ -1815,6 +1892,7 @@ def run_web(args) -> None:
     )
     if os.environ.get("FRIDAY_WAKE", "off") == "on":
         session.wake.start()
+    start_care(session, ctx, hub, toolbox, voice_module)
     try:
         web_loop(session, events, voice_module.transcribe_audio)
     finally:

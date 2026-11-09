@@ -413,6 +413,13 @@ function fillSettings() {
       : "没有 Admin Key 时用星期五自己的估算。Admin Key 只在你的电脑上保存,只用来读花费报表。";
     $("consoleNote").className = "set-note" + (b.console_error ? " warn" : "");
   }
+  const care = s.care;
+  $("careGroup").hidden = !care;
+  if (care) {
+    $("setCareWelcome").checked = care.welcome;
+    $("setCareBreak").value = String(care.break_minutes);
+    $("setCareNight").checked = care.night;
+  }
   const c = s.cloud;
   $("cloudGroup").hidden = !c;
   if (c) {
@@ -491,6 +498,9 @@ $("saveWakeCustom").onclick = async () => {
 $("setWakeCustom").onkeydown = (e) => { if (e.key === "Enter") $("saveWakeCustom").click(); };
 $("setWakeSensitivity").onchange = (e) => saveSetting({ wake_sensitivity: e.target.value });
 $("setHotkey").onchange = (e) => saveSetting({ hotkey: e.target.value });
+$("setCareWelcome").onchange = (e) => saveSetting({ care_welcome: e.target.checked });
+$("setCareBreak").onchange = (e) => saveSetting({ care_break: Number(e.target.value) });
+$("setCareNight").onchange = (e) => saveSetting({ care_night: e.target.checked });
 $("saveCloud").onclick = async () => {
   const code = $("setCloud").value.trim();
   if (!code) { toast("先把配对码贴进来"); return; }
