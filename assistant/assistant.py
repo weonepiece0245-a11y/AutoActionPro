@@ -420,6 +420,19 @@ class Assistant:
             self.toolbox.archive.add(question, answer, self.last_ask)
         return answer
 
+    def remember_local(self, question: str, answer: str) -> None:
+        """电脑上直接办好的简单指令:也记进对话(下次问 Claude 时它知道刚才做了什么),不花钱。"""
+        if self.messages and self.messages[-1]["role"] == "user":
+            return  # 正在回答中(不该发生):不打乱对话
+        self._slim_if_idle()
+        self.messages.append({"role": "user", "content": question})
+        self.messages.append({"role": "assistant", "content": answer})
+        self.last_ask = self.clock()
+        self.exchanges = (self.exchanges + [{"q": question, "a": answer, "t": self.last_ask}])[-KEEP_EXCHANGES:]
+        self._save_exchanges()
+        if self.toolbox is not None and self.toolbox.archive is not None:
+            self.toolbox.archive.add(question, answer, self.last_ask)
+
     def _run(self, on_text, on_status) -> str:
         texts: list[str] = []
         for _ in range(MAX_STEPS):
@@ -1059,6 +1072,20 @@ class WebSession:
         hub = self.hub
         if show_user:
             hub.broadcast({"type": "user", "text": text, "source": source})
+        quick = self._quick_reply(text) if source != "task" and not prefix else None
+        if quick:
+            hub.broadcast({"type": "status", "text": "⚡ 电脑上直接办好了,没有问 Claude(不花钱)"})
+            hub.broadcast({"type": "delta", "text": quick})
+            stream = self._new_stream() if speak else None
+            if stream is not None:
+                stream.feed(quick)
+            hub.broadcast({"type": "done", "text": quick, "source": source,
+                           "turn": self._turn if stream is not None else None})
+            if stream is not None:
+                stream.finish()
+            if self.assistant is not None:
+                self.assistant.remember_local(text, quick)
+            return quick
         if self.assistant is None:
             hub.broadcast({"type": "error", "text": self.startup_error or "星期五还没准备好"})
             return None
@@ -1090,6 +1117,16 @@ class WebSession:
         if stream is not None:
             stream.finish()
         return result
+
+    quick = None  # 简单指令(friday_quick.QuickCommands),run_web 设置
+
+    def _quick_reply(self, text: str) -> str | None:
+        if self.quick is None:
+            return None
+        try:
+            return self.quick.handle(text)
+        except Exception:
+            return None
 
     def speak(self, text: str) -> None:
         stream = self._new_stream()
@@ -1225,6 +1262,12 @@ def web_discord(message, session: WebSession, transcribe=None) -> None:
     message.reply, message.reply_voice = reply, reply_voice
     if session.assistant is None:
         reply(session.startup_error or "星期五还没准备好")
+        return
+    quick = session._quick_reply(message.text) if message.text and getattr(message, "audio", None) is None else None
+    if quick:
+        hub.broadcast({"type": "status", "text": "⚡ 电脑上直接办好了,没有问 Claude(不花钱)"})
+        session.assistant.remember_local("[来自手机 Discord]" + message.text, quick)
+        reply(quick)
         return
     hub.broadcast({"type": "status", "text": "正在回答手机 Discord 的消息……"})
     handle_discord(message, session.assistant, session.persona, transcribe)
@@ -1425,6 +1468,7 @@ def settings_state(session, meter=None) -> dict:
         "care": care_state(session),
         "push": push_mode() if getattr(session, "discord", None) is not None else None,
         "remind_calendar": remind_calendar_state(session),
+        "quick": __import__("friday_quick").quick_enabled() if getattr(session, "quick", None) is not None else None,
         "wake": wake_state(session),
         "backup": {"enabled": os.environ.get("FRIDAY_BACKUP", "on") != "off",
                    "last": session.backup.last_backup()} if getattr(session, "backup", None) else None,
@@ -1530,6 +1574,11 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
             save_env_value(env, env_name, "on" if on else "off")
             os.environ[env_name] = "on" if on else "off"
             done.append(("已开启" if on else "已关闭") + label)
+    if "quick" in payload:
+        on = bool(payload["quick"])
+        save_env_value(env, "FRIDAY_QUICK", "on" if on else "off")
+        os.environ["FRIDAY_QUICK"] = "on" if on else "off"
+        done.append("简单指令在电脑上直接办,不花钱" if on else "所有话都交给 Claude 回答")
     if "remind_calendar" in payload:
         on = bool(payload["remind_calendar"])
         save_env_value(env, "FRIDAY_REMIND_CALENDAR", "on" if on else "off")
@@ -2104,6 +2153,9 @@ def run_web(args) -> None:
         session.wake.start()
     start_care(session, ctx, hub, toolbox, voice_module)
     start_month_end_summary(session, toolbox)
+    import friday_quick
+
+    session.quick = friday_quick.QuickCommands(toolbox)
     try:
         web_loop(session, events, voice_module.transcribe_audio)
     finally:

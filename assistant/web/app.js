@@ -453,6 +453,8 @@ function fillSettings() {
       : "没有 Admin Key 时用星期五自己的估算。Admin Key 只在你的电脑上保存,只用来读花费报表。";
     $("consoleNote").className = "set-note" + (b.console_error ? " warn" : "");
   }
+  $("quickRow").hidden = s.quick === null || s.quick === undefined;
+  $("setQuick").checked = !!s.quick;
   $("calendarRow").hidden = s.remind_calendar === null || s.remind_calendar === undefined;
   $("setRemindCalendar").checked = !!s.remind_calendar;
   $("pushRow").hidden = !s.push;
@@ -551,6 +553,7 @@ $("setPush").onchange = (e) => saveSetting({ push: e.target.value });
 $("setCareWelcome").onchange = (e) => saveSetting({ care_welcome: e.target.checked });
 $("setCareBreak").onchange = (e) => saveSetting({ care_break: Number(e.target.value) });
 $("setCareNight").onchange = (e) => saveSetting({ care_night: e.target.checked });
+$("setQuick").onchange = (e) => saveSetting({ quick: e.target.checked });
 $("setRemindCalendar").onchange = (e) => saveSetting({ remind_calendar: e.target.checked });
 $("setGameQuiet").onchange = (e) => saveSetting({ game_quiet: e.target.checked });
 $("saveGameClose").onclick = () => saveSetting({ game_close: $("setGameClose").value });

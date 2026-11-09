@@ -89,6 +89,7 @@ import friday_cloud  # noqa: E402
 import friday_care  # noqa: E402
 import friday_pc  # noqa: E402
 import friday_ledger  # noqa: E402
+import friday_quick  # noqa: E402
 import friday_weather  # noqa: E402
 import voice  # noqa: E402  assistant.py 已把所在目录加入 sys.path
 
@@ -5686,6 +5687,75 @@ class LedgerTest(TempDirTest):
         self.assertIn("月底记账汇总:2026 年 11 月共花 RM 15.00", text)
         self.assertIsNone(app.month_end_summary(session, toolbox))  # 只说一次
         self.assertEqual(session.hub.history[-1]["type"], "reminder")
+
+
+class QuickCommandsTest(TempDirTest):
+    def make(self):
+        self.calls = []
+        test = self
+
+        class FakeComputer:
+            available = True
+
+            def do(self, action, value=""):
+                test.calls.append((action, value))
+                if action == "open_app":
+                    return "已打开 Spotify" if value.lower() == "spotify" else "开始菜单里没有找到"
+                return "ok"
+
+        self.ledger = friday_ledger.Ledger(os.path.join(self.tmp, "l.json"),
+                                           clock=lambda: datetime.datetime(2026, 11, 10, 14, 5))
+        toolbox = SimpleNamespace(computer=FakeComputer(), ledger=self.ledger)
+        return friday_quick.QuickCommands(toolbox, clock=lambda: datetime.datetime(2026, 11, 10, 14, 5))
+
+    def test_handles_simple_things_locally(self):
+        quick = self.make()
+        self.assertEqual(quick.handle("现在几点？"), "现在是 14:05。")
+        self.assertEqual(quick.handle("今天星期几"), "今天是 2026 年 11 月 10 日,星期二。")
+        self.assertEqual(quick.handle("星期五,帮我把音量调到30"), "音量调到大约 30% 了。")
+        self.assertEqual(self.calls[-2:], [("volume_down", "100"), ("volume_up", "30")])
+        self.assertEqual(quick.handle("下一首"), "已切到下一首。")
+        self.assertEqual(quick.handle("锁屏"), "已锁屏。")
+        self.assertEqual(quick.handle("打开Spotify"), "已打开 Spotify。")
+        self.assertIn("已记账 #1:2026-11-10 咖啡 RM 8.50(餐饮)", quick.handle("咖啡 8.5 令吉"))
+        self.assertIn("(交通)", quick.handle("Grab 12 块钱"))
+        self.assertIn("已删掉 #2", quick.handle("删掉刚才那笔"))
+
+    def test_leaves_everything_else_to_claude(self):
+        quick = self.make()
+        for text in ("打开微信", "打开那个文件", "继续", "这个月花了多少", "我今天花了15块", "昨天晚饭28块",
+                     "帮我提醒我15分钟后喝水", "查一下15块的东西", "音量多少", "帮我写一封很长的邮件给老板说明下周请假"):
+            self.assertIsNone(quick.handle(text), text)
+        self.assertEqual(self.ledger.entries, [])
+        with mock.patch.dict(os.environ, {"FRIDAY_QUICK": "off"}):
+            self.assertIsNone(quick.handle("几点了"))
+
+    def test_web_session_answers_without_claude(self):
+        quick = self.make()
+
+        class NoClaude:
+            def __init__(self):
+                self.local = []
+
+            def ask(self, *a, **k):
+                raise AssertionError("不该问 Claude")
+
+            def remember_local(self, q, a):
+                self.local.append((q, a))
+
+        session = app.WebSession(NoClaude(), app.default_persona(), friday_web.Hub())
+        session.quick = quick
+        self.assertEqual(session.ask("几点了"), "现在是 14:05。")
+        self.assertEqual(session.assistant.local, [("几点了", "现在是 14:05。")])
+        types_seen = [e["type"] for e in session.hub.history]
+        self.assertIn("done", types_seen)
+        self.assertNotIn("thinking", types_seen)
+
+    def test_local_answers_join_the_conversation(self):
+        assistant = app.Assistant(client=SimpleNamespace())
+        assistant.remember_local("几点了", "现在是 14:05。")
+        self.assertEqual(assistant.messages[-2:], [{"role": "user", "content": "几点了"},
+                                                   {"role": "assistant", "content": "现在是 14:05。"}])
 
 
 if __name__ == "__main__":
