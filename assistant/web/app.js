@@ -119,6 +119,7 @@ function finishAnswer(text, source) {
   current.classList.remove("typing");
   current.querySelector(".text").textContent = text;
   delete current.dataset.empty;
+  if (text && (!source || source === "web" || source === "voice")) addChips(current);
   current = null;
   scrollDown();
 }
@@ -153,6 +154,7 @@ async function greet() {
 function handle(ev) {
   switch (ev.type) {
     case "user":
+      removeChips();
       addMessage("user", ev.text, ev.source);
       break;
     case "thinking":
@@ -268,18 +270,46 @@ $("setSpeak").onchange = (e) => setSpeak(e.target.checked);
 $("setFollowUp").onchange = (e) => { followUpOn = e.target.checked; savePrefs("friday-followup", followUpOn); };
 $("setBarge").onchange = (e) => { bargeOn = e.target.checked; savePrefs("friday-barge", bargeOn); if (!bargeOn) stopBargeWatch(); };
 
-$("form").onsubmit = async (e) => {
-  e.preventDefault();
-  const text = $("input").value.trim();
+async function sendText(text) {
   if (!text || busy) return;
   ensureAudio();
   stopSpeaking();
   followUpTurn = null;  // 打字问的,不用接着听
+  removeChips();
   beep(660, 0.06);
-  $("input").value = "";
   const r = await api("/api/ask", { text, speak: speakOn });
   if (r.error) toast(r.error);
+}
+$("form").onsubmit = (e) => {
+  e.preventDefault();
+  const text = $("input").value.trim();
+  if (!text || busy) return;
+  $("input").value = "";
+  sendText(text);
 };
+
+// ---------- 回答下面的快捷按钮(点了才算一次提问) ----------
+const CHIPS = [
+  ["再详细一点", "再详细一点"],
+  ["简单一点", "说简单一点"],
+  ["换个说法", "换个说法再讲一次"],
+  ["记住这个", "把刚才的重点记住"],
+];
+function removeChips() { log.querySelectorAll(".chips").forEach((el) => el.remove()); }
+function addChips(el) {
+  removeChips();
+  const row = document.createElement("div");
+  row.className = "chips";
+  for (const [label, text] of CHIPS) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "chip";
+    chip.textContent = label;
+    chip.onclick = () => sendText(text);
+    row.append(chip);
+  }
+  el.after(row);
+}
 // ---------- 面板:点标题折叠;右上角按钮隐藏两边(都记在本机) ----------
 function loadPrefs(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }

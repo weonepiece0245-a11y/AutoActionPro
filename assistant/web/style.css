@@ -178,6 +178,9 @@ body.focus .console { width: min(960px, 100%); justify-self: center; }
 .msg .who { display: block; font-family: var(--display); font-size: 10px; letter-spacing: .3em; margin-bottom: 4px; opacity: .8; }
 .msg.user { align-self: flex-end; background: linear-gradient(135deg, rgba(59,130,246,.28), rgba(34,211,238,.14)); border: 1px solid rgba(59,130,246,.5); }
 .msg.user .who { color: #93c5fd; text-align: right; }
+.chips { align-self: flex-start; display: flex; flex-wrap: wrap; gap: 6px; margin: -2px 0 4px 4px; animation: rise .35s ease-out; }
+.chip { font: inherit; font-size: 12px; color: var(--accent); background: rgba(34,211,238,.06); border: 1px solid var(--cyan-line); border-radius: 999px; padding: 4px 12px; cursor: pointer; transition: all .2s; }
+.chip:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); color: #fff; }
 .msg.friday { align-self: flex-start; background: rgba(6,24,44,.72); border: 1px solid var(--cyan-line); box-shadow: 0 0 22px rgba(34,211,238,.08); backdrop-filter: blur(6px); }
 .msg.friday .who { color: var(--accent); }
 .msg.friday.typing .text::after { content: "▍"; color: var(--accent); animation: blink .8s steps(1) infinite; margin-left: 2px; }
