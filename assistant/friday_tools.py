@@ -610,6 +610,30 @@ YOUTUBE_TOOL = {
     },
 }
 
+EXPENSE_TOOL = {
+    "name": "expense",
+    "description": (
+        "记账(马币 RM)。add 记一笔(“午饭 15 块”→ item=午饭 amount=15 category=餐饮;别的货币先大约换成马币,"
+        "在 note 写原来的金额);list 看某个月的明细;summary 某个月的汇总(总数、分类、和上月比);"
+        "delete 删一笔(id 是编号,last 表示刚记的那笔,记错时用)。"
+        "登录了 Google 时会自动同步到 Google 表格“星期五记账”。记完简短说一句就好。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["add", "list", "summary", "delete"]},
+            "item": {"type": "string", "description": "add:花在什么上,如 午饭、Grab、电费"},
+            "amount": {"type": "number", "description": "add:金额(马币)"},
+            "category": {"type": "string", "enum": ["餐饮", "交通", "购物", "娱乐", "账单", "医疗", "其他"]},
+            "date": {"type": "string", "description": "add:哪天花的,YYYY-MM-DD,不填是今天(“昨天的晚饭”要填昨天)"},
+            "note": {"type": "string", "description": "add:备注(可选)"},
+            "month": {"type": "string", "description": "list / summary:YYYY-MM,不填是这个月"},
+            "id": {"type": "string", "description": "delete:编号,或 last"},
+        },
+        "required": ["action"],
+    },
+}
+
 GOOGLE_EXTRA_TOOLS = [GOOGLE_TASKS_TOOL, CONTACTS_TOOL, DRIVE_TOOL, DOCS_TOOL, SHEETS_TOOL, YOUTUBE_TOOL]
 
 # 请求是流式的,让较长的工具参数(例如文件内容)边生成边传输;参数在执行前会自己校验
@@ -641,6 +665,7 @@ class Toolbox:
         google: GoogleTools | None = None,
         confirm: Approver | None = None,
         local_tools: bool = True,
+        ledger=None,
     ) -> None:
         self.memory = memory
         self.approve = approve
@@ -651,6 +676,11 @@ class Toolbox:
         self.computer = computer
         self.screen = screen
         self.google = google
+        self.ledger = ledger  # 记账(friday_ledger.Ledger)
+        if ledger is not None and google is not None:
+            from friday_ledger import sheet_sync
+
+            ledger.sync = sheet_sync(lambda: google.account.service("sheets").spreadsheets(), ledger)
         # 云端模式下为 False:不提供执行命令、读写文件(服务器上的文件对用户没有意义)
         self.local_tools = local_tools
         # confirm:每次都必须问用户的确认(发邮件、发邀请),不受“本次都允许”影响
@@ -680,6 +710,7 @@ class Toolbox:
             "youtube": self._google("youtube", "看了 YouTube"),
             "search_history": self._search_history,
             "weather": self._weather,
+            "expense": self._expense,
         }
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
 
@@ -695,6 +726,8 @@ class Toolbox:
             tools = tools + [HISTORY_TOOL]
         if self.reminders is not None:
             tools = tools + [REMINDER_TOOL]
+        if self.ledger is not None:
+            tools = tools + [EXPENSE_TOOL]
         if self.todos is not None and self.google is None:  # 接了 Google 就用 Google Tasks 当待办清单
             tools = tools + [TODO_TOOL]
         if self.computer is not None and self.computer.available:
@@ -767,6 +800,24 @@ class Toolbox:
             return str(e), True
         on_status("改了记忆:" + message.split(":", 1)[1].split("(原来是")[0])
         return message, False
+
+    def _expense(self, args, on_status):
+        action = args.get("action")
+        ledger = self.ledger
+        try:
+            if action == "add":
+                on_status(f"记账:{args.get('item', '')} {args.get('amount', '')}")
+                return ledger.add(args.get("item", ""), args.get("amount"), args.get("category") or "其他",
+                                  args.get("date") or "", args.get("note") or ""), False
+            if action == "list":
+                return ledger.list(args.get("month") or ""), False
+            if action == "summary":
+                return ledger.summary(args.get("month") or ""), False
+            if action == "delete":
+                return ledger.delete(args.get("id") or "last"), False
+        except ValueError as e:
+            return str(e), True
+        return f"不支持的 action:{action}", True
 
     def _weather(self, args, on_status):
         import friday_weather

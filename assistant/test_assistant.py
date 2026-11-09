@@ -88,6 +88,7 @@ import friday_wake  # noqa: E402
 import friday_cloud  # noqa: E402
 import friday_care  # noqa: E402
 import friday_pc  # noqa: E402
+import friday_ledger  # noqa: E402
 import friday_weather  # noqa: E402
 import voice  # noqa: E402  assistant.py 已把所在目录加入 sys.path
 
@@ -5545,6 +5546,117 @@ class GameModeTest(unittest.TestCase):
         self.assertEqual((popups, spoken), ([], []))  # 不弹窗、不读
         self.assertEqual(toasts, ["⏰ 21:00 倒垃圾"])
         self.assertEqual(care.held, ["21:00 倒垃圾"])
+
+
+class LedgerTest(TempDirTest):
+    def make(self, when=datetime.datetime(2026, 11, 10, 13, 0)):
+        self.now = [when]
+        return friday_ledger.Ledger(os.path.join(self.tmp, "ledger.json"), clock=lambda: self.now[0])
+
+    def test_add_list_delete(self):
+        ledger = self.make()
+        self.assertIn("已记账 #1:2026-11-10 午饭 RM 15.00(餐饮)", ledger.add("午饭", 15, "餐饮"))
+        self.assertIn("11 月到现在共花 RM 27.50", ledger.add("Grab", "12.5", "交通"))
+        ledger.add("晚饭", 20, "奇怪的分类", date="2026-11-09")
+        with self.assertRaises(ValueError):
+            ledger.add("明天的", 5, date="2026-11-11")
+        with self.assertRaises(ValueError):
+            ledger.add("午饭", -3)
+        again = friday_ledger.Ledger(os.path.join(self.tmp, "ledger.json"), clock=lambda: self.now[0])
+        listing = again.list()
+        self.assertIn("共 RM 47.50", listing)
+        self.assertLess(listing.index("晚饭"), listing.index("午饭"))  # 按日期排
+        self.assertIn("(其他)", listing)
+        self.assertIn("已删掉 #3", again.delete("last"))
+        self.assertIn("已删掉 #1", again.delete("#1"))
+        with self.assertRaises(ValueError):
+            again.delete(99)
+        self.assertEqual(again.total("2026-11"), 12.5)
+
+    def test_summary_and_month_end(self):
+        ledger = self.make(datetime.datetime(2026, 10, 31, 20, 0))
+        ledger.add("房租", 900, "账单", date="2026-10-01")
+        ledger.add("午饭", 100, "餐饮")
+        ledger.add("九月的", 800, "购物", date="2026-09-15")
+        self.assertEqual(ledger.due_summary(), "2026-09")  # 上个月没汇总过:先补上
+        ledger.mark_summarized("2026-09")
+        self.assertIsNone(ledger.due_summary())  # 还没到晚上 9 点
+        self.now[0] = datetime.datetime(2026, 10, 31, 21, 5)
+        self.assertEqual(ledger.due_summary(), "2026-10")
+        summary = ledger.summary("2026-10")
+        self.assertIn("2026 年 10 月共花 RM 1,000.00,2 笔", summary)
+        self.assertIn("账单 RM 900.00(90%)", summary)
+        self.assertIn("比上个月多花 RM 200.00", summary)
+        ledger.mark_summarized("2026-10")
+        self.assertIsNone(ledger.due_summary())
+        self.now[0] = datetime.datetime(2026, 12, 2, 8, 0)  # 11 月没记账:不用补
+        self.assertIsNone(ledger.due_summary())
+
+    def test_missed_month_end_is_done_next_month(self):
+        ledger = self.make(datetime.datetime(2026, 11, 20, 12, 0))
+        ledger.add("午饭", 15, "餐饮")
+        self.now[0] = datetime.datetime(2026, 12, 1, 9, 0)
+        self.assertEqual(ledger.due_summary(), "2026-11")
+
+    def test_google_sheet_copy(self):
+        ledger = self.make()
+        calls = []
+
+        class Call:
+            def __init__(self, name, result=None):
+                self.name, self.result = name, result
+
+            def execute(self):
+                return self.result or {}
+
+        class Values:
+            def clear(self, **kw):
+                calls.append(("clear", kw["spreadsheetId"]))
+                return Call("clear")
+
+            def update(self, **kw):
+                calls.append(("update", kw["spreadsheetId"], kw["body"]["values"]))
+                return Call("update")
+
+        class Api:
+            def create(self, **kw):
+                calls.append(("create", kw["body"]["properties"]["title"]))
+                return Call("create", {"spreadsheetId": "sheet123"})
+
+            def values(self):
+                return Values()
+
+        ledger.sync = friday_ledger.sheet_sync(Api, ledger)
+        self.assertIn("已同步到 Google 表格", ledger.add("午饭", 15, "餐饮"))
+        ledger.add("咖啡", 8, "餐饮")
+        self.assertEqual([c[0] for c in calls], ["create", "clear", "update", "clear", "update"])
+        self.assertEqual(calls[-1][2][0], friday_ledger.HEADER)
+        self.assertEqual(calls[-1][2][2], [2, "2026-11-10", "咖啡", "餐饮", 8.0, ""])
+        self.assertEqual(friday_ledger.Ledger(os.path.join(self.tmp, "ledger.json")).sheet_id, "sheet123")
+
+        def broken(rows):
+            raise RuntimeError("没网")
+
+        ledger.sync = broken
+        self.assertIn("同步到 Google 表格失败", ledger.add("水", 2))
+        self.assertEqual(len(ledger.entries), 3)  # 电脑上照样记好了
+
+    def test_tool_and_month_end_message(self):
+        toolbox = self.make_toolbox()
+        toolbox.ledger = self.make(datetime.datetime(2026, 11, 30, 21, 30))
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+        self.assertIn("expense", [t["name"] for t in toolbox.definitions()])
+        result = toolbox.run(tool_use("expense", {"action": "add", "item": "午饭", "amount": 15, "category": "餐饮"}),
+                             lambda s: None)
+        self.assertIn("已记账 #1", result["content"])
+        self.assertTrue(toolbox.run(tool_use("expense", {"action": "add", "item": "x", "amount": 0}),
+                                    lambda s: None)["is_error"])
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.speak_enabled = False
+        text = app.month_end_summary(session, toolbox)
+        self.assertIn("月底记账汇总:2026 年 11 月共花 RM 15.00", text)
+        self.assertIsNone(app.month_end_summary(session, toolbox))  # 只说一次
+        self.assertEqual(session.hub.history[-1]["type"], "reminder")
 
 
 if __name__ == "__main__":

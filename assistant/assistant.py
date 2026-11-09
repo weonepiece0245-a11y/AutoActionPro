@@ -37,6 +37,7 @@ from friday_daily import (  # noqa: E402
 )
 from friday_discord import DiscordBridge, read_token, set_discord_enabled  # noqa: E402
 from friday_google import GoogleAccount, GoogleTools  # noqa: E402
+from friday_ledger import Ledger  # noqa: E402
 from friday_pc import Computer, ScreenControl, drain_console_input  # noqa: E402
 from friday_budget import Budget, BudgetExceeded  # noqa: E402
 from friday_router import SONNET, UPGRADE_TOOL, Router  # noqa: E402
@@ -128,7 +129,7 @@ FRIDAY_PROMPT = """你是“星期五”,{call_me}的私人 AI 助手。
 - {call_me}让你看屏幕时用 screen;必须在界面上点来点去才能办的事,用 control 控制鼠标键盘,
   并严格遵守 control 工具说明里的规则。
 - 用 reminder 设提醒和定时任务(比如“半小时后提醒我喝水”“每天早上 9 点给我做个早报”),
-  用 {todo_tool} 管理待办清单。提醒只在星期五开着时才会响,第一次设提醒时顺便告诉{call_me}这一点。
+  用 {todo_tool} 管理待办清单。{call_me}说花了多少钱(“午饭 15 块”“Grab 12 块”)就用 expense 记账(马币),记完简短说一句。提醒只在星期五开着时才会响,第一次设提醒时顺便告诉{call_me}这一点。
 - 消息以“[定时任务]”开头时,是之前设好的任务到点了,{call_me}可能不在电脑前:
   直接把事情做完,结果说得简短清楚;需要确认的操作不能做,留到{call_me}回来再说。
 - 能直接办到的事就直接办,办完简要汇报结果;做不到的事坦白说,并给出替代方案。
@@ -1764,6 +1765,35 @@ def start_care(session, ctx, hub, toolbox: Toolbox, voice_module):
     return care
 
 
+def month_end_summary(session, toolbox: Toolbox) -> str | None:
+    """该做月底记账汇总时:显示在窗口、推到手机、读出来(打游戏时先记着)。返回说了什么。"""
+    ledger = getattr(toolbox, "ledger", None)
+    month = ledger.due_summary() if ledger is not None else None
+    if not month:
+        return None
+    call_me = os.environ.get("FRIDAY_CALL_ME") or session.call_me or DEFAULT_CALL_ME
+    text = f"{call_me},月底记账汇总:{ledger.summary(month)}"
+    ledger.mark_summarized(month)
+    session.hub.broadcast({"type": "reminder", "text": "💰 " + text})
+    push_to_phone(session, "💰 " + text)
+    care = getattr(session, "care", None)
+    if care is not None and care.quiet_now():
+        care.hold(text, short=f"{int(month[5:])} 月记账汇总在窗口里")
+    elif session.speak_enabled and session.hub.connected and not session.busy:
+        session.speak(text)
+    return text
+
+
+def start_month_end_summary(session, toolbox: Toolbox, interval: float = 600) -> None:
+    def loop() -> None:
+        time.sleep(60)  # 刚开机先让别的事做完
+        while True:
+            _quietly(lambda: month_end_summary(session, toolbox))
+            time.sleep(interval)
+
+    threading.Thread(target=loop, daemon=True, name="friday-ledger").start()
+
+
 def start_cloud_client(code: str, folder: Path, on_pull, on_status):
     """连上云端的星期五(配对码不对会抛 ValueError)。"""
     import friday_cloud
@@ -1820,6 +1850,9 @@ def web_state(session: WebSession, toolbox: Toolbox, discord, cache: dict) -> di
                            f"约 US$ {remaining:.2f}" if remaining > 0 else "可能用完了"))
     elif meter is not None:
         system.append(("本月花费", True, f"约 RM {meter.month_myr():.2f}"))
+    ledger = getattr(toolbox, "ledger", None)
+    if ledger is not None and ledger.entries:
+        system.append(("本月记账", True, f"RM {ledger.total(datetime.datetime.now().strftime('%Y-%m')):,.2f}"))
     cloud = getattr(session, "cloud", None)
     if cloud is not None:
         system.append(("云端", True if cloud.connected else "warn", "待命" if cloud.connected else "未连上"))
@@ -1882,7 +1915,8 @@ def run_web(args) -> None:
     toolbox = Toolbox(
         Memory(memory_file), approver, workdir=os.path.expanduser(args.workdir) if args.workdir else None,
         web=not args.no_web, reminders=Reminders(os.path.join(data_dir, "friday_reminders.json")),
-        todos=Todos(os.path.join(data_dir, "friday_todos.json")), computer=computer, screen=ScreenControl(),
+        todos=Todos(os.path.join(data_dir, "friday_todos.json")),
+        ledger=Ledger(os.path.join(data_dir, "friday_ledger.json")), computer=computer, screen=ScreenControl(),
         google=google, confirm=approver.confirm,
     )
     persona = friday_persona(call_me, toolbox, voice=False)
@@ -2043,6 +2077,7 @@ def run_web(args) -> None:
     if os.environ.get("FRIDAY_WAKE", "off") == "on":
         session.wake.start()
     start_care(session, ctx, hub, toolbox, voice_module)
+    start_month_end_summary(session, toolbox)
     try:
         web_loop(session, events, voice_module.transcribe_audio)
     finally:
@@ -2087,6 +2122,7 @@ def run_server(args) -> None:
         web=not args.no_web,
         reminders=Reminders(os.path.join(data_dir, "friday_reminders.json")),
         todos=Todos(os.path.join(data_dir, "friday_todos.json")),
+        ledger=Ledger(os.path.join(data_dir, "friday_ledger.json")),
         google=google,
         confirm=approver.confirm,
         local_tools=False,
@@ -2263,6 +2299,7 @@ def main(argv: list[str] | None = None) -> None:
             web=not args.no_web,
             reminders=Reminders(os.path.join(data_dir, "friday_reminders.json")),
             todos=Todos(os.path.join(data_dir, "friday_todos.json")),
+            ledger=Ledger(os.path.join(data_dir, "friday_ledger.json")),
             computer=computer,
             screen=ScreenControl(),
             google=google,

@@ -25,6 +25,7 @@ __pycache__/
 assistant/friday_memory.json*
 assistant/friday_reminders.json*
 assistant/friday_todos.json*
+assistant/friday_ledger.json*
 # Google 授权文件(含密钥,绝对不能提交)
 assistant/credentials.json
 assistant/google_token.json
