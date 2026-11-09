@@ -247,6 +247,24 @@ CLIENT_TOOLS = [
     },
 ]
 
+WEATHER_TOOL = {
+    "name": "weather",
+    "description": (
+        "查天气(Open-Meteo 的实时预报,按当地时区):现在的天气、接下来逐小时的天气和降雨概率、每天的最高最低温。"
+        "用户问天气、会不会下雨、要不要带伞、穿什么时用它,比上网搜准。"
+        "location 不填就是吉隆坡;可以填城市名(中文或英文)。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "location": {"type": "string", "description": "城市,例如“吉隆坡”“槟城”“Tokyo”;不填就是吉隆坡"},
+            "days": {"type": "integer", "description": "要几天的每日预报(1~7),默认 1"},
+            "hours": {"type": "integer", "description": "从现在起要几个小时的逐小时预报(1~48),默认 12"},
+        },
+        "required": [],
+    },
+}
+
 HISTORY_TOOL = {
     "name": "search_history",
     "description": (
@@ -565,6 +583,7 @@ class Toolbox:
         self.confirm = confirm or approve
         self.unattended = False  # 定时任务执行期间为 True:需要确认的操作一律不做
         self.archive: ConversationArchive | None = None  # 聊天记录档案,attach_archive() 设置
+        self.weather_fetch = None  # 测试时换成假的天气服务
         self._handlers = {
             "remember": self._remember,
             "forget": self._forget,
@@ -585,6 +604,7 @@ class Toolbox:
             "sheets": self._google("sheets", "用了 Google 表格"),
             "youtube": self._google("youtube", "看了 YouTube"),
             "search_history": self._search_history,
+            "weather": self._weather,
         }
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
 
@@ -595,7 +615,7 @@ class Toolbox:
     def definitions(self) -> list[dict]:
         client_tools = CLIENT_TOOLS if self.local_tools else [
             t for t in CLIENT_TOOLS if t["name"] not in ("run_command", "read_file", "write_file")]
-        tools = (SERVER_TOOLS if self.web else []) + client_tools
+        tools = (SERVER_TOOLS if self.web else []) + client_tools + [WEATHER_TOOL]
         if self.archive is not None:
             tools = tools + [HISTORY_TOOL]
         if self.reminders is not None:
@@ -664,6 +684,23 @@ class Toolbox:
         message = self.memory.add(args["fact"])
         on_status(f"记住了:{args['fact']}")
         return message, False
+
+    def _weather(self, args, on_status):
+        import friday_weather
+
+        def number(key, default, low, high):
+            value = args.get(key)
+            return max(low, min(int(value), high)) if isinstance(value, (int, float)) else default
+
+        place = str(args.get("location") or "").strip()
+        on_status(f"查天气:{place or friday_weather.DEFAULT_PLACE}")
+        try:
+            return friday_weather.weather(place, number("days", 1, 1, 7), number("hours", 12, 1, 48),
+                                          fetch=self.weather_fetch or friday_weather.fetch_json), False
+        except ValueError as e:
+            return str(e), True
+        except Exception as e:
+            return f"天气服务暂时连不上({type(e).__name__}),可以改用 web_search 搜一下", True
 
     def _search_history(self, args, on_status):
         days = args.get("days")

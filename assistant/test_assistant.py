@@ -87,6 +87,7 @@ import friday_desktop  # noqa: E402
 import friday_wake  # noqa: E402
 import friday_cloud  # noqa: E402
 import friday_care  # noqa: E402
+import friday_weather  # noqa: E402
 import voice  # noqa: E402  assistant.py 已把所在目录加入 sys.path
 
 
@@ -981,7 +982,7 @@ class ToolboxTest(TempDirTest):
     def test_definitions(self):
         names = [t["name"] for t in self.make_toolbox().definitions()]
         self.assertEqual(
-            names, ["web_search", "web_fetch", "remember", "forget", "run_command", "read_file", "write_file"]
+            names, ["web_search", "web_fetch", "remember", "forget", "run_command", "read_file", "write_file", "weather"]
         )
 
 
@@ -5238,6 +5239,88 @@ class CareTest(unittest.TestCase):
             self.assertIn("error", app.apply_settings({"care_break": 45}, session, None, env))
             self.assertTrue(app.apply_settings({"care_break": 90, "care_night": False}, session, None, env)["ok"])
             self.assertEqual(friday_care.care_settings(), {"welcome": True, "break_minutes": 90, "night": False})
+
+
+def open_meteo_sample(start_hour=0):
+    hours = [f"2026-11-10T{h:02d}:00" for h in range(24)] + [f"2026-11-11T{h:02d}:00" for h in range(24)]
+    return {
+        "timezone": "Asia/Kuala_Lumpur",
+        "current": {"time": "2026-11-10T15:00", "temperature_2m": 31.2, "apparent_temperature": 36.5,
+                    "relative_humidity_2m": 70, "precipitation": 0.0, "weather_code": 2, "wind_speed_10m": 8.3},
+        "hourly": {"time": hours, "temperature_2m": [27 + (i % 6) for i in range(48)],
+                   "precipitation_probability": [i * 2 % 100 for i in range(48)],
+                   "precipitation": [0.0] * 48, "weather_code": [95 if i == 17 else 2 for i in range(48)]},
+        "daily": {"time": ["2026-11-10", "2026-11-11"], "weather_code": [95, 61],
+                  "temperature_2m_max": [33.1, 32.0], "temperature_2m_min": [24.5, 24.0],
+                  "precipitation_probability_max": [80, 60], "precipitation_sum": [12.5, 4.0],
+                  "uv_index_max": [9.1, 8.0], "sunrise": ["2026-11-10T07:05", "2026-11-11T07:05"],
+                  "sunset": ["2026-11-10T19:08", "2026-11-11T19:08"]},
+    }
+
+
+class WeatherTest(unittest.TestCase):
+    def test_kuala_lumpur_without_geocoding(self):
+        urls = []
+        fetch = lambda url: urls.append(url) or open_meteo_sample()
+        text = friday_weather.weather("", days=2, hours=3, fetch=fetch)
+        self.assertEqual(len(urls), 1)  # 吉隆坡直接用坐标
+        self.assertIn("timezone=Asia%2FKuala_Lumpur", urls[0])
+        self.assertIn("吉隆坡(马来西亚),当地时间 2026-11-10 15:00", text)
+        self.assertIn("现在 局部多云,31.2°C,体感 36.5°C", text)
+        # 逐小时从现在开始(15 点),不是从半夜
+        hourly = [line for line in text.splitlines() if line.startswith("- 11-10 ")]
+        self.assertEqual([line[8:13] for line in hourly], ["15:00", "16:00", "17:00"])
+        self.assertIn("17:00 雷阵雨", text)
+        self.assertIn("11月11日 星期三 小雨 24.0~32.0°C", text)
+
+    def test_other_places_are_looked_up(self):
+        calls = []
+
+        def fetch(url):
+            calls.append(url)
+            if "geocoding" in url:
+                if "George+Town" in url:
+                    return {"results": [{"name": "乔治市", "country": "马来西亚", "latitude": 5.41,
+                                         "longitude": 100.33, "timezone": "Asia/Kuala_Lumpur"}]}
+                return {}
+            return open_meteo_sample()
+
+        text = friday_weather.weather("槟城", fetch=fetch)
+        self.assertIn("乔治市(马来西亚)", text)
+        self.assertIn("latitude=5.41", calls[-1])
+        with self.assertRaises(ValueError):
+            friday_weather.weather("不存在的地方", fetch=lambda url: {})
+
+    def test_tool(self):
+        toolbox = tools.Toolbox(tools.Memory(os.path.join(tempfile.mkdtemp(), "m.json")), lambda a: True)
+        self.assertIn("weather", [t["name"] for t in toolbox.definitions()])
+        toolbox.weather_fetch = lambda url: open_meteo_sample()
+        statuses = []
+        result = toolbox.run(tool_use("weather", {"days": 99, "hours": 2}), statuses.append)
+        self.assertNotIn("is_error", result)
+        self.assertIn("局部多云", result["content"])
+        self.assertEqual(statuses, ["查天气:吉隆坡"])
+
+        def broken(url):
+            raise urllib.error.URLError("offline")
+
+        toolbox.weather_fetch = broken
+        result = toolbox.run(tool_use("weather", {"location": "吉隆坡"}), statuses.append)
+        self.assertTrue(result["is_error"])
+        self.assertIn("web_search", result["content"])
+
+
+class PromptWordingTest(TempDirTest):
+    def test_todo_tool_name_matches_what_exists(self):
+        toolbox = self.make_toolbox()
+        prompt = app.friday_persona(toolbox=toolbox).system()
+        self.assertIn("用 todo 管理待办清单", prompt)
+        toolbox.google = SimpleNamespace(account=None)  # 接了 Google:只有 google_tasks
+        prompt = app.friday_persona(toolbox=toolbox).system()
+        self.assertIn("用 google_tasks 管理待办清单", prompt)
+        self.assertNotIn("用 todo 管理", prompt)
+        self.assertIn("用 weather 工具", prompt.replace("查天气用 weather 工具", "用 weather 工具"))
+        self.assertIn("update_memory", prompt)
 
 if __name__ == "__main__":
     unittest.main()
