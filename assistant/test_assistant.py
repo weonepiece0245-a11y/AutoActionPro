@@ -90,6 +90,7 @@ import friday_care  # noqa: E402
 import friday_pc  # noqa: E402
 import friday_ledger  # noqa: E402
 import friday_quick  # noqa: E402
+import friday_alerts  # noqa: E402
 import friday_weather  # noqa: E402
 import voice  # noqa: E402  assistant.py 已把所在目录加入 sys.path
 
@@ -5756,6 +5757,71 @@ class QuickCommandsTest(TempDirTest):
         assistant.remember_local("几点了", "现在是 14:05。")
         self.assertEqual(assistant.messages[-2:], [{"role": "user", "content": "几点了"},
                                                    {"role": "assistant", "content": "现在是 14:05。"}])
+
+
+class AlertsTest(TempDirTest):
+    def state(self):
+        return friday_alerts.AlertState(os.path.join(self.tmp, "alerts.json"))
+
+    def test_rain_message(self):
+        data = open_meteo_sample()
+        now = datetime.datetime(2026, 11, 10, 8, 0)
+        text = friday_alerts.rain_message(data, now, "老板", "吉隆坡", threshold=30)
+        self.assertEqual(text, "老板,吉隆坡今天 15点到21点局部多云(降雨概率 40%) 可能会下雨,出门记得带伞。")
+        self.assertIsNone(friday_alerts.rain_message(data, now, "老板", "吉隆坡", threshold=90))
+        data["hourly"]["precipitation_probability"][9] = 70  # 9 点和 15 点后:分成两段
+        data["hourly"]["weather_code"][9] = 61
+        text = friday_alerts.rain_message(data, now, "老板", "吉隆坡", threshold=30)
+        self.assertIn("9点到10点小雨(降雨概率 70%)、15点到21点", text)
+
+    def test_rain_checked_once_a_day_after_the_set_time(self):
+        state = self.state()
+        fetch = lambda url: open_meteo_sample()
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.speak_enabled = False
+        with mock.patch.dict(os.environ, {"FRIDAY_RAIN_ALERT": "08:00"}), \
+                mock.patch.object(friday_alerts, "RAIN_THRESHOLD", 30):
+            self.assertIsNone(app.rain_alert(session, state, datetime.datetime(2026, 11, 10, 7, 55), fetch))
+            text = app.rain_alert(session, state, datetime.datetime(2026, 11, 10, 8, 3), fetch)
+            self.assertIn("出门记得带伞", text)
+            self.assertIsNone(app.rain_alert(session, state, datetime.datetime(2026, 11, 10, 9, 0), fetch))
+            self.assertEqual(session.hub.history[-1]["type"], "reminder")
+            reopened = self.state()
+            self.assertFalse(friday_alerts.rain_due(reopened, datetime.datetime(2026, 11, 10, 10, 0)))
+            self.assertFalse(friday_alerts.rain_due(reopened, datetime.datetime(2026, 11, 11, 19, 0)))  # 太晚了
+        with mock.patch.dict(os.environ, {"FRIDAY_RAIN_ALERT": "off"}):
+            self.assertFalse(friday_alerts.rain_due(self.state(), datetime.datetime(2026, 11, 12, 8, 30)))
+
+    def test_weekly_report(self):
+        clock = [datetime.datetime(2026, 11, 2, 10, 0)]
+        meter = friday_usage.UsageMeter(os.path.join(self.tmp, "u.json"), clock=lambda: clock[0], usd_to_myr=4.5)
+        usage = SimpleNamespace(input_tokens=1_000_000, output_tokens=0, cache_creation_input_tokens=0,
+                                cache_read_input_tokens=0, server_tool_use=None)
+        meter.add(usage, "claude-sonnet-5-5")
+        clock[0] = datetime.datetime(2026, 11, 13, 10, 0)  # 星期五
+        meter.add(usage, "claude-opus-5-5")
+        meter.add(usage, "claude-sonnet-5-5")
+        meter.add_local()
+        meter.add_local()
+        ledger = friday_ledger.Ledger(os.path.join(self.tmp, "l.json"), clock=lambda: clock[0])
+        ledger.add("午饭", 15, "餐饮")
+        ledger.add("Grab", 12, "交通")
+        state = self.state()
+        self.assertIsNone(friday_alerts.report_week(state, datetime.datetime(2026, 11, 15, 20, 0)))
+        week = friday_alerts.report_week(state, datetime.datetime(2026, 11, 15, 21, 30))
+        self.assertEqual(week, (datetime.date(2026, 11, 9), datetime.date(2026, 11, 15)))
+        text = friday_alerts.weekly_report(meter, ledger, week, "老板", budget_myr=100)
+        self.assertIn("这周(11/9~11/15)", text)
+        self.assertIn("问了 Claude 2 次,另外有 2 次简单指令在电脑上直接办好", text)
+        self.assertIn("按模型:Opus", text)
+        self.assertIn("花得最多的是星期五", text)
+        self.assertIn("比上周多", text)
+        self.assertIn("这周 2 笔,共 RM 27.00,最多的是 餐饮 RM 15.00", text)
+        state.set("weekly", week[0].isoformat())
+        self.assertIsNone(friday_alerts.report_week(state, datetime.datetime(2026, 11, 16, 9, 0)))  # 报过了
+        self.assertEqual(friday_alerts.report_week(self.state(), datetime.datetime(2026, 11, 24, 9, 0)),
+                         (datetime.date(2026, 11, 16), datetime.date(2026, 11, 22)))  # 错过了:星期二补上
+        self.assertIsNone(friday_alerts.report_week(self.state(), datetime.datetime(2026, 11, 26, 9, 0)))
 
 
 if __name__ == "__main__":

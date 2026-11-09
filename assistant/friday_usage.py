@@ -57,6 +57,14 @@ def request_cost(usage, model: str | None = None) -> float:
     return tokens / 1_000_000 + searches * SEARCH_PRICE
 
 
+def model_label(model: str | None) -> str:
+    name = (model or "").lower()
+    for label in ("Opus", "Sonnet", "Haiku"):
+        if label.lower() in name:
+            return label
+    return "其他"
+
+
 class UsageMeter:
     """按天累计花费,存在 friday_usage.json 里;可以算本月、或者从某天以来花了多少。"""
 
@@ -82,12 +90,29 @@ class UsageMeter:
         except (OSError, ValueError):
             data = None
         if isinstance(data, dict) and isinstance(data.get("days"), dict):
+            def counts(key):
+                value = data.get(key)
+                return {k: v for k, v in value.items() if isinstance(v, (int, float, dict))} if isinstance(value, dict) else {}
+
             return {"days": {k: float(v) for k, v in data["days"].items() if isinstance(v, (int, float))},
-                    "requests": int(data.get("requests", 0))}
+                    "requests": int(data.get("requests", 0)),
+                    "calls": counts("calls"), "models": counts("models"), "local": counts("local")}
         if isinstance(data, dict) and isinstance(data.get("usd"), (int, float)):  # 旧版只存了本月总数
             month = data.get("month") or self._month()
-            return {"days": {f"{month}-01": float(data["usd"])}, "requests": int(data.get("requests", 0))}
-        return {"days": {}, "requests": 0}
+            return {"days": {f"{month}-01": float(data["usd"])}, "requests": int(data.get("requests", 0)),
+                    "calls": {}, "models": {}, "local": {}}
+        return {"days": {}, "requests": 0, "calls": {}, "models": {}, "local": {}}
+
+    def _save(self) -> None:
+        for key in ("days", "calls", "models", "local"):
+            for old in sorted(self.data[key])[:-self.KEEP_DAYS]:
+                del self.data[key][old]
+        temp = self.path.with_name(self.path.name + ".tmp")
+        try:
+            temp.write_text(json.dumps(self.data), encoding="utf-8")
+            os.replace(temp, self.path)
+        except OSError:
+            pass
 
     def add(self, usage, model: str | None = None) -> float:
         cost = request_cost(usage, model)
@@ -96,15 +121,33 @@ class UsageMeter:
             today = self._today()
             days[today] = days.get(today, 0.0) + cost
             self.data["requests"] += 1
-            for old in sorted(days)[:-self.KEEP_DAYS]:
-                del days[old]
-            temp = self.path.with_name(self.path.name + ".tmp")
-            try:
-                temp.write_text(json.dumps(self.data), encoding="utf-8")
-                os.replace(temp, self.path)
-            except OSError:
-                pass
+            self.data["calls"][today] = self.data["calls"].get(today, 0) + 1
+            label = model_label(model)
+            per_model = self.data["models"].setdefault(today, {})
+            per_model[label] = per_model.get(label, 0.0) + cost
+            self._save()
         return cost
+
+    def add_local(self) -> None:
+        """记一次在电脑上直接办好、没问 Claude 的简单指令。"""
+        with self.lock:
+            today = self._today()
+            self.data["local"][today] = self.data["local"].get(today, 0) + 1
+            self._save()
+
+    def between(self, first: str, last: str) -> dict:
+        """first 到 last(YYYY-MM-DD,都含)的花费:{usd, calls, local, models: {名字: usd}, days: {日期: usd}}。"""
+        with self.lock:
+            inside = lambda d: first <= d <= last
+            models: dict[str, float] = {}
+            for day, per in self.data["models"].items():
+                if inside(day) and isinstance(per, dict):
+                    for name, usd in per.items():
+                        models[name] = models.get(name, 0.0) + usd
+            days = {d: v for d, v in self.data["days"].items() if inside(d)}
+            return {"usd": sum(days.values()), "days": days, "models": models,
+                    "calls": sum(v for d, v in self.data["calls"].items() if inside(d)),
+                    "local": sum(v for d, v in self.data["local"].items() if inside(d))}
 
     def month_usd(self) -> float:
         month = self._month()

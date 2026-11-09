@@ -453,6 +453,10 @@ function fillSettings() {
       : "没有 Admin Key 时用星期五自己的估算。Admin Key 只在你的电脑上保存,只用来读花费报表。";
     $("consoleNote").className = "set-note" + (b.console_error ? " warn" : "");
   }
+  $("rainRow").hidden = !s.rain_alert;
+  if (s.rain_alert) $("setRain").value = s.rain_alert;
+  $("weeklyRow").hidden = s.weekly_report === null || s.weekly_report === undefined;
+  $("setWeekly").checked = !!s.weekly_report;
   $("quickRow").hidden = s.quick === null || s.quick === undefined;
   $("setQuick").checked = !!s.quick;
   $("calendarRow").hidden = s.remind_calendar === null || s.remind_calendar === undefined;
@@ -553,6 +557,8 @@ $("setPush").onchange = (e) => saveSetting({ push: e.target.value });
 $("setCareWelcome").onchange = (e) => saveSetting({ care_welcome: e.target.checked });
 $("setCareBreak").onchange = (e) => saveSetting({ care_break: Number(e.target.value) });
 $("setCareNight").onchange = (e) => saveSetting({ care_night: e.target.checked });
+$("setRain").onchange = (e) => saveSetting({ rain_alert: e.target.value });
+$("setWeekly").onchange = (e) => saveSetting({ weekly_report: e.target.checked });
 $("setQuick").onchange = (e) => saveSetting({ quick: e.target.checked });
 $("setRemindCalendar").onchange = (e) => saveSetting({ remind_calendar: e.target.checked });
 $("setGameQuiet").onchange = (e) => saveSetting({ game_quiet: e.target.checked });

@@ -1085,6 +1085,8 @@ class WebSession:
                 stream.finish()
             if self.assistant is not None:
                 self.assistant.remember_local(text, quick)
+            if self.meter is not None:
+                self.meter.add_local()
             return quick
         if self.assistant is None:
             hub.broadcast({"type": "error", "text": self.startup_error or "星期五还没准备好"})
@@ -1267,6 +1269,8 @@ def web_discord(message, session: WebSession, transcribe=None) -> None:
     if quick:
         hub.broadcast({"type": "status", "text": "⚡ 电脑上直接办好了,没有问 Claude(不花钱)"})
         session.assistant.remember_local("[来自手机 Discord]" + message.text, quick)
+        if session.meter is not None:
+            session.meter.add_local()
         reply(quick)
         return
     hub.broadcast({"type": "status", "text": "正在回答手机 Discord 的消息……"})
@@ -1468,6 +1472,8 @@ def settings_state(session, meter=None) -> dict:
         "care": care_state(session),
         "push": push_mode() if getattr(session, "discord", None) is not None else None,
         "remind_calendar": remind_calendar_state(session),
+        "rain_alert": __import__("friday_alerts").rain_time(),
+        "weekly_report": __import__("friday_alerts").weekly_enabled(),
         "quick": __import__("friday_quick").quick_enabled() if getattr(session, "quick", None) is not None else None,
         "wake": wake_state(session),
         "backup": {"enabled": os.environ.get("FRIDAY_BACKUP", "on") != "off",
@@ -1574,6 +1580,20 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
             save_env_value(env, env_name, "on" if on else "off")
             os.environ[env_name] = "on" if on else "off"
             done.append(("已开启" if on else "已关闭") + label)
+    if "rain_alert" in payload:
+        import friday_alerts
+
+        value = str(payload["rain_alert"]).strip().lower()
+        if value != "off" and value not in friday_alerts.RAIN_TIMES:
+            return {"error": "没有这个时间"}
+        save_env_value(env, "FRIDAY_RAIN_ALERT", value)
+        os.environ["FRIDAY_RAIN_ALERT"] = value
+        done.append("不再提醒下雨" if value == "off" else f"每天 {value} 看天气,会下雨就提醒带伞")
+    if "weekly_report" in payload:
+        on = bool(payload["weekly_report"])
+        save_env_value(env, "FRIDAY_WEEKLY_REPORT", "on" if on else "off")
+        os.environ["FRIDAY_WEEKLY_REPORT"] = "on" if on else "off"
+        done.append("每个星期天晚上 9 点后报告这周的花费" if on else "不做每周花费报告了")
     if "quick" in payload:
         on = bool(payload["quick"])
         save_env_value(env, "FRIDAY_QUICK", "on" if on else "off")
@@ -1840,33 +1860,73 @@ def start_care(session, ctx, hub, toolbox: Toolbox, voice_module):
     return care
 
 
+def announce(session, text: str, icon: str, short: str) -> None:
+    """星期五主动说的事:显示在窗口、推到手机、读出来(打游戏时先记着,打完再说)。"""
+    session.hub.broadcast({"type": "reminder", "text": f"{icon} {text}"})
+    push_to_phone(session, f"{icon} {text}")
+    care = getattr(session, "care", None)
+    if care is not None and care.quiet_now():
+        care.hold(text, short=short)
+    elif session.speak_enabled and session.hub.connected and not session.busy:
+        session.speak(text)
+
+
+def _call_me(session) -> str:
+    return os.environ.get("FRIDAY_CALL_ME") or session.call_me or DEFAULT_CALL_ME
+
+
 def month_end_summary(session, toolbox: Toolbox) -> str | None:
-    """该做月底记账汇总时:显示在窗口、推到手机、读出来(打游戏时先记着)。返回说了什么。"""
+    """该做月底记账汇总时就说。返回说了什么。"""
     ledger = getattr(toolbox, "ledger", None)
     month = ledger.due_summary() if ledger is not None else None
     if not month:
         return None
-    call_me = os.environ.get("FRIDAY_CALL_ME") or session.call_me or DEFAULT_CALL_ME
-    text = f"{call_me},月底记账汇总:{ledger.summary(month)}"
+    text = f"{_call_me(session)},月底记账汇总:{ledger.summary(month)}"
     ledger.mark_summarized(month)
-    session.hub.broadcast({"type": "reminder", "text": "💰 " + text})
-    push_to_phone(session, "💰 " + text)
-    care = getattr(session, "care", None)
-    if care is not None and care.quiet_now():
-        care.hold(text, short=f"{int(month[5:])} 月记账汇总在窗口里")
-    elif session.speak_enabled and session.hub.connected and not session.busy:
-        session.speak(text)
+    announce(session, text, "💰", f"{int(month[5:])} 月记账汇总在窗口里")
     return text
 
 
-def start_month_end_summary(session, toolbox: Toolbox, interval: float = 600) -> None:
+def rain_alert(session, state, now: datetime.datetime | None = None, fetch=None) -> str | None:
+    """早上看一次天气,今天会下雨就提醒带伞(不问 Claude)。"""
+    import friday_alerts
+
+    text = friday_alerts.check_rain(state, now or datetime.datetime.now(), _call_me(session), fetch)
+    if text:
+        announce(session, text, "☔", "今天可能会下雨,出门带伞")
+    return text
+
+
+def weekly_report(session, toolbox: Toolbox, state, now: datetime.datetime | None = None) -> str | None:
+    """星期天晚上的每周花费报告(不问 Claude)。"""
+    import friday_alerts
+
+    week = friday_alerts.report_week(state, now or datetime.datetime.now())
+    if week is None:
+        return None
+    budget = getattr(session, "budget", None)
+    text = friday_alerts.weekly_report(session.meter, getattr(toolbox, "ledger", None), week, _call_me(session),
+                                       budget.budget_myr if budget is not None else 0.0)
+    state.set("weekly", week[0].isoformat())
+    announce(session, text, "📊", "这周的花费报告在窗口里")
+    return text
+
+
+def start_daily_checks(session, toolbox: Toolbox, data_dir: str, interval: float = 300) -> None:
+    """每 5 分钟看一次:月底记账汇总、下雨提醒、每周花费报告。"""
+    import friday_alerts
+
+    state = friday_alerts.AlertState(os.path.join(data_dir, "friday_alerts.json"))
+
     def loop() -> None:
         time.sleep(60)  # 刚开机先让别的事做完
         while True:
             _quietly(lambda: month_end_summary(session, toolbox))
+            _quietly(lambda: rain_alert(session, state))
+            _quietly(lambda: weekly_report(session, toolbox, state))
             time.sleep(interval)
 
-    threading.Thread(target=loop, daemon=True, name="friday-ledger").start()
+    threading.Thread(target=loop, daemon=True, name="friday-daily-checks").start()
 
 
 def start_cloud_client(code: str, folder: Path, on_pull, on_status):
@@ -2152,7 +2212,7 @@ def run_web(args) -> None:
     if os.environ.get("FRIDAY_WAKE", "off") == "on":
         session.wake.start()
     start_care(session, ctx, hub, toolbox, voice_module)
-    start_month_end_summary(session, toolbox)
+    start_daily_checks(session, toolbox, data_dir)
     import friday_quick
 
     session.quick = friday_quick.QuickCommands(toolbox)
