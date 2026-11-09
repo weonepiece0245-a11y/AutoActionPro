@@ -1095,6 +1095,7 @@ class WebSession:
     hotkey = None  # 全局快捷键(friday_desktop.GlobalHotkey)
     wake = None  # 喊“星期五”唤醒(friday_wake.WakeWord)
     care = None  # 主动关心(friday_care.Care)
+    discord = None  # Discord 机器人(提醒推到手机)
     cloud = None  # 云端后备的连接(friday_cloud.CloudClient)
     start_cloud = None  # 用配对码连接云端
     events = None  # 主循环的事件队列(还原后要重启)
@@ -1104,8 +1105,33 @@ class WebSession:
     hub_audio = None  # 由 run_web 设置成 WebContext.audio
 
 
+PUSH_AWAY_SECONDS = 5 * 60  # “只在不在电脑前时推送”:这么久没动键盘鼠标算不在
+
+
+def push_mode() -> str:
+    """提醒要不要同时推到手机 Discord:always(默认)/ away(不在电脑前时)/ off。"""
+    value = os.environ.get("FRIDAY_REMIND_PUSH", "always").strip().lower()
+    return value if value in ("always", "away", "off") else "always"
+
+
+def push_to_phone(session, text: str, idle: Callable[[], float | None] | None = None) -> bool:
+    """按设定把提醒推到手机 Discord(后台发,不卡住星期五)。返回有没有推。"""
+    discord = getattr(session, "discord", None)
+    mode = push_mode()
+    if discord is None or mode == "off":
+        return False
+    if mode == "away":
+        import friday_care
+
+        seconds = (idle or friday_care.idle_seconds)()
+        if seconds is not None and seconds < PUSH_AWAY_SECONDS:
+            return False  # 人就在电脑前
+    threading.Thread(target=lambda: _quietly(lambda: discord.notify_owners(text)), daemon=True).start()
+    return True
+
+
 def web_reminder(item: dict, session: WebSession) -> None:
-    """图形界面模式:提醒弹窗 + 界面提示 + 读出来;定时任务交给星期五执行。"""
+    """图形界面模式:提醒弹窗 + 界面提示 + 读出来 + 推到手机 Discord;定时任务交给星期五执行。"""
     missed = f"(原定 {item['time'][11:]},星期五当时没开)" if item.get("missed") else ""
     session.hub.broadcast({"type": "reminder", "text": f"⏰ {item['time'][11:]} {item['message']}{missed}"})
     if item.get("kind") == "task":
@@ -1113,12 +1139,15 @@ def web_reminder(item: dict, session: WebSession) -> None:
         if toolbox is not None:
             toolbox.unattended = True
         try:
-            session.ask(item["message"], source="task", speak=session.speak_enabled,
-                        prefix=f"[定时任务]{missed}", show_user=False)
+            result = session.ask(item["message"], source="task", speak=session.speak_enabled,
+                                 prefix=f"[定时任务]{missed}", show_user=False)
         finally:
             if toolbox is not None:
                 toolbox.unattended = False
+        if result:
+            push_to_phone(session, f"⏰ {item['message']}\n\n{result}")
         return
+    push_to_phone(session, f"⏰ 提醒:{item['message']}{missed}")
     notify_popup(f"{session.persona.name}提醒", item["message"])
     if session.speak_enabled:
         session.speak(f"提醒你:{item['message']}")
@@ -1328,6 +1357,7 @@ def settings_state(session, meter=None) -> dict:
         "hotkey": hotkey_state(session),
         "cloud": cloud_state(session),
         "care": care_state(session),
+        "push": push_mode() if getattr(session, "discord", None) is not None else None,
         "wake": wake_state(session),
         "backup": {"enabled": os.environ.get("FRIDAY_BACKUP", "on") != "off",
                    "last": session.backup.last_backup()} if getattr(session, "backup", None) else None,
@@ -1433,6 +1463,14 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
             save_env_value(env, env_name, "on" if on else "off")
             os.environ[env_name] = "on" if on else "off"
             done.append(("已开启" if on else "已关闭") + label)
+    if "push" in payload:
+        mode = str(payload["push"]).lower()
+        if mode not in ("always", "away", "off"):
+            return {"error": "没有这个选项"}
+        save_env_value(env, "FRIDAY_REMIND_PUSH", mode)
+        os.environ["FRIDAY_REMIND_PUSH"] = mode
+        done.append({"always": "提醒会同时推到手机 Discord", "away": "不在电脑前时,提醒才推到手机 Discord",
+                     "off": "提醒不推到手机了"}[mode])
     if "care_break" in payload:
         try:
             minutes = int(payload["care_break"])
@@ -1843,6 +1881,7 @@ def run_web(args) -> None:
         discord.tts = voice_module.synthesize_mp3
         discord.gate.transcriber = voice_module.transcribe_audio
         discord.start()
+    session.discord = discord  # 提醒也推到手机
     ReminderScheduler(toolbox.reminders, events).start()
     if google is not None:
         def google_notice(text: str) -> None:

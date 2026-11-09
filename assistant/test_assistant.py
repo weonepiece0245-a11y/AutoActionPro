@@ -5386,5 +5386,54 @@ class MemoryCategoryTest(TempDirTest):
         memories = app.web_state(session, toolbox, None, {})["memories"]
         self.assertEqual((memories[0]["text"], memories[0]["category"]), ("老板 12 月 20 日去东京", "日程"))
 
+
+class ReminderPushTest(unittest.TestCase):
+    class FakeDiscord:
+        def __init__(self):
+            self.sent = []
+            self.event = threading.Event()
+
+        def notify_owners(self, text):
+            self.sent.append(text)
+            self.event.set()
+
+    def make(self):
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.discord = self.FakeDiscord()
+        return session
+
+    def test_push_modes(self):
+        session = self.make()
+        with mock.patch.dict(os.environ, {"FRIDAY_REMIND_PUSH": "weird"}):
+            self.assertEqual(app.push_mode(), "always")
+        with mock.patch.dict(os.environ, {"FRIDAY_REMIND_PUSH": "off"}):
+            self.assertFalse(app.push_to_phone(session, "x"))
+        with mock.patch.dict(os.environ, {"FRIDAY_REMIND_PUSH": "away"}):
+            self.assertFalse(app.push_to_phone(session, "x", idle=lambda: 30))
+            self.assertTrue(app.push_to_phone(session, "走开了", idle=lambda: 600))
+        self.assertTrue(session.discord.event.wait(2))
+        self.assertEqual(session.discord.sent, ["走开了"])
+        no_discord = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        self.assertFalse(app.push_to_phone(no_discord, "x"))
+
+    def test_notify_reminder_goes_to_phone(self):
+        session = self.make()
+        session.speak_enabled = False
+        with mock.patch.dict(os.environ, {"FRIDAY_REMIND_PUSH": "always"}), \
+                mock.patch.object(app, "notify_popup", lambda *a: None):
+            app.web_reminder({"time": "2026-11-10 15:00", "message": "开会", "kind": "notify"}, session)
+        self.assertTrue(session.discord.event.wait(2))
+        self.assertEqual(session.discord.sent, ["⏰ 提醒:开会"])
+
+    def test_settings(self):
+        env = str(Path(tempfile.mkdtemp(), ".env"))
+        session = self.make()
+        with mock.patch.dict(os.environ, {"FRIDAY_REMIND_PUSH": "always"}):
+            self.assertIn("error", app.apply_settings({"push": "sometimes"}, session, None, env))
+            self.assertTrue(app.apply_settings({"push": "away"}, session, None, env)["ok"])
+            self.assertEqual(app.push_mode(), "away")
+            self.assertIn("FRIDAY_REMIND_PUSH=away", Path(env).read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main()
