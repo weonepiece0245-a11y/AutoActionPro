@@ -4771,6 +4771,7 @@ class WakeWordTest(unittest.TestCase):
         self.assertFalse(heard("你好 星期五", 0.5))
         self.assertTrue(heard("你 好 星期五"))  # 模型把“你好”拆成两个字也认得
         self.assertTrue(friday_wake.heard_wake_word(self.result("黑 星期五", 0.9), 0.75, "嘿星期五"))  # 同音字
+        self.assertTrue(friday_wake.heard_wake_word(self.result("嗨 星期五", 0.9), 0.75, "嘿星期五"))  # 说英文 hey
         grammar = friday_wake.grammar("你好星期五")
         self.assertEqual(grammar[:2], ["你好 星期五", "你 好 星期五"])
         self.assertIn("星期五", grammar)  # 单独的“星期五”也要能被识别出来,才不会硬凑成唤醒词

@@ -354,7 +354,7 @@ function fillSettings() {
     if (!phrases.options.length) {
       for (const p of w.phrases) {
         const opt = document.createElement("option");
-        opt.value = p; opt.textContent = `“${p}”` + (p === "你好星期五" ? "(推荐)" : p === "星期五" ? "(最容易误判)" : "");
+        opt.value = p; opt.textContent = `“${p}”` + (p === "你好星期五" ? "(推荐)" : p === "嘿星期五" ? "(说 hey 星期五 也行)" : p === "星期五" ? "(最容易误判)" : "");
         phrases.append(opt);
       }
     }
