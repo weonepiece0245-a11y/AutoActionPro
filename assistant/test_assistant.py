@@ -476,6 +476,62 @@ class ConversationHistoryTest(unittest.TestCase):
         self.assertEqual(self.bot().messages, [])
 
 
+class ConversationArchiveTest(unittest.TestCase):
+    def setUp(self):
+        self.now = [1_800_000_000.0]
+        self.archive = tools.ConversationArchive(Path(tempfile.mkdtemp(), "archive.jsonl"), clock=lambda: self.now[0])
+        day = 86400
+        self.archive.add("Apex 新赛季什么时候开始", "下个月 5 号", when=self.now[0] - 10 * day)
+        self.archive.add("Dota 2 帕克怎么出装", "先出相位鞋……" + "长" * 1000, when=self.now[0] - 5 * day)
+        self.archive.add("明天天气怎么样", "多云", when=self.now[0] - day)
+
+    def test_keyword_search_newest_last(self):
+        found = self.archive.search("出装 帕克")
+        self.assertEqual([e["q"] for e in found], ["Dota 2 帕克怎么出装"])
+        # 全部关键词都找不到时,放宽到任意一个
+        self.assertEqual([e["q"] for e in self.archive.search("apex 皮肤")], ["Apex 新赛季什么时候开始"])
+        self.assertEqual(self.archive.search("股票"), [])
+
+    def test_recent_and_days(self):
+        self.assertEqual(len(self.archive.search("")), 3)
+        self.assertEqual([e["q"] for e in self.archive.search("", days=7)],
+                         ["Dota 2 帕克怎么出装", "明天天气怎么样"])
+        self.assertEqual(len(self.archive.search("", limit=1)), 1)
+
+    def test_describe_keeps_results_short(self):
+        text = self.archive.describe(self.archive.search("帕克"))
+        self.assertIn("用户问:Dota 2 帕克怎么出装", text)
+        self.assertLess(len(text), 600)
+        self.assertEqual(self.archive.describe([]), "聊天记录里没有找到相关的内容")
+
+    def test_broken_line_is_skipped(self):
+        with open(self.archive.path, "a", encoding="utf-8") as f:
+            f.write('{"t": 1, "q": "写到一半\n')
+        self.assertEqual(len(self.archive.search("")), 3)
+
+    def test_friday_can_search_history(self):
+        toolbox = tools.Toolbox(tools.Memory(os.path.join(tempfile.mkdtemp(), "m.json")), lambda a: True)
+        self.assertNotIn("search_history", [t["name"] for t in toolbox.definitions()])
+        toolbox.attach_archive(self.archive)
+        self.assertIn("search_history", [t["name"] for t in toolbox.definitions()])
+        statuses = []
+        result = toolbox.run(tool_use("search_history", {"query": "天气", "days": 3}), statuses.append)
+        self.assertIn("明天天气怎么样", result["content"])
+        self.assertNotIn("is_error", result)
+        self.assertEqual(statuses, ["翻聊天记录:天气"])
+
+    def test_every_answer_is_archived_and_reset_keeps_it(self):
+        folder = tempfile.mkdtemp()
+        toolbox = tools.Toolbox(tools.Memory(os.path.join(folder, "m.json")), lambda a: True)
+        bot = app.Assistant(client=FakeClient(FakeStream(["多云"])), toolbox=toolbox)
+        bot.enable_history(Path(folder, "friday_conversation.json"))
+        bot.ask("今天天气", lambda t: None)
+        bot.reset()  # 点 ↺ 只清空当前对话,档案还在
+        found = toolbox.archive.search("天气")
+        self.assertEqual([(e["q"], e["a"]) for e in found], [("今天天气", "多云")])
+        self.assertTrue(Path(folder, "friday_archive.jsonl").exists())
+
+
 class ChatLogPersistenceTest(unittest.TestCase):
     def test_window_history_survives_restart(self):
         path = Path(tempfile.mkdtemp(), "chat.json")

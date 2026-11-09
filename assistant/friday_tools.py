@@ -29,6 +29,68 @@ Approver = Callable[[str], bool]
 StatusFn = Callable[[str], None]
 
 
+class ConversationArchive:
+    """所有问答的长期档案(每行一条 JSON,不会自动删除)。星期五需要时用 search_history 搜索。"""
+
+    MAX_ANSWER = 4000  # 存档里每个回答最多存这么多字
+    SHOW_ANSWER = 400  # 搜索结果里每个回答只给这么多字(省钱)
+
+    def __init__(self, path: str | os.PathLike, clock: Callable[[], float] | None = None) -> None:
+        self.path = Path(path)
+        self.clock = clock or (lambda: datetime.datetime.now().timestamp())
+
+    def add(self, question: str, answer: str, when: float | None = None) -> None:
+        line = json.dumps({"t": when if when is not None else self.clock(), "q": question,
+                           "a": answer[: self.MAX_ANSWER]}, ensure_ascii=False)
+        try:
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
+
+    def _entries(self) -> list[dict]:
+        try:
+            lines = self.path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+        entries = []
+        for line in lines:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue  # 写到一半断电的那一行,跳过
+            if isinstance(entry, dict) and isinstance(entry.get("q"), str):
+                entries.append(entry)
+        return entries
+
+    def search(self, query: str = "", days: int | None = None, limit: int = 8) -> list[dict]:
+        """按关键词(空格分开,全部要出现;找不到就放宽到任意一个)找,最近的优先。query 为空就给最近的。"""
+        entries = self._entries()
+        if days:
+            since = self.clock() - days * 86400
+            entries = [e for e in entries if e.get("t", 0) >= since]
+        words = [w.lower() for w in query.replace(",", " ").replace(",", " ").split() if w]
+        if words:
+            text = lambda e: (e["q"] + " " + str(e.get("a", ""))).lower()
+            matched = [e for e in entries if all(w in text(e) for w in words)]
+            if not matched:
+                matched = [e for e in entries if any(w in text(e) for w in words)]
+            entries = matched
+        return entries[-limit:]
+
+    def describe(self, entries: list[dict]) -> str:
+        if not entries:
+            return "聊天记录里没有找到相关的内容"
+        lines = []
+        for e in entries:
+            when = datetime.datetime.fromtimestamp(e.get("t", 0)).strftime("%Y-%m-%d %H:%M")
+            answer = str(e.get("a", ""))
+            if len(answer) > self.SHOW_ANSWER:
+                answer = answer[: self.SHOW_ANSWER] + "……"
+            lines.append(f"[{when}] 用户问:{e['q']}\n星期五答:{answer}")
+        return "\n\n".join(lines)
+
+
 class Memory:
     """星期五对用户的长期记忆:一条条事实,保存在 JSON 文件里。"""
 
@@ -184,6 +246,24 @@ CLIENT_TOOLS = [
         },
     },
 ]
+
+HISTORY_TOOL = {
+    "name": "search_history",
+    "description": (
+        "翻以前和用户的聊天记录(所有问答都长期存着)。用户问“我之前问过你什么”“上次说的那个……”"
+        "“你还记得……吗”“前几天聊过……”,而现在的对话里没有时调用。"
+        "query 填关键词,多个用空格隔开(例如“Apex 出装”);想看最近聊过什么就留空。"
+        "days 可以只看最近几天。结果里的回答只有开头一段。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "关键词,空格隔开;留空就是最近的对话"},
+            "days": {"type": "integer", "description": "只看最近几天,可不填"},
+        },
+        "required": ["query"],
+    },
+}
 
 REMINDER_TOOL = {
     "name": "reminder",
@@ -484,6 +564,7 @@ class Toolbox:
         # confirm:每次都必须问用户的确认(发邮件、发邀请),不受“本次都允许”影响
         self.confirm = confirm or approve
         self.unattended = False  # 定时任务执行期间为 True:需要确认的操作一律不做
+        self.archive: ConversationArchive | None = None  # 聊天记录档案,attach_archive() 设置
         self._handlers = {
             "remember": self._remember,
             "forget": self._forget,
@@ -503,13 +584,20 @@ class Toolbox:
             "docs": self._google("docs", "用了 Google 文档"),
             "sheets": self._google("sheets", "用了 Google 表格"),
             "youtube": self._google("youtube", "看了 YouTube"),
+            "search_history": self._search_history,
         }
+        self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
+
+    def attach_archive(self, archive: ConversationArchive) -> None:
+        self.archive = archive
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
 
     def definitions(self) -> list[dict]:
         client_tools = CLIENT_TOOLS if self.local_tools else [
             t for t in CLIENT_TOOLS if t["name"] not in ("run_command", "read_file", "write_file")]
         tools = (SERVER_TOOLS if self.web else []) + client_tools
+        if self.archive is not None:
+            tools = tools + [HISTORY_TOOL]
         if self.reminders is not None:
             tools = tools + [REMINDER_TOOL]
         if self.todos is not None and self.google is None:  # 接了 Google 就用 Google Tasks 当待办清单
@@ -572,6 +660,13 @@ class Toolbox:
         message = self.memory.add(args["fact"])
         on_status(f"记住了:{args['fact']}")
         return message, False
+
+    def _search_history(self, args, on_status):
+        days = args.get("days")
+        days = days if isinstance(days, int) and days > 0 else None
+        query = args["query"].strip()
+        on_status(f"翻聊天记录:{query}" if query else "翻最近的聊天记录")
+        return self.archive.describe(self.archive.search(query, days)), False
 
     def _forget(self, args, on_status):
         removed = self.memory.forget(args["keyword"])

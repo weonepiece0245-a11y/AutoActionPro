@@ -39,7 +39,7 @@ from friday_discord import DiscordBridge, read_token, set_discord_enabled  # noq
 from friday_google import GoogleAccount, GoogleTools  # noqa: E402
 from friday_pc import Computer, ScreenControl, drain_console_input  # noqa: E402
 from friday_router import SONNET, UPGRADE_TOOL, Router  # noqa: E402
-from friday_tools import SERVER_TOOL_LABELS, Memory, Toolbox  # noqa: E402
+from friday_tools import SERVER_TOOL_LABELS, ConversationArchive, Memory, Toolbox  # noqa: E402
 
 DEFAULT_MODEL = "claude-opus-5-5"
 DEFAULT_EFFORT = "low"
@@ -300,6 +300,8 @@ class Assistant:
     def enable_history(self, path) -> None:
         """把最近几轮问答存到文件;重启或开机后接着聊(只带文字,很省)。"""
         self.history_file = Path(path)
+        if self.toolbox is not None:  # 所有问答长期存档,星期五可以翻
+            self.toolbox.attach_archive(ConversationArchive(self.history_file.with_name("friday_archive.jsonl")))
         try:
             data = json.loads(self.history_file.read_text(encoding="utf-8"))
             self.exchanges = [e for e in data if isinstance(e, dict) and e.get("q") and "a" in e][-KEEP_EXCHANGES:]
@@ -376,6 +378,8 @@ class Assistant:
         self.last_ask = self.clock()
         self.exchanges = (self.exchanges + [{"q": question, "a": answer, "t": self.last_ask}])[-KEEP_EXCHANGES:]
         self._save_exchanges()
+        if self.toolbox is not None and self.toolbox.archive is not None:
+            self.toolbox.archive.add(question, answer, self.last_ask)
         return answer
 
     def _run(self, on_text, on_status) -> str:
