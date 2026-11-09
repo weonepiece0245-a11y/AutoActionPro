@@ -80,6 +80,7 @@ import friday_update  # noqa: E402
 import friday_usage  # noqa: E402
 import friday_router  # noqa: E402
 import friday_budget  # noqa: E402
+import friday_backup  # noqa: E402
 import voice  # noqa: E402  assistant.py 已把所在目录加入 sys.path
 
 
@@ -4519,6 +4520,138 @@ class BudgetTest(unittest.TestCase):
         self.assertTrue(apply({"admin_key": ""})["ok"])
         text = Path(env).read_text(encoding="utf-8")
         self.assertIn("FRIDAY_CREDIT_SINCE=2026-11-01", text)
+
+
+class FakeDriveFiles:
+    """假的 Google Drive files() 资源,只够备份用。"""
+
+    def __init__(self):
+        self.items = {}
+        self.counter = 0
+
+    def _run(self, value):
+        return SimpleNamespace(execute=lambda: value)
+
+    def list(self, q, **kwargs):
+        if "mimeType = 'application/vnd.google-apps.folder'" in q:
+            found = [{"id": k} for k, v in self.items.items() if v["mime"] == friday_backup.FOLDER_MIME]
+        else:
+            parent = q.split("'")[1]
+            found = sorted(({"id": k, "name": v["name"], "createdTime": v["created"]}
+                            for k, v in self.items.items() if parent in v["parents"]),
+                           key=lambda f: f["createdTime"], reverse=True)
+        return self._run({"files": found})
+
+    def create(self, body, media_body=None, fields=None):
+        self.counter += 1
+        file_id = f"f{self.counter}"
+        self.items[file_id] = {"name": body["name"], "parents": body.get("parents", []),
+                               "mime": body.get("mimeType", "application/zip"), "created": self.counter,
+                               "data": media_body.fd.getvalue() if media_body else b""}
+        return self._run({"id": file_id})
+
+    def delete(self, fileId):
+        del self.items[fileId]
+        return self._run({})
+
+    def get_media(self, fileId):
+        return self._run(self.items[fileId]["data"])
+
+
+class BackupTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        (self.dir / "friday_memory.json").write_text('[{"text": "老板在吉隆坡"}]', encoding="utf-8")
+        (self.dir / "friday_archive.jsonl").write_text('{"q": "你好"}\n', encoding="utf-8")
+        (self.dir / ".env").write_text("ANTHROPIC_API_KEY=sk-secret", encoding="utf-8")
+        (self.dir / "google_token.json").write_text("{}", encoding="utf-8")
+        self.drive = FakeDriveFiles()
+        self.now = [1_800_000_000.0]
+        self.backup = friday_backup.DriveBackup(self.dir, lambda: self.drive, clock=lambda: self.now[0])
+        upload = SimpleNamespace(MediaIoBaseUpload=lambda fd, mimetype, resumable: SimpleNamespace(fd=fd))
+        patcher = mock.patch.dict(sys.modules, {"googleapiclient": types.ModuleType("googleapiclient"),
+                                                "googleapiclient.http": upload})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_zip_has_data_but_no_secrets(self):
+        data, included = friday_backup.make_zip(self.dir)
+        self.assertEqual(sorted(included), ["friday_archive.jsonl", "friday_memory.json"])
+        names = zipfile.ZipFile(io.BytesIO(data)).namelist()
+        self.assertNotIn(".env", names)
+        self.assertNotIn("google_token.json", names)
+
+    def test_backup_keeps_latest_eight(self):
+        self.assertTrue(self.backup.due())
+        for _ in range(10):
+            self.backup.backup()
+            self.now[0] += 86400
+        backups = [v for v in self.drive.items.values() if v["mime"] == "application/zip"]
+        folders = [v for v in self.drive.items.values() if v["mime"] == friday_backup.FOLDER_MIME]
+        self.assertEqual((len(backups), len(folders)), (8, 1))
+        self.assertFalse(self.backup.due())
+        self.now[0] += 7 * 86400
+        self.assertTrue(self.backup.due())
+
+    def test_restore_happens_at_next_start(self):
+        self.backup.backup()
+        (self.dir / "friday_memory.json").write_text("[]", encoding="utf-8")  # 资料丢了
+        result = self.backup.download_latest()
+        self.assertIn("friday_memory.json", result["files"])
+        self.assertEqual((self.dir / "friday_memory.json").read_text(encoding="utf-8"), "[]")  # 还没换
+        restored = friday_backup.apply_pending_restore(self.dir)
+        self.assertIn("friday_memory.json", restored)
+        self.assertIn("吉隆坡", (self.dir / "friday_memory.json").read_text(encoding="utf-8"))
+        self.assertFalse((self.dir / friday_backup.PENDING_FILE).exists())
+        before = zipfile.ZipFile(self.dir / friday_backup.BEFORE_RESTORE)
+        self.assertEqual(before.read("friday_memory.json"), b"[]")  # 还原前的资料留了一份
+        self.assertEqual(friday_backup.apply_pending_restore(self.dir), [])
+
+    def test_restore_ignores_strange_files(self):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("../evil.txt", "x")
+            archive.writestr(".env", "ANTHROPIC_API_KEY=attacker")
+            archive.writestr("friday_todos.json", "[]")
+        self.assertEqual(friday_backup.extract_backup(buffer.getvalue(), self.dir), ["friday_todos.json"])
+        self.assertIn("sk-secret", (self.dir / ".env").read_text(encoding="utf-8"))
+        self.assertFalse((self.dir.parent / "evil.txt").exists())
+
+    def test_nothing_to_restore(self):
+        with self.assertRaises(RuntimeError):
+            self.backup.download_latest()
+
+    def test_scheduler(self):
+        reports = []
+        ready = [True]
+        scheduler = friday_backup.BackupScheduler(self.backup, ready=lambda: ready[0], enabled=lambda: True,
+                                                  report=lambda text, failed: reports.append((text, failed)))
+        self.assertIsNotNone(scheduler.run_once())
+        self.assertIsNone(scheduler.run_once())  # 一周内不再备份
+        self.assertFalse(reports[0][1])
+        self.now[0] += 8 * 86400
+        ready[0] = False  # Google 过期:先不备份
+        self.assertIsNone(scheduler.run_once())
+        ready[0] = True
+        self.drive.create = mock.Mock(side_effect=RuntimeError("网络断了"))
+        scheduler.run_once()
+        scheduler.run_once()
+        self.assertEqual([failed for _, failed in reports], [False, True])  # 失败一天只说一次
+
+    def test_settings_and_restart(self):
+        env = str(self.dir / ".env")
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        self.assertIn("error", app.apply_settings({"backup_now": True}, session, None, env))
+        with mock.patch.dict(os.environ, {}, clear=False):
+            self.assertTrue(app.apply_settings({"backup_auto": False}, session, None, env)["ok"])
+            self.assertEqual(os.environ["FRIDAY_BACKUP"], "off")
+        session.backup = self.backup
+        self.assertEqual(app.settings_state(session)["backup"], {"enabled": True, "last": None})
+        events = queue.Queue()
+        events.put(("command", "restart"))
+        events.put(("web", {"text": "不会处理"}))
+        app.web_loop(session, events)
+        self.assertTrue(session.restart)
 
 if __name__ == "__main__":
     unittest.main()

@@ -44,3 +44,6 @@ assistant/friday_conversation.json
 assistant/friday_archive.jsonl
 assistant/friday.lock
 assistant/google_login.json
+assistant/friday_backup.json
+assistant/friday_restore_pending.zip
+assistant/friday_before_restore.zip

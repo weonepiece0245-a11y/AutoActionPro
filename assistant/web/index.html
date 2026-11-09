@@ -135,6 +135,14 @@
       <div class="set-note" id="consoleNote"></div>
     </div>
 
+    <div class="set-group" id="backupGroup" hidden>
+      <h3>备份(Google Drive)</h3>
+      <div class="set-row"><label for="setBackup">每周自动备份</label><input type="checkbox" class="switch" id="setBackup"></div>
+      <div class="set-row"><span>上次备份 <b class="google-state" id="backupLast">—</b></span>
+        <span class="set-ctl"><button type="button" class="mini-btn" id="backupNow">立即备份</button><button type="button" class="mini-btn" id="backupRestore">从备份还原</button></span></div>
+      <div class="set-note">备份记忆、提醒、待办和聊天记录到 Drive 的“星期五备份”文件夹,保留最近 8 份。密码和钥匙(.env)不会上传。</div>
+    </div>
+
     <div class="set-group">
       <h3>外观</h3>
       <div class="set-row"><label for="brightness">光球亮度</label>

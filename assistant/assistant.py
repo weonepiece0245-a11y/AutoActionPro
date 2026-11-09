@@ -974,6 +974,8 @@ class WebSession:
     restart = False  # 更新完要重启
     call_me = ""  # 现在的称呼(齿轮设定里显示)
     google_account = None  # Google 登录状态(齿轮设定里显示、重新登录)
+    backup = None  # Google Drive 备份(friday_backup.DriveBackup)
+    events = None  # 主循环的事件队列(还原后要重启)
     budget = None  # 每月预算和余额
     meter = None  # 花费统计
     router = None  # 自动选模型
@@ -1042,6 +1044,11 @@ def web_loop(session: WebSession, events: queue.Queue, transcribe=None) -> None:
             router = getattr(session, "router", None)
             if router is not None:
                 router.set_mode(payload.split(":", 1)[1])
+        elif kind == "command" and payload == "restart":  # 从备份还原:重启后替换资料
+            session.hub.broadcast({"type": "status", "text": "正在重启星期五,换上备份里的资料……"})
+            session.hub.broadcast({"type": "restarting"})
+            session.restart = True
+            return
         elif kind == "command" and payload == "update":
             if web_update(session):
                 return  # run_web 会用新代码重新启动
@@ -1155,6 +1162,8 @@ def settings_state(session, meter=None) -> dict:
         "autostart": friday_app.autostart_enabled(),
         "google": session.google_account.status() if getattr(session, "google_account", None) else None,
         "budget": session.budget.state() if getattr(session, "budget", None) else None,
+        "backup": {"enabled": os.environ.get("FRIDAY_BACKUP", "on") != "off",
+                   "last": session.backup.last_backup()} if getattr(session, "backup", None) else None,
     }
 
 
@@ -1250,6 +1259,36 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         done.append("已保存 Admin Key,正在读取 Console 的花费" if key else "已删除 Admin Key,改回星期五自己估算")
     if refresh_console and budget is not None:
         threading.Thread(target=budget.refresh_console, daemon=True).start()
+    backup = getattr(session, "backup", None)
+    if "backup_auto" in payload:
+        on = bool(payload["backup_auto"])
+        save_env_value(env, "FRIDAY_BACKUP", "on" if on else "off")
+        os.environ["FRIDAY_BACKUP"] = "on" if on else "off"
+        done.append("每周自动备份到 Google Drive" if on else "已关闭自动备份")
+    if payload.get("backup_now") or payload.get("backup_restore"):
+        if backup is None:
+            return {"error": "要先连接 Google 才能备份"}
+        hub = session.hub
+
+        def run_backup():
+            try:
+                result = backup.backup()
+                hub.broadcast({"type": "status", "text": f"已备份到 Google Drive:{result['name']}"
+                                                         f"({len(result['files'])} 个文件)"})
+            except Exception as e:
+                hub.broadcast({"type": "error", "text": f"备份没成功:{e}"})
+
+        def run_restore():
+            try:
+                result = backup.download_latest()
+                hub.broadcast({"type": "status", "text": f"已下载备份 {result['name']},马上重启换上"})
+                session.events.put(("command", "restart"))
+            except Exception as e:
+                hub.broadcast({"type": "error", "text": f"还原没成功:{e}"})
+
+        restore = bool(payload.get("backup_restore"))
+        threading.Thread(target=run_restore if restore else run_backup, daemon=True).start()
+        done.append("正在从 Google Drive 下载最新的备份,好了会自动重启" if restore else "正在备份到 Google Drive……")
     if payload.get("google_login"):
         if google_login is None:
             return {"error": "还没有设置 Google(需要先放好 credentials.json)"}
@@ -1367,6 +1406,9 @@ def run_web(args) -> None:
             friday_web.show_window(friday_web.app_url(existing["port"], existing["token"]), profile_dir)
         print("星期五已经在运行,把它的窗口叫到了前面")
         return
+    import friday_backup
+
+    restored = friday_backup.apply_pending_restore(Path(data_dir))  # 上次点了“从备份还原”
 
     call_me = args.call_me or os.environ.get("FRIDAY_CALL_ME") or DEFAULT_CALL_ME
     account = GoogleAccount(os.path.join(data_dir, "credentials.json"), os.path.join(data_dir, "google_token.json"))
@@ -1421,6 +1463,19 @@ def run_web(args) -> None:
 
         budget = attach_budget(assistant, meter, router, budget_notice)
     session.budget = budget
+    session.events = events
+    if restored:
+        hub.broadcast({"type": "status", "text": f"已从 Google Drive 的备份还原了 {len(restored)} 个文件(还原前的资料存在 "
+                                                  f"{friday_backup.BEFORE_RESTORE})"})
+    session.backup = None
+    if google is not None:
+        session.backup = friday_backup.DriveBackup(Path(data_dir), lambda: account.service("drive").files())
+        friday_backup.BackupScheduler(
+            session.backup,
+            ready=lambda: account.status()["state"] in ("ok", "expiring"),
+            enabled=lambda: os.environ.get("FRIDAY_BACKUP", "on") != "off",
+            report=lambda text, failed: hub.broadcast({"type": "error" if failed else "status", "text": text}),
+        ).start()
     port = args.port or int(os.environ.get("FRIDAY_WEB_PORT") or friday_web.DEFAULT_PORT)
     token = os.environ.get("FRIDAY_WEB_TOKEN") or friday_web.new_token()  # 更新后重启沿用原来的口令
     discord = None  # 下面启动;界面状态接口会读到它

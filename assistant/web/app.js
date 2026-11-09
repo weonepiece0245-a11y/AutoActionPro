@@ -343,6 +343,13 @@ function fillSettings() {
       : "没有 Admin Key 时用星期五自己的估算。Admin Key 只在你的电脑上保存,只用来读花费报表。";
     $("consoleNote").className = "set-note" + (b.console_error ? " warn" : "");
   }
+  const k = s.backup;
+  $("backupGroup").hidden = !k;
+  if (k) {
+    $("setBackup").checked = k.enabled;
+    $("backupLast").textContent = k.last ? new Date(k.last * 1000).toLocaleString("zh-CN", { hour12: false }).slice(0, -3) : "还没有备份过";
+    $("backupLast").className = "google-state " + (k.last && Date.now() / 1000 - k.last < 8 * 86400 ? "ok" : "warn");
+  }
   const g = s.google;
   $("googleRow").hidden = !g || g.state === "off";
   if (g) {
@@ -381,6 +388,12 @@ $("previewVoice").onclick = async () => {
 $("saveRate").onclick = () => saveSetting({ rate: $("setRate").value.trim() });
 $("setAutostart").onchange = (e) => saveSetting({ autostart: e.target.checked });
 $("googleLogin").onclick = () => saveSetting({ google_login: true }, 9000);
+$("setBackup").onchange = (e) => saveSetting({ backup_auto: e.target.checked });
+$("backupNow").onclick = () => saveSetting({ backup_now: true }, 4000);
+$("backupRestore").onclick = () => {
+  if (!confirm("要用 Google Drive 里最新的备份,换掉现在的记忆、提醒、待办和聊天记录吗?\n\n现在的资料会先在电脑上另存一份,星期五会自动重启。")) return;
+  saveSetting({ backup_restore: true }, 5000);
+};
 $("saveBudget").onclick = () => saveSetting({ budget_myr: $("setBudget").value.trim() || 0 });
 $("saveCredit").onclick = () => saveSetting({ credit_usd: $("setCredit").value.trim() || 0, credit_since: $("setCreditSince").value });
 $("saveAdminKey").onclick = async () => {
