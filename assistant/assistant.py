@@ -38,6 +38,7 @@ from friday_daily import (  # noqa: E402
 from friday_discord import DiscordBridge, read_token, set_discord_enabled  # noqa: E402
 from friday_google import GoogleAccount, GoogleTools  # noqa: E402
 from friday_pc import Computer, ScreenControl, drain_console_input  # noqa: E402
+from friday_budget import Budget, BudgetExceeded  # noqa: E402
 from friday_router import SONNET, UPGRADE_TOOL, Router  # noqa: E402
 from friday_tools import SERVER_TOOL_LABELS, ConversationArchive, Memory, Toolbox  # noqa: E402
 
@@ -291,6 +292,7 @@ class Assistant:
         self.system = self._build_system()
         self.on_usage: Optional[Callable] = None  # 每次请求后收到 (usage, 模型),用来统计花费
         self.router = None  # 自动选模型(friday_router.Router);None 就一直用 self.model
+        self.budget = None  # 每月预算(friday_budget.Budget);用完了就不再问 Claude
         self.exchanges: list[dict] = []  # 最近几轮问答的文字({"q", "a", "t"}),瘦身和重启后接着聊用
         self.history_file: Optional[Path] = None
         self.clock: Callable[[], float] = time.time
@@ -349,6 +351,8 @@ class Assistant:
         模型需要用工具时会自动执行,并通过 on_status 报告进度。
         出错或被拒绝时撤回本轮的全部消息,保证历史仍然完整有效。
         """
+        if self.budget is not None:
+            self.budget.before_ask()  # 预算用完了:直接告诉用户,不花钱
         self._slim_if_idle()
         start = len(self.messages)
         if self.router is not None:
@@ -436,7 +440,7 @@ class Assistant:
         )
         if self.toolbox is not None:
             params["tools"] = self.toolbox.definitions()
-            if self.router is not None and self.model == SONNET:
+            if self.router is not None and self.model == SONNET and not self.router.saving():
                 params["tools"] = params["tools"] + [UPGRADE_TOOL]  # Sonnet 发现太难可以转给 Opus
 
         with self.client.beta.messages.stream(**params) as stream:
@@ -598,6 +602,8 @@ def error_text(error: BaseException) -> tuple[str, bool] | None:
         return "(已中断本次回答)", False
     if isinstance(error, RefusalError):
         return "抱歉,这个问题我无法回答,换个问题试试吧。", False
+    if isinstance(error, BudgetExceeded):
+        return str(error), False
     if isinstance(error, IncompleteAnswerError):
         return f"这次没能完成:{error}。可以把任务拆小一点再试。", False
     if isinstance(error, anthropic.AuthenticationError):
@@ -968,6 +974,7 @@ class WebSession:
     restart = False  # 更新完要重启
     call_me = ""  # 现在的称呼(齿轮设定里显示)
     google_account = None  # Google 登录状态(齿轮设定里显示、重新登录)
+    budget = None  # 每月预算和余额
     meter = None  # 花费统计
     router = None  # 自动选模型
     hub_audio = None  # 由 run_web 设置成 WebContext.audio
@@ -1147,6 +1154,7 @@ def settings_state(session, meter=None) -> dict:
         "rate": meter.rate if meter is not None else None,
         "autostart": friday_app.autostart_enabled(),
         "google": session.google_account.status() if getattr(session, "google_account", None) else None,
+        "budget": session.budget.state() if getattr(session, "budget", None) else None,
     }
 
 
@@ -1201,11 +1209,64 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         except Exception as e:
             return {"error": f"设置开机启动失败:{e}"}
         done.append("开机会自动在后台启动" if on else "已关闭开机自动启动")
+    budget = getattr(session, "budget", None)
+    refresh_console = False
+    if "budget_myr" in payload:
+        try:
+            amount = float(payload["budget_myr"] or 0)
+        except (TypeError, ValueError):
+            return {"error": "预算要填数字(马币);填 0 就是不限"}
+        if not 0 <= amount <= 100000:
+            return {"error": "预算看起来不对"}
+        save_env_value(env, "FRIDAY_BUDGET_MYR", f"{amount:g}")
+        os.environ["FRIDAY_BUDGET_MYR"] = f"{amount:g}"
+        done.append(f"每月预算设为 RM {amount:g}" if amount else "已取消每月预算")
+    if "credit_usd" in payload:
+        try:
+            credit = float(payload["credit_usd"] or 0)
+        except (TypeError, ValueError):
+            return {"error": "充值金额要填数字(美元)"}
+        since = str(payload.get("credit_since") or "").strip()
+        if credit:
+            try:
+                day = datetime.date.fromisoformat(since)
+            except ValueError:
+                return {"error": "请选充值的日期"}
+            if day > datetime.date.today() or not 0 < credit <= 100000:
+                return {"error": "充值金额或日期不对"}
+        save_env_value(env, "FRIDAY_CREDIT_USD", f"{credit:g}")
+        save_env_value(env, "FRIDAY_CREDIT_SINCE", since if credit else "")
+        os.environ["FRIDAY_CREDIT_USD"] = f"{credit:g}"
+        os.environ["FRIDAY_CREDIT_SINCE"] = since if credit else ""
+        refresh_console = True
+        done.append(f"记下了:{since} 充值 US${credit:g}" if credit else "已清除充值记录")
+    if "admin_key" in payload:
+        key = str(payload["admin_key"] or "").strip()
+        if key and (not key.startswith("sk-ant-admin") or any(c.isspace() for c in key)):
+            return {"error": "这不是 Admin Key(要以 sk-ant-admin 开头);普通的 API Key 读不到花费"}
+        save_env_value(env, "FRIDAY_ADMIN_KEY", key)
+        os.environ["FRIDAY_ADMIN_KEY"] = key
+        refresh_console = True
+        done.append("已保存 Admin Key,正在读取 Console 的花费" if key else "已删除 Admin Key,改回星期五自己估算")
+    if refresh_console and budget is not None:
+        threading.Thread(target=budget.refresh_console, daemon=True).start()
     if payload.get("google_login"):
         if google_login is None:
             return {"error": "还没有设置 Google(需要先放好 credentials.json)"}
         done.append(google_login())
     return {"ok": True, "message": ";".join(done) or "没有改动"}
+
+
+def attach_budget(assistant: Assistant, meter, router=None, notify: Callable[[str], None] | None = None,
+                  start: bool = True) -> Budget:
+    """每月预算:80% 提醒、90% 只用 Sonnet、用完暂停;有 Admin Key 就读 Console 的真实花费。"""
+    budget = Budget(meter, notify=notify)
+    assistant.budget = budget
+    if router is not None:
+        router.saver = budget.saving
+    if start:
+        budget.start()
+    return budget
 
 
 def start_model(args) -> str:
@@ -1256,7 +1317,18 @@ def web_state(session: WebSession, toolbox: Toolbox, discord, cache: dict) -> di
         ("联网搜索", toolbox.web, "ON" if toolbox.web else "OFF"),
     ]
     meter = getattr(session, "meter", None)
-    if meter is not None:
+    budget = getattr(session, "budget", None)
+    if budget is not None:
+        state = budget.state()
+        spent = ("" if state["source"] == "console" else "约 ") + f"RM {state['spent_myr']:.2f}"
+        if state["budget_myr"]:
+            spent += f" / {state['budget_myr']:g}"
+        system.append(("本月花费", "warn" if state["ratio"] >= 0.8 else True, spent))
+        if state["remaining_usd"] is not None:
+            remaining = state["remaining_usd"]
+            system.append(("余额", "warn" if remaining < 1 else True,
+                           f"约 US$ {remaining:.2f}" if remaining > 0 else "可能用完了"))
+    elif meter is not None:
         system.append(("本月花费", True, f"约 RM {meter.month_myr():.2f}"))
     router = getattr(session, "router", None)
     model = {"model": router.label(), "mode": router.mode} if router is not None else None
@@ -1341,6 +1413,14 @@ def run_web(args) -> None:
     session.meter = meter
     session.router = router
     session.call_me = call_me
+    budget = None
+    if assistant is not None:
+        def budget_notice(text: str) -> None:
+            hub.broadcast({"type": "reminder", "text": "💰 " + text})
+            notify_popup("星期五", text)
+
+        budget = attach_budget(assistant, meter, router, budget_notice)
+    session.budget = budget
     port = args.port or int(os.environ.get("FRIDAY_WEB_PORT") or friday_web.DEFAULT_PORT)
     token = os.environ.get("FRIDAY_WEB_TOKEN") or friday_web.new_token()  # 更新后重启沿用原来的口令
     discord = None  # 下面启动;界面状态接口会读到它
@@ -1455,10 +1535,11 @@ def run_server(args) -> None:
     except anthropic.AnthropicError:
         print(f"未找到 API 凭据。{KEY_HINT}", file=sys.stderr)
         sys.exit(1)
-    attach_meter(assistant, data_dir, log=True)
+    meter = attach_meter(assistant, data_dir, log=True)
     assistant.enable_history(os.path.join(data_dir, "friday_conversation.json"))
-    attach_router(assistant, args, data_dir,
-                  on_change=lambda label, mode: print(f"改用 {label}", flush=True))
+    router = attach_router(assistant, args, data_dir,
+                           on_change=lambda label, mode: print(f"改用 {label}", flush=True))
+    attach_budget(assistant, meter, router, notify=lambda text: print(text, flush=True))
 
     import voice as voice_module
 
@@ -1618,9 +1699,11 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(1)
     if persona.toolbox is not None:  # 星期五:也把花费记下来(命令行里不显示),并自动选模型
         friday_dir = os.path.dirname(os.path.abspath(persona.toolbox.memory.path))
-        attach_meter(assistant, friday_dir)
+        meter = attach_meter(assistant, friday_dir)
         assistant.enable_history(os.path.join(friday_dir, "friday_conversation.json"))
-        attach_router(assistant, args, friday_dir, on_change=lambda label, mode: print_status(f"改用 {label}"))
+        router = attach_router(assistant, args, friday_dir,
+                               on_change=lambda label, mode: print_status(f"改用 {label}"))
+        attach_budget(assistant, meter, router, notify=print_status)
     events: queue.Queue = queue.Queue()
     if persona.toolbox is not None and persona.toolbox.reminders is not None:
         ReminderScheduler(persona.toolbox.reminders, events).start()

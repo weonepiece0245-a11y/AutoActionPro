@@ -123,6 +123,18 @@
         <span class="set-ctl"><select class="mini-select" id="setVoice"></select><button type="button" class="mini-btn" id="previewVoice">试听</button></span></div>
     </div>
 
+    <div class="set-group" id="budgetGroup" hidden>
+      <h3>预算和余额</h3>
+      <div class="set-row"><label for="setBudget">每月预算(0 = 不限)</label>
+        <span class="set-ctl">RM <input class="mini-input short" id="setBudget" inputmode="decimal"><button type="button" class="mini-btn" id="saveBudget">保存</button></span></div>
+      <div class="set-note" id="budgetNote"></div>
+      <div class="set-row"><label for="setCredit">充值记录(用来算余额)</label>
+        <span class="set-ctl">US$ <input class="mini-input short" id="setCredit" inputmode="decimal"> <input class="mini-input date" id="setCreditSince" type="date"><button type="button" class="mini-btn" id="saveCredit">保存</button></span></div>
+      <div class="set-row"><label for="setAdminKey">Claude Console(Admin Key,可选)</label>
+        <span class="set-ctl"><input class="mini-input" id="setAdminKey" type="password" autocomplete="off" placeholder="sk-ant-admin…"><button type="button" class="mini-btn" id="saveAdminKey">保存</button></span></div>
+      <div class="set-note" id="consoleNote"></div>
+    </div>
+
     <div class="set-group">
       <h3>外观</h3>
       <div class="set-row"><label for="brightness">光球亮度</label>

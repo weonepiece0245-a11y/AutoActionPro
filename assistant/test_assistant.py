@@ -79,6 +79,7 @@ import friday_web  # noqa: E402
 import friday_update  # noqa: E402
 import friday_usage  # noqa: E402
 import friday_router  # noqa: E402
+import friday_budget  # noqa: E402
 import voice  # noqa: E402  assistant.py 已把所在目录加入 sys.path
 
 
@@ -4382,6 +4383,142 @@ class GoogleLoginStatusTest(TempDirTest):
         result = app.apply_settings({"google_login": True}, session, toolbox, env, google_login=lambda: "已打开登录页")
         self.assertEqual(result["message"], "已打开登录页")
 
+
+
+class BudgetTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.now = [datetime.datetime(2026, 11, 20, 12, 0)]
+        self.meter = friday_usage.UsageMeter(Path(self.dir, "u.json"), clock=lambda: self.now[0], usd_to_myr=4.0)
+        patcher = mock.patch.dict(os.environ, {}, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for key in ("FRIDAY_BUDGET_MYR", "FRIDAY_CREDIT_USD", "FRIDAY_CREDIT_SINCE", "FRIDAY_ADMIN_KEY"):
+            os.environ.pop(key, None)
+        self.notes = []
+        self.budget = friday_budget.Budget(self.meter, notify=self.notes.append, clock=lambda: self.now[0])
+
+    def spend(self, usd):
+        self.meter.add({"output_tokens": usd / 20 * 1_000_000}, "claude-opus-5-5")
+
+    def test_levels(self):
+        os.environ["FRIDAY_BUDGET_MYR"] = "40"  # = US$10
+        self.spend(5)
+        self.budget.before_ask()
+        self.assertEqual(self.notes, [])
+        self.spend(3.2)  # 82%
+        self.budget.before_ask()
+        self.budget.before_ask()
+        self.assertEqual(len(self.notes), 1)
+        self.assertIn("80%", self.notes[0])
+        self.assertFalse(self.budget.saving())
+        self.spend(1)  # 92%
+        self.budget.check()
+        self.assertTrue(self.budget.saving())
+        self.assertIn("Sonnet", self.notes[-1])
+        self.spend(1)  # 102%
+        with self.assertRaises(friday_budget.BudgetExceeded) as ctx:
+            self.budget.before_ask()
+        self.assertIn("RM 40", str(ctx.exception))
+        # 下个月自动恢复
+        self.now[0] = datetime.datetime(2026, 12, 1, 9, 0)
+        self.budget.before_ask()
+
+    def test_no_budget_means_no_limit(self):
+        self.spend(100)
+        self.budget.before_ask()
+        self.assertFalse(self.budget.saving())
+        self.assertEqual(self.notes, [])
+
+    def test_remaining_from_top_up(self):
+        self.assertIsNone(self.budget.remaining_usd())
+        self.now[0] = datetime.datetime(2026, 11, 5, 9, 0)
+        self.spend(2)  # 充值之前花的,不算
+        self.now[0] = datetime.datetime(2026, 11, 20, 12, 0)
+        os.environ.update(FRIDAY_CREDIT_USD="10", FRIDAY_CREDIT_SINCE="2026-11-10")
+        self.spend(1.5)
+        self.assertAlmostEqual(self.budget.remaining_usd(), 8.5)
+
+    def test_console_numbers_win(self):
+        pages = [
+            {"data": [{"results": [{"amount": "123.0", "currency": "USD"}]},
+                      {"results": [{"amount": "77.0"}, {"amount": "50"}]}], "has_more": True, "next_page": "p2"},
+            {"data": [{"results": [{"amount": "100"}]}], "has_more": False},
+        ]
+        urls = []
+
+        def fetch(url, key):
+            urls.append((url, key))
+            return pages[(len(urls) - 1) % 2]
+
+        console = friday_budget.ConsoleCost("sk-ant-admin01-x", fetch)
+        self.assertAlmostEqual(console.cost_since(datetime.date(2026, 11, 1)), 3.5)  # 350 美分
+        self.assertIn("starting_at=2026-11-01T00%3A00%3A00Z", urls[0][0])
+        self.assertIn("page=p2", urls[1][0])
+        os.environ["FRIDAY_ADMIN_KEY"] = "sk-ant-admin01-x"
+        budget = friday_budget.Budget(self.meter, clock=lambda: self.now[0],
+                                      console_factory=lambda key: friday_budget.ConsoleCost(key, fetch))
+        self.spend(9)
+        budget.refresh_console()
+        self.assertEqual(budget.month_usd(), (3.5, "console"))
+        self.assertEqual(budget.state()["source"], "console")
+
+    def test_console_errors(self):
+        os.environ["FRIDAY_ADMIN_KEY"] = "sk-ant-admin01-x"
+
+        def fetch(url, key):
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+        budget = friday_budget.Budget(self.meter, console_factory=lambda key: friday_budget.ConsoleCost(key, fetch))
+        self.spend(1)
+        state = budget.refresh_console()
+        self.assertIn("个人账户", state["error"])
+        self.assertEqual(budget.month_usd()[1], "estimate")  # 读不到就用估算
+        self.assertIn("个人账户", budget.state()["console_error"])
+
+    def test_assistant_stops_and_router_saves(self):
+        os.environ["FRIDAY_BUDGET_MYR"] = "4"
+        client = FakeClient()
+        bot = app.Assistant(client=client)
+        router = friday_router.Router(None)
+        app.attach_budget(bot, self.meter, router, start=False)
+        self.spend(0.95)  # 95%:只用 Sonnet
+        self.assertEqual(router.choose("帮我分析一下", history_empty=True), friday_router.SONNET)
+        self.spend(0.1)
+        with self.assertRaises(friday_budget.BudgetExceeded) as ctx:
+            bot.ask("你好", lambda t: None)
+        self.assertEqual(client.calls, [])  # 没有花钱
+        self.assertEqual(app.error_text(ctx.exception)[1], False)
+
+    def test_window_rows_and_settings(self):
+        os.environ.update(FRIDAY_BUDGET_MYR="45", FRIDAY_CREDIT_USD="10", FRIDAY_CREDIT_SINCE="2026-11-01",
+                          FRIDAY_ADMIN_KEY="sk-ant-admin01-secret")
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.budget = self.budget
+        self.spend(9.5)
+        toolbox = tools.Toolbox(tools.Memory(os.path.join(self.dir, "m.json")), lambda a: True)
+        rows = app.web_state(session, toolbox, None, {})["system"]
+        self.assertIn(("本月花费", "warn", "约 RM 38.00 / 45"), rows)
+        self.assertIn(("余额", "warn", "约 US$ 0.50"), rows)
+        state = app.settings_state(session, self.meter)
+        self.assertNotIn("sk-ant-admin01-secret", json.dumps(state))  # 不会把钥匙发给窗口
+        self.assertTrue(state["budget"]["admin_key_set"])
+
+    def test_settings_validation(self):
+        env = str(Path(self.dir, ".env"))
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.budget = self.budget
+        apply = lambda payload: app.apply_settings(payload, session, None, env)
+        self.assertTrue(apply({"budget_myr": "45"})["ok"])
+        self.assertEqual(os.environ["FRIDAY_BUDGET_MYR"], "45")
+        self.assertIn("error", apply({"budget_myr": "abc"}))
+        self.assertIn("error", apply({"credit_usd": "10", "credit_since": ""}))
+        self.assertIn("error", apply({"credit_usd": "10", "credit_since": "2999-01-01"}))
+        self.assertTrue(apply({"credit_usd": "10", "credit_since": "2026-11-01"})["ok"])
+        self.assertIn("error", apply({"admin_key": "sk-ant-api03-normal"}))
+        self.assertTrue(apply({"admin_key": ""})["ok"])
+        text = Path(env).read_text(encoding="utf-8")
+        self.assertIn("FRIDAY_CREDIT_SINCE=2026-11-01", text)
 
 if __name__ == "__main__":
     unittest.main()

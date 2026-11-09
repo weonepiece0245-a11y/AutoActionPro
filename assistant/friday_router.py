@@ -129,6 +129,7 @@ class Router:
         self.last_ask: float | None = None
         self.last_question = ""
         self.last_reason = ""
+        self.saver: Callable[[], bool] | None = None  # 预算快用完时返回 True:自动模式只用 Sonnet
         self._load()
 
     # ---------- 设置 ----------
@@ -189,7 +190,7 @@ class Router:
         previous = self.current
         if self.mode == "opus":
             model = OPUS
-        elif self.mode == "sonnet":
+        elif self.mode == "sonnet" or self.saving():
             model = SONNET
         elif wants_upgrade(question):
             model = OPUS
@@ -206,6 +207,12 @@ class Router:
         if model != previous:
             self._notify()
         return model
+
+    def saving(self) -> bool:
+        try:
+            return bool(self.saver and self.saver())
+        except Exception:
+            return False
 
     def upgrade(self, question: str) -> None:
         """Sonnet 自己要求转给 Opus。"""

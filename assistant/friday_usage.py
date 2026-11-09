@@ -58,7 +58,9 @@ def request_cost(usage, model: str | None = None) -> float:
 
 
 class UsageMeter:
-    """按月累计花费,存在 friday_usage.json 里(换月自动从零开始)。"""
+    """按天累计花费,存在 friday_usage.json 里;可以算本月、或者从某天以来花了多少。"""
+
+    KEEP_DAYS = 400
 
     def __init__(self, path: str | Path, clock: Callable[[], datetime.datetime] = datetime.datetime.now,
                  usd_to_myr: float | None = None) -> None:
@@ -71,22 +73,31 @@ class UsageMeter:
     def _month(self) -> str:
         return self.clock().strftime("%Y-%m")
 
+    def _today(self) -> str:
+        return self.clock().strftime("%Y-%m-%d")
+
     def _load(self) -> dict:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and isinstance(data.get("usd"), (int, float)):
-                return data
         except (OSError, ValueError):
-            pass
-        return {"month": self._month(), "usd": 0.0, "requests": 0}
+            data = None
+        if isinstance(data, dict) and isinstance(data.get("days"), dict):
+            return {"days": {k: float(v) for k, v in data["days"].items() if isinstance(v, (int, float))},
+                    "requests": int(data.get("requests", 0))}
+        if isinstance(data, dict) and isinstance(data.get("usd"), (int, float)):  # 旧版只存了本月总数
+            month = data.get("month") or self._month()
+            return {"days": {f"{month}-01": float(data["usd"])}, "requests": int(data.get("requests", 0))}
+        return {"days": {}, "requests": 0}
 
     def add(self, usage, model: str | None = None) -> float:
         cost = request_cost(usage, model)
         with self.lock:
-            if self.data.get("month") != self._month():
-                self.data = {"month": self._month(), "usd": 0.0, "requests": 0}
-            self.data["usd"] += cost
+            days = self.data["days"]
+            today = self._today()
+            days[today] = days.get(today, 0.0) + cost
             self.data["requests"] += 1
+            for old in sorted(days)[:-self.KEEP_DAYS]:
+                del days[old]
             temp = self.path.with_name(self.path.name + ".tmp")
             try:
                 temp.write_text(json.dumps(self.data), encoding="utf-8")
@@ -95,10 +106,18 @@ class UsageMeter:
                 pass
         return cost
 
-    def month_myr(self) -> float:
+    def month_usd(self) -> float:
+        month = self._month()
         with self.lock:
-            usd = self.data["usd"] if self.data.get("month") == self._month() else 0.0
-        return usd * self.rate
+            return sum(v for day, v in self.data["days"].items() if day.startswith(month))
+
+    def since_usd(self, day: str) -> float:
+        """从某天(YYYY-MM-DD,含当天)到现在花了多少美元。"""
+        with self.lock:
+            return sum(v for d, v in self.data["days"].items() if d >= day)
+
+    def month_myr(self) -> float:
+        return self.month_usd() * self.rate
 
     def describe(self, usage, cost: float, model: str | None = None) -> str:
         """写进运行记录的一行,方便看缓存有没有生效。"""

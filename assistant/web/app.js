@@ -322,6 +322,27 @@ function fillSettings() {
   voice.value = s.voice;
   $("setRate").value = s.rate ?? "";
   $("autostartRow").hidden = s.autostart === null || s.autostart === undefined;
+  const b = s.budget;
+  $("budgetGroup").hidden = !b;
+  if (b) {
+    $("setBudget").value = b.budget_myr || 0;
+    $("setCredit").value = b.credit_usd || "";
+    $("setCreditSince").value = b.credit_since || "";
+    $("setCreditSince").max = new Date().toISOString().slice(0, 10);
+    const src = b.source === "console" ? "Console 实际花费" : "星期五估算";
+    let note = `这个月已用 RM ${b.spent_myr.toFixed(2)}(${src})`;
+    if (b.budget_myr) note += `,预算的 ${Math.round(b.ratio * 100)}%。用到 80% 提醒,90% 起只用 Sonnet,用完就暂停。`;
+    if (b.remaining_usd !== null && b.remaining_usd !== undefined)
+      note += b.remaining_usd > 0 ? ` 余额约 US$ ${b.remaining_usd.toFixed(2)}。` : " 余额可能用完了,去 Console 看看。";
+    $("budgetNote").textContent = note;
+    $("budgetNote").className = "set-note" + (b.ratio >= 0.8 ? " warn" : "");
+    $("setAdminKey").value = "";
+    $("setAdminKey").placeholder = b.admin_key_set ? "已保存(要换就重新填)" : "sk-ant-admin…";
+    $("consoleNote").textContent = b.console_error ? "⚠ " + b.console_error
+      : b.admin_key_set ? (b.source === "console" ? "✓ 已连接 Console,花费是真实数字" : "正在读取 Console……")
+      : "没有 Admin Key 时用星期五自己的估算。Admin Key 只在你的电脑上保存,只用来读花费报表。";
+    $("consoleNote").className = "set-note" + (b.console_error ? " warn" : "");
+  }
   const g = s.google;
   $("googleRow").hidden = !g || g.state === "off";
   if (g) {
@@ -336,6 +357,7 @@ async function saveSetting(change, ms = 3200) {
   if (r.error) { toast(r.error, 4000); fillSettings(); return false; }
   toast(r.message || "已保存", ms);
   await loadState();
+  fillSettings();
   return true;
 }
 function openSettings() { fillSettings(); $("settings").hidden = false; $("settingsClose").focus(); }
@@ -359,6 +381,13 @@ $("previewVoice").onclick = async () => {
 $("saveRate").onclick = () => saveSetting({ rate: $("setRate").value.trim() });
 $("setAutostart").onchange = (e) => saveSetting({ autostart: e.target.checked });
 $("googleLogin").onclick = () => saveSetting({ google_login: true }, 9000);
+$("saveBudget").onclick = () => saveSetting({ budget_myr: $("setBudget").value.trim() || 0 });
+$("saveCredit").onclick = () => saveSetting({ credit_usd: $("setCredit").value.trim() || 0, credit_since: $("setCreditSince").value });
+$("saveAdminKey").onclick = async () => {
+  const key = $("setAdminKey").value.trim();
+  if (!key && !confirm("要删除已保存的 Admin Key,改回星期五自己估算吗?")) return;
+  if (await saveSetting({ admin_key: key }, 4000)) setTimeout(() => loadState().then(fillSettings), 4000);
+};
 
 // ---------- 检查更新:下载新版本后星期五自动重启,这个窗口自己刷新 ----------
 function resetUpdateBtn() { $("updateBtn").disabled = false; $("updateBtn").textContent = "检查更新"; }
