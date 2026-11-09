@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import datetime
 import io
 import json
 import os
@@ -103,11 +104,17 @@ def apply(data: bytes, root: Path) -> list[str]:
     return changed
 
 
-def current_version(assistant_dir: Path) -> str:
+def version_info(assistant_dir: Path) -> dict:
+    """{"commit", "branch", "updated"};没有版本文件时是空的。"""
     try:
-        return json.loads((assistant_dir / VERSION_FILE).read_text(encoding="utf-8")).get("commit", "")
+        info = json.loads((Path(assistant_dir) / VERSION_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return ""
+        return {}
+    return info if isinstance(info, dict) else {}
+
+
+def current_version(assistant_dir: Path) -> str:
+    return str(version_info(assistant_dir).get("commit", ""))
 
 
 def install_requirements(assistant_dir: Path, run=subprocess.run) -> bool:
@@ -133,7 +140,9 @@ def update(assistant_dir: Path, fetcher: Fetch = fetch, installer=install_requir
     deps_ok = True
     if any(name.endswith("requirements.txt") for name in changed):
         deps_ok = installer(assistant_dir)
-    (assistant_dir / VERSION_FILE).write_text(json.dumps({"commit": commit, "branch": branch}), encoding="utf-8")
+    updated = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    (assistant_dir / VERSION_FILE).write_text(json.dumps({"commit": commit, "branch": branch, "updated": updated}),
+                                              encoding="utf-8")
     return {"status": "updated" if changed else "latest", "commit": commit, "changed": changed,
             "branch": branch, "deps_ok": deps_ok}
 

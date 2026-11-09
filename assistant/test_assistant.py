@@ -3950,6 +3950,7 @@ class FridayUpdateTest(TempDirTest):
         self.assertEqual((self.assistant_dir / "friday_memory.json").read_text(), "[]")
         self.assertFalse(Path(self.tmp, "evil.txt").exists())
         self.assertEqual(friday_update.current_version(self.assistant_dir), "abc1234def")
+        self.assertTrue(friday_update.version_info(self.assistant_dir)["updated"].startswith("20"))
         # 再来一次:没有变化
         again = friday_update.update(self.assistant_dir, fetcher=lambda url: data, installer=lambda d: True)
         self.assertEqual((again["status"], again["changed"]), ("latest", []))
@@ -5341,6 +5342,17 @@ class PromptWordingTest(TempDirTest):
         self.assertNotIn("用 todo 管理", prompt)
         self.assertIn("用 weather 工具", prompt.replace("查天气用 weather 工具", "用 weather 工具"))
         self.assertIn("update_memory", prompt)
+
+    def test_knows_where_it_lives(self):
+        prompt = app.friday_persona(toolbox=self.make_toolbox()).system()
+        self.assertIn(app.SCRIPT_DIR, prompt)
+        self.assertIn(os.path.join(app.SCRIPT_DIR, "CHANGES.md"), prompt)
+        self.assertIn("不是你", prompt)
+        self.assertTrue(os.path.exists(os.path.join(app.SCRIPT_DIR, "CHANGES.md")))
+        with mock.patch.object(friday_update, "version_info", lambda d: {"commit": "abc1234def", "updated": "2026-11-10 09:00"}):
+            self.assertEqual(app.version_text(), "版本 abc1234,2026-11-10 09:00 更新")
+        with mock.patch.object(friday_update, "version_info", lambda d: {}):
+            self.assertIn("不明", app.version_text())
 
 
 class MemoryCategoryTest(TempDirTest):

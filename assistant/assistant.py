@@ -101,6 +101,12 @@ FRIDAY_PROMPT = """你是“星期五”,{call_me}的私人 AI 助手。
 - 信息变了或有误,用 update_memory 直接改那一条(不用先删再记);{call_me}让你忘掉什么就用 forget。
 - 不要记密码、密钥、证件号、银行卡号等敏感信息。
 
+## 关于你自己
+你的程序(星期五自己的代码)装在 {app_dir},{version}。
+{call_me}电脑上别的项目文件夹(哪怕也是 AI 助手,名字像 jarvis 之类)不是你,不要把它们当成你自己的代码。
+{call_me}问你最近更新了什么、多了哪些功能时,先用 read_file 读 {changes}(你的更新记录,最新的在最上面),
+按里面写的回答;能当场试的功能(比如天气、记忆)可以顺便试一下给{call_me}看。
+
 ## 能做的事
 你不只是聊天,还能动手把事办成:
 - 查天气用 weather 工具(实时数据,按当地时间给逐小时预报,比上网搜准);其他最新信息(新闻、价格、资料)用 web_search 搜索,用 web_fetch 读网页。
@@ -194,6 +200,17 @@ def default_persona() -> Persona:
     )
 
 
+def version_text() -> str:
+    """给提示词用的版本说明(用“检查更新”装的才有)。"""
+    import friday_update
+
+    info = friday_update.version_info(Path(SCRIPT_DIR))
+    if not info.get("commit"):
+        return "版本号不明(不是用“检查更新”装的)"
+    updated = f",{info['updated']} 更新" if info.get("updated") else ""
+    return f"版本 {info['commit'][:7]}{updated}"
+
+
 def friday_persona(
     call_me: str = DEFAULT_CALL_ME,
     toolbox: Optional[Toolbox] = None,
@@ -212,6 +229,9 @@ def friday_persona(
             memories=toolbox.memory.as_prompt() if toolbox else "(本次没有开启记忆)",
             # 接了 Google 时只有 google_tasks(Google Tasks,手机上也能看到),没有 todo
             todo_tool="google_tasks" if toolbox is not None and toolbox.google is not None else "todo",
+            app_dir=SCRIPT_DIR,
+            changes=os.path.join(SCRIPT_DIR, "CHANGES.md"),
+            version=version_text(),
         )
 
     def context() -> str:
