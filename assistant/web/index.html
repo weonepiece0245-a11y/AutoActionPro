@@ -31,14 +31,19 @@
     </div>
   </div>
   <div class="status-pill" id="modePill"><span class="dot"></span><span id="modeText">待机 STANDBY</span><span class="model-chip" id="modelChip" hidden></span></div>
-  <div class="clock">
-    <div id="clockTime">--:--:--</div>
-    <div id="clockDate" class="clock-date">----</div>
+  <div class="top-right">
+    <button type="button" class="icon-btn small toggle" id="panelsBtn" title="隐藏/显示两边的面板" aria-label="隐藏或显示两边的面板" aria-pressed="true">
+      <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path class="side" d="M8 4v16M16 4v16"/></svg>
+    </button>
+    <div class="clock">
+      <div id="clockTime">--:--:--</div>
+      <div id="clockDate" class="clock-date">----</div>
+    </div>
   </div>
 </header>
 
 <aside class="hud hud-left">
-  <section class="panel">
+  <section class="panel" data-panel="system">
     <h2><span>SYSTEM</span>系统</h2>
     <ul class="sys" id="sysList"></ul>
     <label class="bright">亮度 <input type="range" id="brightness" min="20" max="120" step="5" value="70" aria-label="光球亮度"><output id="brightOut">70%</output></label>
@@ -47,18 +52,18 @@
     </select></div>
     <div class="update-row"><span>版本 <b id="versionText">—</b></span><button type="button" class="mini-btn" id="updateBtn" title="从 GitHub 下载最新的星期五并自动重启">检查更新</button></div>
   </section>
-  <section class="panel grow">
+  <section class="panel grow" data-panel="memory">
     <h2><span>MEMORY</span>我记得的事</h2>
     <ul class="list" id="memoryList"><li class="empty">还没有记忆</li></ul>
   </section>
 </aside>
 
 <aside class="hud hud-right">
-  <section class="panel">
+  <section class="panel" data-panel="reminders">
     <h2><span>REMINDERS</span>提醒</h2>
     <ul class="list" id="reminderList"><li class="empty">没有提醒</li></ul>
   </section>
-  <section class="panel grow">
+  <section class="panel grow" data-panel="tasks">
     <h2><span>TASKS</span>待办</h2>
     <ul class="list" id="todoList"><li class="empty">没有待办</li></ul>
   </section>

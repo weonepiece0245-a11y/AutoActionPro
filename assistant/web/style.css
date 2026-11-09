@@ -110,6 +110,23 @@ body[data-mode="speaking"] { --accent: #38bdf8; }
   background: var(--glass); backdrop-filter: blur(10px); min-height: 0; overflow: hidden;
 }
 .panel.grow { flex: 1; display: flex; flex-direction: column; }
+/* 点面板标题可以折叠;折叠后只剩标题和数量 */
+.panel h2 { cursor: pointer; user-select: none; }
+.panel h2::after { content: "▾"; margin-left: auto; font-size: 12px; color: var(--muted); transition: transform .2s; }
+.panel h2:hover { color: var(--text); }
+.panel h2 .count { font-family: var(--mono); font-size: 11px; letter-spacing: 0; color: var(--muted); }
+.panel.collapsed { flex: 0 0 auto; padding-top: 10px; padding-bottom: 10px; }
+.panel.collapsed h2 { margin-bottom: 0; }
+.panel.collapsed h2::after { transform: rotate(-90deg); }
+.panel.collapsed > :not(h2) { display: none !important; }
+/* 专注模式:两边的面板都收起来,只留光球和对话 */
+body.focus { grid-template-columns: minmax(0, 1fr); grid-template-areas: "top" "center" "console"; }
+body.focus .hud { display: none; }
+body.focus .console { width: min(960px, 100%); justify-self: center; }
+.top-right { display: flex; align-items: center; gap: 14px; }
+.icon-btn.small { width: 36px; height: 36px; border-radius: 10px; }
+.icon-btn.small svg { width: 18px; height: 18px; }
+.icon-btn.toggle[aria-pressed="false"] .side { display: none; }
 .panel::before, .panel::after {
   content: ""; position: absolute; width: 16px; height: 16px; border: 2px solid var(--accent); transition: border-color .3s;
 }
@@ -230,6 +247,7 @@ body[data-mode="speaking"] { --accent: #38bdf8; }
 @media (max-width: 1000px) {
   body { grid-template-columns: minmax(0, 1fr); grid-template-areas: "top" "center" "console"; }
   .hud { display: none; }
+  #panelsBtn { display: none; }
 }
 @media (max-width: 640px) {
   body { padding: 10px; }

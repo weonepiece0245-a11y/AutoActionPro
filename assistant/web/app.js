@@ -184,6 +184,9 @@ async function loadState() {
   fillList("memoryList", s.memories, "还没有记忆,多跟我聊聊你自己", (m) => li(m.text, m.added));
   fillList("reminderList", s.reminders, "没有提醒", (r) => li(r.text, r.when));
   fillList("todoList", s.todos, "没有待办", (t) => li(t.text, t.due || ""));
+  setCount("memory", (s.memories || []).length);
+  setCount("reminders", (s.reminders || []).length);
+  setCount("tasks", (s.todos || []).length);
   const sys = $("sysList");
   sys.innerHTML = "";
   for (const [name, on, label] of s.system || []) {
@@ -220,6 +223,48 @@ $("form").onsubmit = async (e) => {
   const r = await api("/api/ask", { text, speak: speakOn });
   if (r.error) toast(r.error);
 };
+// ---------- 面板:点标题折叠;右上角按钮隐藏两边(都记在本机) ----------
+function loadPrefs(key, fallback) {
+  try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
+}
+function savePrefs(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+}
+const collapsed = new Set(loadPrefs("friday-collapsed", []));
+for (const panel of document.querySelectorAll(".panel[data-panel]")) {
+  const h2 = panel.querySelector("h2");
+  h2.tabIndex = 0;
+  h2.setAttribute("role", "button");
+  const count = document.createElement("span");
+  count.className = "count";
+  h2.querySelector("span").after(count);
+  const apply = () => {
+    panel.classList.toggle("collapsed", collapsed.has(panel.dataset.panel));
+    h2.setAttribute("aria-expanded", String(!collapsed.has(panel.dataset.panel)));
+  };
+  const toggle = () => {
+    const name = panel.dataset.panel;
+    collapsed.has(name) ? collapsed.delete(name) : collapsed.add(name);
+    savePrefs("friday-collapsed", [...collapsed]);
+    apply();
+  };
+  h2.onclick = toggle;
+  h2.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } };
+  apply();
+}
+function setCount(name, n) {
+  const el = document.querySelector(`.panel[data-panel="${name}"] h2 .count`);
+  if (el) el.textContent = n ? `(${n})` : "";
+}
+let panelsOn = loadPrefs("friday-panels", true);
+function applyPanels() {
+  document.body.classList.toggle("focus", !panelsOn);
+  $("panelsBtn").setAttribute("aria-pressed", String(panelsOn));
+  $("panelsBtn").title = panelsOn ? "隐藏两边的面板" : "显示两边的面板";
+}
+$("panelsBtn").onclick = () => { panelsOn = !panelsOn; savePrefs("friday-panels", panelsOn); applyPanels(); };
+applyPanels();
+
 // ---------- 模型:自动 / 只用 Opus / 只用 Sonnet ----------
 function showModel(label, mode) {
   $("modelChip").hidden = !label;
