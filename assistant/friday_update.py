@@ -27,7 +27,7 @@ VERSION_FILE = "friday_version.json"
 # 这些文件名永远不覆盖(都是你的私人数据或设置)
 PROTECTED = {
     ".env", "credentials.json", "google_token.json", "friday_discord.json", "friday_memory.json",
-    "friday_reminders.json", "friday_todos.json", "friday_ledger.json", "friday_alerts.json", "friday_security.log", "friday_web.json", "friday.log", "friday_usage.json", "friday_router.json",
+    "friday_reminders.json", "friday_todos.json", "friday_ledger.json", "friday_alerts.json", "friday_security.log", "friday_tidy.json", "friday_web.json", "friday.log", "friday_usage.json", "friday_router.json",
     "friday_chat.json", "friday_conversation.json", "friday_archive.jsonl", "friday.lock", "google_login.json", "friday_backup.json",
     "friday_restore_pending.zip", "friday_before_restore.zip",
     "cloud_cert.pem", "cloud_key.pem", "friday_cloud_state.json", VERSION_FILE,

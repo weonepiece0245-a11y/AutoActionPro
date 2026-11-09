@@ -453,6 +453,17 @@ function fillSettings() {
       : "没有 Admin Key 时用星期五自己的估算。Admin Key 只在你的电脑上保存,只用来读花费报表。";
     $("consoleNote").className = "set-note" + (b.console_error ? " warn" : "");
   }
+  const hl = s.health;
+  $("healthGroup").hidden = !hl;
+  if (hl) {
+    $("setHealth").checked = hl.enabled;
+    const parts = (hl.disks || []).map((d) => `${d.drive} 剩 ${d.free_gb}GB${d.low ? " ⚠" : ""}`);
+    if (hl.memory != null) parts.push(`内存用了 ${Math.round(hl.memory)}%`);
+    if (hl.uptime_days != null) parts.push(`开机 ${hl.uptime_days} 天`);
+    $("healthNote").textContent = parts.join(" · ");
+    const dl = hl.downloads;
+    $("downloadsNote").textContent = dl ? `下载文件夹:${dl.files} 个文件,${dl.gb}GB${dl.messy ? " ⚠ 有点乱" : ""}` : "下载文件夹";
+  }
   const sec = s.security;
   $("securityGroup").hidden = !sec;
   if (sec) {
@@ -591,6 +602,9 @@ $("setPush").onchange = (e) => saveSetting({ push: e.target.value });
 $("setCareWelcome").onchange = (e) => saveSetting({ care_welcome: e.target.checked });
 $("setCareBreak").onchange = (e) => saveSetting({ care_break: Number(e.target.value) });
 $("setCareNight").onchange = (e) => saveSetting({ care_night: e.target.checked });
+$("setHealth").onchange = (e) => saveSetting({ health: e.target.checked });
+$("tidyNow").onclick = () => { if (confirm("把下载文件夹最上层的文件按类型分进子文件夹(图片、文档、安装程序……)?整理错了可以撤销。")) saveSetting({ tidy_downloads: true }, 6000); };
+$("tidyUndo").onclick = () => saveSetting({ undo_tidy: true }, 5000);
 $("discordPair").onclick = () => saveSetting({ discord_pair: true }, 8000);
 $("setRain").onchange = (e) => saveSetting({ rain_alert: e.target.value });
 $("setWeekly").onchange = (e) => saveSetting({ weekly_report: e.target.checked });

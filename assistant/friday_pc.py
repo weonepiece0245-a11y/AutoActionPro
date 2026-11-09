@@ -510,6 +510,8 @@ COMPUTER_ACTIONS = {
     "focus_window": "切到某个窗口,value 是窗口标题里的关键词",
     "show_desktop": "最小化全部窗口 / 显示桌面",
     "close_app": "关闭程序(正常关闭,会提示保存),value 是程序名或窗口标题关键词,需要用户确认",
+    "tidy_downloads": "整理下载文件夹:最上层的文件按类型分进 图片/视频/音乐/文档/压缩包/安装程序/其他 子文件夹,需要用户确认,可以撤销",
+    "undo_tidy": "撤销上次整理下载文件夹(把文件放回原处)",
     "game_mode": "一键游戏模式:关掉用户在齿轮设定里事先选好的程序(已经同意过,不用再确认)",
     # 状态
     "system_status": "查看 CPU、内存、硬盘剩余空间、电池、最占内存的程序、IP、网络",
@@ -704,6 +706,22 @@ class Computer:
         rows = json.loads(out or "[]")
         rows = rows if isinstance(rows, list) else [rows]
         return [{"name": str(r["name"]), "mb": round(int(r.get("mem") or 0) / 1024 ** 2)} for r in rows if r.get("name")]
+
+    def _do_tidy_downloads(self, pc, value, approve, **_):
+        import friday_health
+
+        folder = pc.known_folder("downloads")
+        report = friday_health.downloads_report(folder)
+        if report is None:
+            return f"找不到下载文件夹 {folder}"
+        self._confirm(approve, f"整理下载文件夹 {folder}:把 {report['files']} 个文件按类型分进子文件夹(可以撤销)")
+        return friday_health.describe_tidy(friday_health.tidy(folder))
+
+    def _do_undo_tidy(self, pc, value, approve, **_):
+        import friday_health
+
+        back = friday_health.undo_tidy()
+        return f"已把 {back} 个文件放回原处" if back else "没有可以撤销的整理"
 
     def _do_game_mode(self, pc, value, approve, **_):
         import friday_care

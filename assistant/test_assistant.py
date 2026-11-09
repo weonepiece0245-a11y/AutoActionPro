@@ -93,6 +93,7 @@ import friday_quick  # noqa: E402
 import friday_alerts  # noqa: E402
 import friday_security  # noqa: E402
 import friday_vendor  # noqa: E402
+import friday_health  # noqa: E402
 import friday_weather  # noqa: E402
 import voice  # noqa: E402  assistant.py 已把所在目录加入 sys.path
 
@@ -5950,6 +5951,70 @@ class VendorTest(TempDirTest):
         bad["build/three.module.js"] = "import x from '../../../evil.js'; export const A = 1;"
         with self.assertRaises(RuntimeError):
             friday_vendor.ensure(Path(self.tmp, "web2"), lambda url: bad[url[len(friday_vendor.CDN):]].encode())
+
+
+class HealthTest(TempDirTest):
+    def test_checks_say_each_problem_once_a_day(self):
+        downloads = Path(self.tmp, "Downloads")
+        downloads.mkdir()
+        for n in range(160):
+            (downloads / f"f{n}.txt").write_text("x")
+        state = friday_alerts.AlertState(os.path.join(self.tmp, "alerts.json"))
+        memory = [95.0]
+        day = ["2026-11-10"]
+        check = friday_health.HealthCheck(
+            state, lambda: downloads, memory=lambda: memory[0], uptime=lambda: 9.4,
+            disks=lambda: [{"drive": "C:", "free_gb": 8.2, "total_gb": 256, "free_percent": 3.2, "low": True},
+                           {"drive": "D:", "free_gb": 400, "total_gb": 1000, "free_percent": 40, "low": False}],
+            top=lambda: [{"name": "chrome", "mb": 3000}, {"name": "Teams", "mb": 900}], today=lambda: day[0])
+        with mock.patch.dict(os.environ, {"FRIDAY_HEALTH": "on"}):
+            first = check.check("老板")
+            self.assertEqual(len(first), 3)  # 硬盘、没重启、下载文件夹;内存还没连续够久
+            self.assertIn("C: 盘只剩 8.2GB", first[0])
+            self.assertIn("9 天没重启", first[1])
+            self.assertIn("160 个文件", first[2])
+            self.assertEqual(check.check("老板"), [])  # 内存紧:要连续 3 次(15 分钟)
+            third = check.check("老板")
+            self.assertEqual(len(third), 1)
+            self.assertIn("最占内存的是 chrome(3000MB)", third[0])
+            self.assertEqual(check.check("老板"), [])  # 同一天不重复
+            day[0] = "2026-11-11"
+            self.assertEqual(len(check.check("老板")), 4)
+        with mock.patch.dict(os.environ, {"FRIDAY_HEALTH": "off"}):
+            day[0] = "2026-11-12"
+            self.assertEqual(check.check("老板"), [])
+
+    def test_tidy_and_undo(self):
+        downloads = Path(self.tmp, "Downloads")
+        downloads.mkdir()
+        names = ["a.jpg", "b.PDF", "setup.exe", "song.mp3", "x.zip", "readme", "c.jpg", "busy.crdownload"]
+        for name in names:
+            (downloads / name).write_text(name)
+        (downloads / "图片").mkdir()
+        (downloads / "图片" / "c.jpg").write_text("old")  # 重名:不覆盖
+        old = time.time() - 3600
+        for name in names:
+            os.utime(downloads / name, (old, old))
+        (downloads / "new.png").write_text("still downloading")  # 刚下载的:不动
+        result = friday_health.tidy(downloads, self.tmp)
+        self.assertEqual(result["moved"], 7)
+        self.assertEqual(result["groups"], {"图片": 2, "文档": 1, "安装程序": 1, "音乐": 1, "压缩包": 1, "其他": 1})
+        self.assertTrue((downloads / "图片" / "c (1).jpg").exists())
+        self.assertEqual((downloads / "图片" / "c.jpg").read_text(), "old")
+        self.assertTrue((downloads / "busy.crdownload").exists())
+        self.assertTrue((downloads / "new.png").exists())
+        self.assertIn("7 个文件", friday_health.describe_tidy(result))
+        self.assertEqual(friday_health.undo_tidy(self.tmp), 7)
+        for name in names:
+            self.assertEqual((downloads / name).read_text(), name)
+        self.assertFalse((downloads / "文档").exists())  # 空文件夹删掉了
+        self.assertTrue((downloads / "图片").exists())  # 原本就有东西的留着
+        self.assertEqual(friday_health.undo_tidy(self.tmp), 0)
+
+    def test_disk_report(self):
+        report = friday_health.disk_report([self.tmp])
+        self.assertEqual(len(report), 1)
+        self.assertIn("free_gb", report[0])
 
 
 if __name__ == "__main__":

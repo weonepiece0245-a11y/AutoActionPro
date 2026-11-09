@@ -1173,6 +1173,7 @@ class WebSession:
     care = None  # 主动关心(friday_care.Care)
     tray = None  # 右下角托盘图标(打游戏时弹小通知用)
     security = None  # 安全记录(friday_security.SecurityLog)
+    downloads_dir = None  # 下载文件夹(问过 Windows 就记住)
     discord = None  # Discord 机器人(提醒推到手机)
     cloud = None  # 云端后备的连接(friday_cloud.CloudClient)
     start_cloud = None  # 用配对码连接云端
@@ -1419,6 +1420,18 @@ def wake_state(session) -> dict | None:
             "sensitivity": friday_wake.wake_sensitivity()}
 
 
+def health_state(session) -> dict | None:
+    import friday_health
+
+    if os.name != "nt" or getattr(session, "assistant", None) is None:
+        return None
+    toolbox = session.assistant.toolbox
+    try:
+        return friday_health.status(downloads_folder(session, toolbox))
+    except Exception:
+        return None
+
+
 def security_state(session) -> dict | None:
     import friday_vendor
     import friday_web
@@ -1499,6 +1512,7 @@ def settings_state(session, meter=None) -> dict:
         "push": push_mode() if getattr(session, "discord", None) is not None else None,
         "remind_calendar": remind_calendar_state(session),
         "security": security_state(session),
+        "health": health_state(session),
         "rain_alert": __import__("friday_alerts").rain_time(),
         "weekly_report": __import__("friday_alerts").weekly_enabled(),
         "quick": __import__("friday_quick").quick_enabled() if getattr(session, "quick", None) is not None else None,
@@ -1626,6 +1640,20 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
             gate._save_owners()
             friday_security.record("discord_removed", f"移除了 Discord 账号“{names[0]}”,它再也不能控制星期五", "info")
             done.append(f"已移除“{names[0]}”,它再也不能控制星期五")
+    if "health" in payload:
+        on = bool(payload["health"])
+        save_env_value(env, "FRIDAY_HEALTH", "on" if on else "off")
+        os.environ["FRIDAY_HEALTH"] = "on" if on else "off"
+        done.append("会提醒硬盘快满、内存太紧、很久没重启、下载文件夹太乱" if on else "不再做电脑健康提醒")
+    if payload.get("tidy_downloads") or payload.get("undo_tidy"):
+        import friday_health
+
+        folder = downloads_folder(session, toolbox)
+        if payload.get("tidy_downloads"):
+            done.append(friday_health.describe_tidy(friday_health.tidy(folder)))
+        else:
+            back = friday_health.undo_tidy()
+            done.append(f"已把 {back} 个文件放回原处" if back else "没有可以撤销的整理")
     if "rain_alert" in payload:
         import friday_alerts
 
@@ -1982,11 +2010,37 @@ def start_security(session, data_dir: str):
     return log
 
 
+def downloads_folder(session, toolbox) -> Path:
+    """下载文件夹(问一次 Windows 就记住)。"""
+    cached = getattr(session, "downloads_dir", None)
+    if cached is not None:
+        return cached
+    folder = Path.home() / "Downloads"
+    computer = getattr(toolbox, "computer", None)
+    if computer is not None and computer.available:
+        try:
+            folder = Path(computer.folder("downloads"))
+        except Exception:
+            pass
+    session.downloads_dir = folder
+    return folder
+
+
 def start_daily_checks(session, toolbox: Toolbox, data_dir: str, interval: float = 300) -> None:
     """每 5 分钟看一次:月底记账汇总、下雨提醒、每周花费报告。"""
     import friday_alerts
 
     state = friday_alerts.AlertState(os.path.join(data_dir, "friday_alerts.json"))
+
+    import friday_health
+
+    computer = getattr(toolbox, "computer", None)
+    top = (lambda: computer.window_programs()) if computer is not None and computer.available else None
+    health = friday_health.HealthCheck(state, lambda: downloads_folder(session, toolbox), top=top)
+
+    def check_health() -> None:
+        for text in health.check(_call_me(session)):
+            announce(session, text, "🖥", "电脑健康提醒在窗口里")
 
     def loop() -> None:
         time.sleep(60)  # 刚开机先让别的事做完
@@ -1994,6 +2048,7 @@ def start_daily_checks(session, toolbox: Toolbox, data_dir: str, interval: float
             _quietly(lambda: month_end_summary(session, toolbox))
             _quietly(lambda: rain_alert(session, state))
             _quietly(lambda: weekly_report(session, toolbox, state))
+            _quietly(check_health)
             time.sleep(interval)
 
     threading.Thread(target=loop, daemon=True, name="friday-daily-checks").start()

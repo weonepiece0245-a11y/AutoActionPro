@@ -54,3 +54,4 @@ assistant/cloud_key.pem
 assistant/friday_cloud_state.json
 assistant/web/vendor/
 assistant/friday_security.log*
+assistant/friday_tidy.json
