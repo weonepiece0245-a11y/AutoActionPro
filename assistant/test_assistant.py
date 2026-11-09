@@ -4757,11 +4757,46 @@ class WakeWordTest(unittest.TestCase):
         self.assertTrue(friday_wake.heard_wake_word(self.result("星期 五", 0.9)))  # 被拆开了
         self.assertFalse(friday_wake.heard_wake_word("不是 JSON"))
 
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, {"FRIDAY_WAKE_PHRASE": "", "FRIDAY_WAKE_SENSITIVITY": ""})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_longer_phrase_by_default(self):
+        self.assertEqual(friday_wake.wake_phrase(), "你好星期五")
+        heard = lambda text, conf=0.95: friday_wake.heard_wake_word(self.result(text, conf), 0.75, "你好星期五")
+        self.assertTrue(heard("你好 星期五"))
+        self.assertFalse(heard("星期五"))  # 只说“星期五”不会叫醒(电视里常有)
+        self.assertFalse(heard("你好"))
+        self.assertFalse(heard("你好 星期五", 0.5))
+        self.assertTrue(heard("你 好 星期五"))  # 模型把“你好”拆成两个字也认得
+        self.assertTrue(friday_wake.heard_wake_word(self.result("黑 星期五", 0.9), 0.75, "嘿星期五"))  # 同音字
+        grammar = friday_wake.grammar("你好星期五")
+        self.assertEqual(grammar[:2], ["你好 星期五", "你 好 星期五"])
+        self.assertIn("星期五", grammar)  # 单独的“星期五”也要能被识别出来,才不会硬凑成唤醒词
+        self.assertIn("[unk]", grammar)
+
+    def test_choices_from_settings(self):
+        with mock.patch.dict(os.environ, {"FRIDAY_WAKE_PHRASE": "嘿 星期五", "FRIDAY_WAKE_SENSITIVITY": "low"}):
+            self.assertEqual((friday_wake.wake_phrase(), friday_wake.wake_sensitivity()), ("嘿星期五", "low"))
+        with mock.patch.dict(os.environ, {"FRIDAY_WAKE_PHRASE": "芝麻开门", "FRIDAY_WAKE_SENSITIVITY": "max"}):
+            self.assertEqual((friday_wake.wake_phrase(), friday_wake.wake_sensitivity()), ("你好星期五", "normal"))
+        env = str(Path(tempfile.mkdtemp(), ".env"))
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        restarted = threading.Event()
+        session.wake = SimpleNamespace(state="listening", error="", restart=restarted.set)
+        self.assertIn("error", app.apply_settings({"wake_phrase": "芝麻开门"}, session, None, env))
+        result = app.apply_settings({"wake_phrase": "嘿星期五", "wake_sensitivity": "low"}, session, None, env)
+        self.assertIn("嘿星期五", result["message"])
+        self.assertTrue(restarted.wait(2))  # 换了唤醒词要重新开始听
+        state = app.wake_state(session)
+        self.assertEqual((state["phrase"], state["sensitivity"]), ("嘿星期五", "low"))
+
     def test_pause_and_cooldown(self):
         now = [100.0]
         paused = [False]
         wake = friday_wake.WakeWord(lambda: None, lambda t, f: None, lambda: paused[0], clock=lambda: now[0])
-        good = self.result("星期五", 0.95)
+        good = self.result("你好 星期五", 0.95)
         paused[0] = True
         self.assertFalse(wake.should_wake(good))  # 自己在说话
         paused[0] = False
@@ -4774,7 +4809,7 @@ class WakeWordTest(unittest.TestCase):
         self.assertTrue(wake.should_wake(good))
 
     def test_listens_and_wakes(self):
-        results = iter([self.result("[unk]"), self.result("星期三", 0.9), self.result("星期五", 0.9)])
+        results = iter([self.result("[unk]"), self.result("星期五", 0.9), self.result("你好 星期五", 0.9)])
         woke = threading.Event()
 
         class Recognizer:

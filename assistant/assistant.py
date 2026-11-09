@@ -1254,6 +1254,17 @@ class GoogleWatcher:
         threading.Thread(target=run, daemon=True, name="friday-google-watch").start()
 
 
+def wake_state(session) -> dict | None:
+    import friday_wake
+
+    wake = getattr(session, "wake", None)
+    if wake is None:
+        return None
+    return {"enabled": os.environ.get("FRIDAY_WAKE", "off") == "on", "state": wake.state, "error": wake.error,
+            "phrase": friday_wake.wake_phrase(), "phrases": list(friday_wake.PHRASES),
+            "sensitivity": friday_wake.wake_sensitivity()}
+
+
 def cloud_state(session) -> dict | None:
     if getattr(session, "start_cloud", None) is None:
         return None
@@ -1292,8 +1303,7 @@ def settings_state(session, meter=None) -> dict:
         "budget": session.budget.state() if getattr(session, "budget", None) else None,
         "hotkey": hotkey_state(session),
         "cloud": cloud_state(session),
-        "wake": {"enabled": os.environ.get("FRIDAY_WAKE", "off") == "on", "state": session.wake.state,
-                 "error": session.wake.error} if getattr(session, "wake", None) else None,
+        "wake": wake_state(session),
         "backup": {"enabled": os.environ.get("FRIDAY_BACKUP", "on") != "off",
                    "last": session.backup.last_backup()} if getattr(session, "backup", None) else None,
     }
@@ -1409,6 +1419,27 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         if code and getattr(session, "start_cloud", None) is not None:
             session.cloud = session.start_cloud(code)
         done.append("正在连接云端星期五……" if code else "已断开云端星期五,电脑关机时不会有人接手")
+    if "wake_phrase" in payload or "wake_sensitivity" in payload:
+        import friday_wake
+
+        if "wake_phrase" in payload:
+            phrase = str(payload["wake_phrase"]).replace(" ", "")
+            if phrase not in friday_wake.PHRASES:
+                return {"error": "没有这个唤醒词"}
+            save_env_value(env, "FRIDAY_WAKE_PHRASE", phrase)
+            os.environ["FRIDAY_WAKE_PHRASE"] = phrase
+            done.append(f"唤醒词改成“{phrase}”")
+        if "wake_sensitivity" in payload:
+            level = str(payload["wake_sensitivity"]).lower()
+            if level not in friday_wake.SENSITIVITY:
+                return {"error": "没有这个灵敏度"}
+            save_env_value(env, "FRIDAY_WAKE_SENSITIVITY", level)
+            os.environ["FRIDAY_WAKE_SENSITIVITY"] = level
+            done.append({"high": "灵敏度:高(容易叫醒)", "normal": "灵敏度:一般",
+                         "low": "灵敏度:低(不容易误判)"}[level])
+        wake = getattr(session, "wake", None)
+        if wake is not None and "wake_phrase" in payload:
+            threading.Thread(target=wake.restart, daemon=True).start()
     if "wake" in payload:
         on = bool(payload["wake"])
         save_env_value(env, "FRIDAY_WAKE", "on" if on else "off")
@@ -1416,7 +1447,10 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         wake = getattr(session, "wake", None)
         if wake is not None:
             wake.start() if on else wake.stop()
-        done.append("已开启唤醒:喊“星期五”就能叫我(第一次要下载语音模型,稍等一下)" if on else "已关闭唤醒,麦克风不再一直听")
+        import friday_wake
+
+        done.append(f"已开启唤醒:说“{friday_wake.wake_phrase()}”就能叫我(第一次要下载语音模型,稍等一下)"
+                    if on else "已关闭唤醒,麦克风不再一直听")
     if "hotkey" in payload:
         import friday_desktop
 

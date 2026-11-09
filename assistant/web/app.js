@@ -347,12 +347,23 @@ function fillSettings() {
   $("autostartRow").hidden = s.autostart === null || s.autostart === undefined;
   const w = s.wake;
   $("wakeRow").hidden = !w;
+  $("wakeOptions").hidden = !w;
   if (w) {
     $("setWake").checked = w.enabled;
+    const phrases = $("setWakePhrase");
+    if (!phrases.options.length) {
+      for (const p of w.phrases) {
+        const opt = document.createElement("option");
+        opt.value = p; opt.textContent = `“${p}”` + (p === "你好星期五" ? "(推荐)" : p === "星期五" ? "(最容易误判)" : "");
+        phrases.append(opt);
+      }
+    }
+    phrases.value = w.phrase;
+    $("setWakeSensitivity").value = w.sensitivity;
     const text = w.state === "error" ? "⚠ " + w.error
       : w.state === "preparing" ? "正在准备(第一次要下载约 42MB 的语音模型)……"
-      : w.state === "listening" ? "✓ 正在听“星期五”。识别在电脑本地进行,声音不会上传;喊醒之后说的话才会交给 Claude。"
-      : "打开后麦克风会一直听“星期五”这三个字(只在电脑本地识别,不花钱)。";
+      : w.state === "listening" ? `✓ 正在听“${w.phrase}”。识别在电脑本地进行,声音不会上传;叫醒之后说的话才会交给 Claude。`
+      : `打开后麦克风会一直听“${w.phrase}”(只在电脑本地识别,不花钱)。常被误叫醒就换长一点的唤醒词,或把灵敏度调成“严格”。`;
     $("wakeNote").hidden = false;
     $("wakeNote").textContent = text;
     $("wakeNote").className = "set-note" + (w.state === "error" ? " warn" : "");
@@ -452,6 +463,8 @@ $("saveRate").onclick = () => saveSetting({ rate: $("setRate").value.trim() });
 $("setAutostart").onchange = (e) => saveSetting({ autostart: e.target.checked });
 $("googleLogin").onclick = () => saveSetting({ google_login: true }, 9000);
 $("setWake").onchange = (e) => saveSetting({ wake: e.target.checked }, 4000);
+$("setWakePhrase").onchange = (e) => saveSetting({ wake_phrase: e.target.value });
+$("setWakeSensitivity").onchange = (e) => saveSetting({ wake_sensitivity: e.target.value });
 $("setHotkey").onchange = (e) => saveSetting({ hotkey: e.target.value });
 $("saveCloud").onclick = async () => {
   const code = $("setCloud").value.trim();

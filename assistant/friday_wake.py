@@ -17,30 +17,58 @@ from pathlib import Path
 from typing import Callable
 
 WAKE_WORD = "星期五"
-# 只让识别器在这几个词里选,别的声音都归到 [unk];放进其他“星期几”是为了不把它们听成“星期五”
-GRAMMAR = ["星期五", "星期一", "星期二", "星期三", "星期四", "星期六", "星期天", "星期日", "[unk]"]
-MIN_CONFIDENCE = 0.75
+# 可选的唤醒词:越长越不容易被电视、视频里的话误叫醒(识别器要的是空格分开的词)
+# 每个唤醒词给几种写法:模型词表里没有某个词时(例如“嘿”),还能用拆开的字或同音字认出来
+PHRASES = {
+    "你好星期五": ["你好 星期五", "你 好 星期五"],
+    "嘿星期五": ["嘿 星期五", "黑 星期五"],
+    "星期五": ["星期五"],
+}
+DEFAULT_PHRASE = "你好星期五"
+# 只让识别器在这些词里选,别的声音都归到 [unk];放进其他“星期几”是为了不把它们听成“星期五”
+DISTRACTORS = ["星期五", "星期一", "星期二", "星期三", "星期四", "星期六", "星期天", "星期日", "你好", "[unk]"]
+SENSITIVITY = {"high": 0.6, "normal": 0.75, "low": 0.9}  # 灵敏度高 = 把握度要求低,容易叫醒也容易误判
+MIN_CONFIDENCE = SENSITIVITY["normal"]
+
+
+def wake_phrase() -> str:
+    value = os.environ.get("FRIDAY_WAKE_PHRASE", "").strip().replace(" ", "")
+    return value if value in PHRASES else DEFAULT_PHRASE
+
+
+def wake_sensitivity() -> str:
+    value = os.environ.get("FRIDAY_WAKE_SENSITIVITY", "").strip().lower()
+    return value if value in SENSITIVITY else "normal"
+
+
+def grammar(phrase: str) -> list[str]:
+    spellings = PHRASES[phrase]
+    return spellings + [w for w in DISTRACTORS if w not in spellings]
+
+
+def _forms(phrase: str) -> list[str]:
+    """识别结果去掉空格后,算作唤醒词的几种文字。"""
+    return [s.replace(" ", "") for s in PHRASES.get(phrase, [phrase])] if phrase in PHRASES else [phrase]
 COOLDOWN = 3.0  # 秒:叫醒一次后这么久内不再触发
 RESUME_DELAY = 1.0  # 秒:星期五说完、录音结束后,再等这么久才重新开始听
 SAMPLE_RATE = 16000
 BLOCK = 4000  # 每次读 0.25 秒
 
 
-def heard_wake_word(result_json: str, min_confidence: float = MIN_CONFIDENCE) -> bool:
-    """Vosk 的一句识别结果里有没有“星期五”(有逐字把握度时要够高)。"""
+def heard_wake_word(result_json: str, min_confidence: float = MIN_CONFIDENCE, phrase: str = WAKE_WORD) -> bool:
+    """Vosk 的一句识别结果里有没有整句唤醒词(有逐字把握度时,唤醒词里每个词都要够高)。"""
     try:
         result = json.loads(result_json)
     except ValueError:
         return False
     text = str(result.get("text", "")).replace(" ", "")
-    if WAKE_WORD not in text:
+    form = next((f for f in _forms(phrase) if f in text), None)
+    if form is None:
         return False
     words = result.get("result")
     if not words:
         return True
-    confidences = [w.get("conf", 1.0) for w in words if WAKE_WORD in str(w.get("word", ""))]
-    if not confidences:  # 被拆成了几个字,取这几个字里最低的
-        confidences = [w.get("conf", 1.0) for w in words if str(w.get("word", "")) in WAKE_WORD]
+    confidences = [w.get("conf", 1.0) for w in words if str(w.get("word", "")) and str(w.get("word", "")) in form]
     return bool(confidences) and min(confidences) >= min_confidence
 
 
@@ -67,6 +95,7 @@ class WakeWord:
         self.thread: threading.Thread | None = None
         self.last_wake = -1e9
         self.paused_until = 0.0
+        self.phrase = wake_phrase()
 
     # ---------- 判断 ----------
     def should_wake(self, result_json: str) -> bool:
@@ -76,7 +105,7 @@ class WakeWord:
             return False
         if now < self.paused_until or now - self.last_wake < COOLDOWN:
             return False
-        if heard_wake_word(result_json):
+        if heard_wake_word(result_json, SENSITIVITY[wake_sensitivity()], self.phrase):
             self.last_wake = now
             return True
         return False
@@ -93,6 +122,16 @@ class WakeWord:
     def stop(self) -> None:
         self.running = False
         self.state = "off"
+
+    def restart(self) -> None:
+        """换了唤醒词:重新开始听。"""
+        was_running = self.running
+        self.stop()
+        if self.thread is not None:
+            self.thread.join(2)
+        self.phrase = wake_phrase()
+        if was_running:
+            self.start()
 
     def _prepare(self):
         try:
@@ -113,11 +152,12 @@ class WakeWord:
     def _run(self) -> None:
         try:
             vosk, sd, model = self._prepare()
-            recognizer = vosk.KaldiRecognizer(model, SAMPLE_RATE, json.dumps(GRAMMAR, ensure_ascii=False))
+            self.phrase = wake_phrase()
+            recognizer = vosk.KaldiRecognizer(model, SAMPLE_RATE, json.dumps(grammar(self.phrase), ensure_ascii=False))
             recognizer.SetWords(True)
             with sd.RawInputStream(samplerate=SAMPLE_RATE, blocksize=BLOCK, dtype="int16", channels=1) as stream:
                 self.state = "listening"
-                self.on_status(f"唤醒已开启:喊“{WAKE_WORD}”就能叫我", False)
+                self.on_status(f"唤醒已开启:说“{self.phrase}”就能叫我", False)
                 while self.running:
                     data, _ = stream.read(BLOCK)
                     if self.paused():
