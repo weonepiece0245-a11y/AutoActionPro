@@ -1169,6 +1169,7 @@ class WebSession:
     google_account = None  # Google 登录状态(齿轮设定里显示、重新登录)
     backup = None  # Google Drive 备份(friday_backup.DriveBackup)
     hotkey = None  # 全局快捷键(friday_desktop.GlobalHotkey)
+    ask_hotkey = None  # 选中就问的快捷键
     wake = None  # 喊“星期五”唤醒(friday_wake.WakeWord)
     care = None  # 主动关心(friday_care.Care)
     tray = None  # 右下角托盘图标(打游戏时弹小通知用)
@@ -1295,8 +1296,10 @@ def web_loop(session: WebSession, events: queue.Queue, transcribe=None) -> None:
         if kind == "status":
             session.hub.broadcast({"type": "status", "text": payload})
         elif kind == "web":
-            session.speak_enabled = bool(payload.get("speak"))
-            session.ask(payload["text"], source=payload.get("source", "web"), speak=session.speak_enabled)
+            if "speak" in payload:  # 选中就问:沿用窗口现在的朗读设定
+                session.speak_enabled = bool(payload.get("speak"))
+            session.ask(payload["text"], source=payload.get("source", "web"), speak=session.speak_enabled,
+                        prefix=payload.get("prefix", ""))
         elif kind == "command" and payload == "clear":
             if session.assistant is not None:
                 session.assistant.reset()
@@ -1485,8 +1488,11 @@ def hotkey_state(session) -> dict | None:
     hotkey = getattr(session, "hotkey", None)
     if hotkey is None or os.name != "nt":
         return None
+    ask = getattr(session, "ask_hotkey", None)
     return {"value": friday_desktop.hotkey_name(), "error": hotkey.error,
-            "options": [[key, label] for key, (label, _, _) in friday_desktop.HOTKEYS.items()]}
+            "options": [[key, label] for key, (label, _, _) in friday_desktop.HOTKEYS.items()],
+            "ask_value": friday_desktop.ask_hotkey_name(), "ask_error": ask.error if ask is not None else "",
+            "ask_options": [[key, label] for key, (label, _, _) in friday_desktop.ASK_HOTKEYS.items()]}
 
 
 def settings_state(session, meter=None) -> dict:
@@ -1798,6 +1804,22 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         save_env_value(env, "FRIDAY_HOTKEY", name)
         os.environ["FRIDAY_HOTKEY"] = name
         done.append("已关闭快捷键" if name == "off" else f"快捷键改成 {friday_desktop.HOTKEYS[name][0]}")
+    if "ask_hotkey" in payload:
+        import friday_desktop
+
+        name = str(payload["ask_hotkey"]).strip().lower()
+        if name not in friday_desktop.ASK_HOTKEYS and name != "off":
+            return {"error": "没有这个快捷键"}
+        ask = getattr(session, "ask_hotkey", None)
+        previous = friday_desktop.ask_hotkey_name()
+        if ask is not None and not ask.start(name):
+            error = ask.error
+            ask.start(previous)
+            return {"error": error}
+        save_env_value(env, "FRIDAY_ASK_HOTKEY", name)
+        os.environ["FRIDAY_ASK_HOTKEY"] = name
+        done.append("已关闭“选中就问”" if name == "off"
+                    else f"选中文字后按 {friday_desktop.ASK_HOTKEYS[name][0]},星期五帮你翻译或解释")
     backup = getattr(session, "backup", None)
     if "backup_auto" in payload:
         on = bool(payload["backup_auto"])
@@ -2303,6 +2325,21 @@ def run_web(args) -> None:
     session.hotkey = friday_desktop.GlobalHotkey(summon_now)
     if not session.hotkey.start(friday_desktop.hotkey_name()):
         print(f"快捷键没有设置成功:{session.hotkey.error}", flush=True)
+
+    def ask_selection() -> None:
+        """选中就问:复制别的程序里选中的文字,叫出窗口,让星期五翻译或解释。"""
+        text = friday_desktop.copy_selection()
+        if not text:
+            if session.tray is not None:
+                session.tray.notify("先选中一段文字,再按快捷键")
+            return
+        if not (hub.connected and friday_web.focus_window()):
+            friday_web.show_window(url, profile_dir)
+        events.put(("web", {"text": "📋 " + text, "prefix": friday_desktop.ask_prefix(text), "source": "web"}))
+
+    session.ask_hotkey = friday_desktop.GlobalHotkey(ask_selection, friday_desktop.ASK_HOTKEYS, hotkey_id=2)
+    if not session.ask_hotkey.start(friday_desktop.ask_hotkey_name()):
+        print(f"“选中就问”快捷键没有设置成功:{session.ask_hotkey.error}", flush=True)
     tray = friday_desktop.TrayIcon(Path(SCRIPT_DIR) / "friday.ico", {
         "open": lambda: friday_web.show_window(url, profile_dir),
         "listen": summon_now,
@@ -2351,6 +2388,7 @@ def run_web(args) -> None:
             if not session.restart:
                 session.cloud.goodbye()  # 正常关掉:云端马上接手
         session.hotkey.stop()
+        session.ask_hotkey.stop()
         tray.stop()
         server.shutdown()
         server.server_close()

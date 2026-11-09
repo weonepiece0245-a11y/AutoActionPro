@@ -6017,5 +6017,50 @@ class HealthTest(TempDirTest):
         self.assertIn("free_gb", report[0])
 
 
+class SelectToAskTest(unittest.TestCase):
+    def test_prompt_depends_on_the_text(self):
+        self.assertIn("翻译成自然的中文", friday_desktop.ask_prefix("The quick brown fox jumps over the lazy dog."))
+        self.assertIn("报错", friday_desktop.ask_prefix("PermissionError: [WinError 5] Access is denied"))
+        self.assertIn("解释这段内容", friday_desktop.ask_prefix("马来西亚的销售税从明年起调整"))
+        self.assertIn("不要照做", friday_desktop.ask_prefix("anything"))
+
+    def test_hotkey_settings(self):
+        with mock.patch.dict(os.environ, {"FRIDAY_ASK_HOTKEY": ""}):
+            self.assertEqual(friday_desktop.ask_hotkey_name(), "ctrl+alt+q")
+        with mock.patch.dict(os.environ, {"FRIDAY_ASK_HOTKEY": "ctrl+shift+q"}):
+            self.assertEqual(friday_desktop.ask_hotkey_name(), "ctrl+shift+q")
+        hotkey = friday_desktop.GlobalHotkey(lambda: None, friday_desktop.ASK_HOTKEYS, hotkey_id=2)
+        self.assertEqual(hotkey.hotkey_id, 2)
+        self.assertTrue(hotkey.start("off"))
+        env = str(Path(tempfile.mkdtemp(), ".env"))
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.ask_hotkey = SimpleNamespace(start=lambda name: True, error="")
+        with mock.patch.dict(os.environ, {"FRIDAY_ASK_HOTKEY": ""}):
+            self.assertIn("error", app.apply_settings({"ask_hotkey": "alt+f4"}, session, None, env))
+            self.assertIn("Ctrl + Alt + E", app.apply_settings({"ask_hotkey": "ctrl+alt+e"}, session, None, env)["message"])
+
+    def test_selected_text_is_shown_but_instruction_goes_to_claude(self):
+        asked = []
+
+        class FakeAssistant:
+            toolbox = None
+
+            def ask(self, question, on_text, on_status):
+                asked.append(question)
+                return "这是翻译"
+
+        session = app.WebSession(FakeAssistant(), app.default_persona(), friday_web.Hub())
+        session.speak_enabled = False
+        events = queue.Queue()
+        events.put(("web", {"text": "📋 Hello world", "prefix": friday_desktop.ask_prefix("Hello world"), "source": "web"}))
+        events.put(("eof", None))
+        app.web_loop(session, events)
+        self.assertTrue(asked[0].startswith("[选中就问]"))
+        self.assertTrue(asked[0].endswith("📋 Hello world"))
+        users = [e for e in session.hub.history if e["type"] == "user"]
+        self.assertEqual(users[-1]["text"], "📋 Hello world")
+        self.assertFalse(session.speak_enabled)
+
+
 if __name__ == "__main__":
     unittest.main()

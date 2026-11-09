@@ -431,6 +431,19 @@ function fillSettings() {
     $("hotkeyNote").hidden = !h.error;
     $("hotkeyNote").textContent = h.error ? "⚠ " + h.error : "";
     $("hotkeyNote").className = "set-note warn";
+    $("askHotkeyRow").hidden = !h.ask_options;
+    const askSelect = $("setAskHotkey");
+    if (h.ask_options && !askSelect.options.length) {
+      for (const [key, label] of [...h.ask_options, ["off", "不用"]]) {
+        const opt = document.createElement("option");
+        opt.value = key; opt.textContent = label;
+        askSelect.append(opt);
+      }
+    }
+    if (h.ask_value) askSelect.value = h.ask_value;
+    $("askHotkeyNote").hidden = !h.ask_error;
+    $("askHotkeyNote").textContent = h.ask_error ? "⚠ " + h.ask_error : "";
+    $("askHotkeyNote").className = "set-note warn";
   }
   const b = s.budget;
   $("budgetGroup").hidden = !b;
@@ -598,6 +611,7 @@ $("saveWakeCustom").onclick = async () => {
 $("setWakeCustom").onkeydown = (e) => { if (e.key === "Enter") $("saveWakeCustom").click(); };
 $("setWakeSensitivity").onchange = (e) => saveSetting({ wake_sensitivity: e.target.value });
 $("setHotkey").onchange = (e) => saveSetting({ hotkey: e.target.value });
+$("setAskHotkey").onchange = (e) => saveSetting({ ask_hotkey: e.target.value });
 $("setPush").onchange = (e) => saveSetting({ push: e.target.value });
 $("setCareWelcome").onchange = (e) => saveSetting({ care_welcome: e.target.checked });
 $("setCareBreak").onchange = (e) => saveSetting({ care_break: Number(e.target.value) });
