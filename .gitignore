@@ -39,3 +39,5 @@ assistant/friday.log
 assistant/friday_version.json
 assistant/friday_usage.json
 assistant/friday_router.json
+assistant/friday_chat.json
+assistant/friday_conversation.json

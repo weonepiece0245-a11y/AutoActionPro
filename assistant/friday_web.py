@@ -42,10 +42,32 @@ HISTORY_TYPES = {"user", "done", "status", "error", "reminder", "cleared"}  # �
 class Hub:
     """把事件推给所有打开的窗口(SSE),并保留最近的对话,重新打开窗口时能看到。"""
 
-    def __init__(self, history: int = 300) -> None:
+    def __init__(self, history: int = 300, path: str | Path | None = None) -> None:
         self.lock = threading.Lock()
         self.clients: set[queue.Queue] = set()
         self.history: collections.deque = collections.deque(maxlen=history)
+        self.path = Path(path) if path else None  # 存在文件里,重启、开机后窗口里的对话还在
+        self._load()
+
+    def _load(self) -> None:
+        if self.path is None:
+            return
+        try:
+            events = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if isinstance(events, list):
+            self.history.extend(e for e in events if isinstance(e, dict) and e.get("type") in HISTORY_TYPES)
+
+    def _save(self) -> None:
+        if self.path is None:
+            return
+        temp = self.path.with_name(self.path.name + ".tmp")
+        try:
+            temp.write_text(json.dumps(list(self.history), ensure_ascii=False), encoding="utf-8")
+            os.replace(temp, self.path)
+        except OSError:
+            pass
 
     def broadcast(self, event: dict) -> None:
         event = {**event, "ts": time.time()}
@@ -54,6 +76,7 @@ class Hub:
                 if event["type"] == "cleared":
                     self.history.clear()
                 self.history.append(event)
+                self._save()
             clients = list(self.clients)
         for client in clients:
             client.put(event)
@@ -339,6 +362,7 @@ def make_handler(ctx: WebContext):
                 self.end_headers()
                 for event in backlog:
                     self._sse(event)
+                self._sse({"type": "ready", "restored": len(backlog)})  # 之前的对话发完了
                 while True:
                     try:
                         event = client.get(timeout=15)

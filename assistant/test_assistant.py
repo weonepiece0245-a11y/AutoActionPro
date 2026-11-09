@@ -421,6 +421,95 @@ class RoutedAssistantTest(unittest.TestCase):
         self.assertEqual(app.web_state(session, toolbox, None, {})["model"], {"model": "Opus 5.5", "mode": "sonnet"})
 
 
+class ConversationHistoryTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = Path(self.dir, "conversation.json")
+        self.now = [1_800_000_000.0]
+
+    def bot(self, *streams):
+        bot = app.Assistant(client=FakeClient(*streams))
+        bot.clock = lambda: self.now[0]
+        bot.enable_history(self.path)
+        return bot
+
+    def test_exchanges_saved_and_restored_after_restart(self):
+        bot = self.bot(FakeStream(["吉隆坡今天多云"]))
+        bot.ask("今天天气怎么样", lambda t: None)
+        saved = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual([(e["q"], e["a"]) for e in saved], [("今天天气怎么样", "吉隆坡今天多云")])
+        # 重启:只带问答文字,接得上话题
+        self.now[0] += 3600
+        again = self.bot(FakeStream(["记得,刚才说多云"]))
+        self.assertEqual([m["role"] for m in again.messages], ["user", "assistant"])
+        self.assertIn("今天天气怎么样", again.messages[0]["content"][0]["text"])
+        again.ask("你还记得刚才说什么吗", lambda t: None)
+        sent = again.client.calls[0]["messages"]
+        self.assertEqual([m["role"] for m in sent], ["user", "assistant", "user"])
+
+    def test_old_conversation_not_restored(self):
+        self.bot(FakeStream(["好"])).ask("你好", lambda t: None)
+        self.now[0] += app.RESTORE_WITHIN + 1
+        self.assertEqual(self.bot().messages, [])
+
+    def test_idle_conversation_is_slimmed(self):
+        stream = FakeStream([], stop_reason="tool_use", blocks=[tool_use("remember", {"fact": "喜欢猫"})])
+        toolbox = tools.Toolbox(tools.Memory(os.path.join(self.dir, "m.json")), lambda a: True)
+        bot = app.Assistant(client=FakeClient(stream, FakeStream(["记住了"]), FakeStream(["好的"])), toolbox=toolbox)
+        bot.clock = lambda: self.now[0]
+        bot.ask("记住我喜欢猫", lambda t: None)
+        self.assertEqual(len(bot.messages), 4)  # 问题、工具调用、工具结果、回答
+        self.now[0] += app.SLIM_AFTER + 1
+        bot.ask("那推荐一部电影", lambda t: None)
+        sent = bot.client.calls[2]["messages"]
+        # 隔了很久:工具调用和结果都不再重发,只带问答文字
+        self.assertEqual([m["role"] for m in sent], ["user", "assistant", "user"])
+        self.assertEqual(sent[1]["content"], [{"type": "text", "text": "记住了"}])
+
+    def test_long_answers_are_cut_and_reset_forgets(self):
+        bot = self.bot(FakeStream(["长" * 3000]))
+        bot.ask("写长一点", lambda t: None)
+        slim = bot._slim_messages()
+        self.assertLess(len(slim[1]["content"][0]["text"]), 1600)
+        bot.reset()
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8")), [])
+        self.assertEqual(self.bot().messages, [])
+
+
+class ChatLogPersistenceTest(unittest.TestCase):
+    def test_window_history_survives_restart(self):
+        path = Path(tempfile.mkdtemp(), "chat.json")
+        hub = friday_web.Hub(path=path)
+        hub.broadcast({"type": "user", "text": "你好"})
+        hub.broadcast({"type": "delta", "text": "不存"})
+        hub.broadcast({"type": "done", "text": "早上好"})
+        again = friday_web.Hub(path=path)
+        self.assertEqual([e["type"] for e in again.history], ["user", "done"])
+        again.broadcast({"type": "cleared"})
+        self.assertEqual([e["type"] for e in friday_web.Hub(path=path).history], ["cleared"])
+
+    def test_events_end_backlog_with_ready(self):
+        hub = friday_web.Hub()
+        hub.broadcast({"type": "done", "text": "之前的回答"})
+        ctx = friday_web.WebContext(hub, queue.Queue(), friday_web.WebApprover(hub), "tok", 0, state=lambda: {})
+        server = friday_web.start_server(ctx)
+        try:
+            ctx.port = server.server_address[1]
+            conn = http.client.HTTPConnection("127.0.0.1", ctx.port, timeout=5)
+            conn.request("GET", "/events?t=tok")
+            response = conn.getresponse()
+            lines = []
+            while not any('"ready"' in line for line in lines):
+                lines.append(response.fp.readline().decode())
+            events = [json.loads(line[5:]) for line in lines if line.startswith("data:")]
+            self.assertEqual([e["type"] for e in events], ["done", "ready"])
+            self.assertEqual(events[-1]["restored"], 1)
+            conn.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
 class TempDirTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

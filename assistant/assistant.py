@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import os
 import queue
 import subprocess
@@ -50,6 +51,13 @@ MAX_STEPS = 30  # 一个问题里最多调用多少轮工具,防止死循环
 SYSTEM_CACHE = {"type": "ephemeral", "ttl": "1h"}
 TURN_CACHE = {"type": "ephemeral"}
 CACHEABLE_BLOCKS = {"text", "tool_result", "image", "document"}
+# 对话瘦身:隔了这么久再问(或重启后),只带最近几轮问答的文字给 Claude,
+# 之前搜到的网页、工具结果、思考过程都不再重发,接得上话题又不会越聊越贵
+SLIM_AFTER = 30 * 60
+SLIM_TURNS = 3
+SLIM_ANSWER_CHARS = 1500
+RESTORE_WITHIN = 3 * 24 * 3600  # 重启/开机后,三天内的对话才接上
+KEEP_EXCHANGES = 10
 
 SYSTEM_PROMPT = (
     "你是一个友好、耐心的 AI 小助理。"
@@ -283,6 +291,46 @@ class Assistant:
         self.system = self._build_system()
         self.on_usage: Optional[Callable] = None  # 每次请求后收到 (usage, 模型),用来统计花费
         self.router = None  # 自动选模型(friday_router.Router);None 就一直用 self.model
+        self.exchanges: list[dict] = []  # 最近几轮问答的文字({"q", "a", "t"}),瘦身和重启后接着聊用
+        self.history_file: Optional[Path] = None
+        self.clock: Callable[[], float] = time.time
+        self.last_ask: Optional[float] = None
+
+    # ---------- 对话保存和瘦身 ----------
+    def enable_history(self, path) -> None:
+        """把最近几轮问答存到文件;重启或开机后接着聊(只带文字,很省)。"""
+        self.history_file = Path(path)
+        try:
+            data = json.loads(self.history_file.read_text(encoding="utf-8"))
+            self.exchanges = [e for e in data if isinstance(e, dict) and e.get("q") and "a" in e][-KEEP_EXCHANGES:]
+        except (OSError, ValueError):
+            self.exchanges = []
+        if self.exchanges and self.clock() - self.exchanges[-1].get("t", 0) <= RESTORE_WITHIN:
+            self.messages = self._slim_messages()
+
+    def _save_exchanges(self) -> None:
+        if self.history_file is None:
+            return
+        temp = self.history_file.with_name(self.history_file.name + ".tmp")
+        try:
+            temp.write_text(json.dumps(self.exchanges, ensure_ascii=False), encoding="utf-8")
+            os.replace(temp, self.history_file)
+        except OSError:
+            pass
+
+    def _slim_messages(self) -> list[dict]:
+        """最近几轮问答,只留文字。"""
+        messages: list[dict] = []
+        for e in self.exchanges[-SLIM_TURNS:]:
+            when = datetime.datetime.fromtimestamp(e.get("t", 0)).strftime("%m-%d %H:%M")
+            answer = e["a"] if len(e["a"]) <= SLIM_ANSWER_CHARS else e["a"][:SLIM_ANSWER_CHARS] + "……(后面省略)"
+            messages.append({"role": "user", "content": [{"type": "text", "text": f"({when} 之前的对话){e['q']}"}]})
+            messages.append({"role": "assistant", "content": [{"type": "text", "text": answer or "(没有文字回答)"}]})
+        return messages
+
+    def _slim_if_idle(self) -> None:
+        if self.messages and self.last_ask is not None and self.clock() - self.last_ask > SLIM_AFTER:
+            self.messages = self._slim_messages()
 
     def _build_system(self) -> str:
         return self._system_factory() if callable(self._system_factory) else self._system_factory
@@ -298,6 +346,7 @@ class Assistant:
         模型需要用工具时会自动执行,并通过 on_status 报告进度。
         出错或被拒绝时撤回本轮的全部消息,保证历史仍然完整有效。
         """
+        self._slim_if_idle()
         start = len(self.messages)
         if self.router is not None:
             self.model = self.router.choose(question, history_empty=not self.messages)
@@ -313,17 +362,21 @@ class Assistant:
         self.messages.append({"role": "user", "content": content})
         try:
             try:
-                return self._run(on_text, on_status)
+                answer = self._run(on_text, on_status)
             except SwitchToOpus:
                 # Sonnet 觉得这题太难:撤回这一轮,换 Opus 重新回答
                 del self.messages[start + 1:]
                 self.router.upgrade(question)
                 self.model = self.router.current
                 on_status("这个问题比较难,交给 Opus 5.5 认真想想")
-                return self._run(on_text, on_status)
+                answer = self._run(on_text, on_status)
         except BaseException:
             del self.messages[start:]
             raise
+        self.last_ask = self.clock()
+        self.exchanges = (self.exchanges + [{"q": question, "a": answer, "t": self.last_ask}])[-KEEP_EXCHANGES:]
+        self._save_exchanges()
+        return answer
 
     def _run(self, on_text, on_status) -> str:
         texts: list[str] = []
@@ -407,6 +460,8 @@ class Assistant:
     def reset(self) -> None:
         """清空对话,并重新生成系统提示词(带上最新的记忆)。"""
         self.messages.clear()
+        self.exchanges.clear()
+        self._save_exchanges()
         self.system = self._build_system()
 
 
@@ -1120,7 +1175,9 @@ def run_web(args) -> None:
             return Path.home() / "Downloads"
 
     google = GoogleTools(account, downloads_dir=downloads_dir) if account.configured else None
-    hub = friday_web.Hub()
+    hub = friday_web.Hub(path=os.path.join(data_dir, "friday_chat.json"))  # 窗口里的对话,重启后还在
+    if hub.history and hub.history[-1].get("type") != "cleared":
+        hub.broadcast({"type": "status", "text": "—— 星期五重新启动了,上面是之前的对话,可以接着聊 ——"})
     approver = friday_web.WebApprover(hub)
     toolbox = Toolbox(
         Memory(memory_file), approver, workdir=os.path.expanduser(args.workdir) if args.workdir else None,
@@ -1140,6 +1197,8 @@ def run_web(args) -> None:
         except anthropic.AnthropicError as e:
             startup_error = f"无法连接 Claude:{e}"
     meter = attach_meter(assistant, data_dir, log=True) if assistant is not None else None
+    if assistant is not None:
+        assistant.enable_history(os.path.join(data_dir, "friday_conversation.json"))
     router = None
     if assistant is not None:
         router = attach_router(assistant, args, data_dir, on_change=lambda label, mode: hub.broadcast(
@@ -1234,6 +1293,7 @@ def run_server(args) -> None:
         print(f"未找到 API 凭据。{KEY_HINT}", file=sys.stderr)
         sys.exit(1)
     attach_meter(assistant, data_dir, log=True)
+    assistant.enable_history(os.path.join(data_dir, "friday_conversation.json"))
     attach_router(assistant, args, data_dir,
                   on_change=lambda label, mode: print(f"改用 {label}", flush=True))
 
@@ -1396,6 +1456,7 @@ def main(argv: list[str] | None = None) -> None:
     if persona.toolbox is not None:  # 星期五:也把花费记下来(命令行里不显示),并自动选模型
         friday_dir = os.path.dirname(os.path.abspath(persona.toolbox.memory.path))
         attach_meter(assistant, friday_dir)
+        assistant.enable_history(os.path.join(friday_dir, "friday_conversation.json"))
         attach_router(assistant, args, friday_dir, on_change=lambda label, mode: print_status(f"改用 {label}"))
     events: queue.Queue = queue.Queue()
     if persona.toolbox is not None and persona.toolbox.reminders is not None:

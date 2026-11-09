@@ -26,7 +26,8 @@ VERSION_FILE = "friday_version.json"
 # 这些文件名永远不覆盖(都是你的私人数据或设置)
 PROTECTED = {
     ".env", "credentials.json", "google_token.json", "friday_discord.json", "friday_memory.json",
-    "friday_reminders.json", "friday_todos.json", "friday_web.json", "friday.log", "friday_usage.json", "friday_router.json", VERSION_FILE,
+    "friday_reminders.json", "friday_todos.json", "friday_web.json", "friday.log", "friday_usage.json", "friday_router.json",
+    "friday_chat.json", "friday_conversation.json", VERSION_FILE,
 }
 MAX_DOWNLOAD = 50 * 1024 * 1024
 

@@ -116,6 +116,20 @@ function finishAnswer(text, source) {
   scrollDown();
 }
 
+// ---------- 打招呼:只在窗口里还没有对话时(第一次打开或点了新话题之后) ----------
+let greeting = "";
+let greeted = false;
+async function greet() {
+  if (greeted || !greeting || log.querySelector(".msg")) return;
+  greeted = true;
+  const el = addMessage("friday", greeting);
+  el.classList.add("greeting");
+  if (speakOn) {
+    const r = await api("/api/speak", { text: greeting.split("\n")[0] }).catch(() => ({}));
+    if (r.url) enqueueAudio(r.url);
+  }
+}
+
 // ---------- 实时事件 ----------
 function handle(ev) {
   switch (ev.type) {
@@ -148,6 +162,8 @@ function handle(ev) {
       resetUpdateBtn(); break;
     case "restarting":
       waitForRestart(); break;
+    case "ready":
+      greet(); scrollDown(); break;
     case "cleared":
       log.innerHTML = ""; current = null; addLine("已开始新话题"); break;
   }
@@ -156,6 +172,8 @@ function handle(ev) {
 
 function connect() {
   const source = new EventSource(`/events?t=${encodeURIComponent(token)}`);
+  // 每次连上都会先收到之前的对话;先清空,断线重连时才不会重复
+  source.onopen = () => { log.innerHTML = ""; current = null; };
   source.onmessage = (e) => { try { handle(JSON.parse(e.data)); } catch (err) { console.error(err); } };
   source.onerror = () => { setMode("idle"); };
 }
@@ -467,15 +485,8 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape" && approval
 (async () => {
   setMode("idle");
   const s = await loadState();
+  greeting = (s && s.greeting) || "";
   connect();
-  if (s && s.greeting && !log.children.length) {
-    const greet = addMessage("friday", s.greeting);
-    greet.classList.add("greeting");
-    if (speakOn) {
-      const r = await api("/api/speak", { text: s.greeting.split("\n")[0] });
-      if (r.url) enqueueAudio(r.url);
-    }
-  }
   setInterval(loadState, 30000);
   $("input").focus();
 })();
