@@ -33,7 +33,14 @@ function setMode(mode) {
   document.body.dataset.mode = mode;
   $("modeText").textContent = MODE_TEXT[mode] || mode;
 }
+let lastActivity = "";
 function refreshMode() {
+  // 告诉星期五窗口正在录音/朗读,唤醒功能这时暂停,免得听到自己的声音
+  const activity = JSON.stringify({ listening: !!recorder, speaking: !!speaking });
+  if (activity !== lastActivity) {
+    lastActivity = activity;
+    api("/api/activity", JSON.parse(activity)).catch(() => {});
+  }
   if (recorder) return setMode("listening");
   if (speaking) return setMode("speaking");
   setMode(busy ? "thinking" : "idle");
@@ -338,6 +345,18 @@ function fillSettings() {
   voice.value = s.voice;
   $("setRate").value = s.rate ?? "";
   $("autostartRow").hidden = s.autostart === null || s.autostart === undefined;
+  const w = s.wake;
+  $("wakeRow").hidden = !w;
+  if (w) {
+    $("setWake").checked = w.enabled;
+    const text = w.state === "error" ? "⚠ " + w.error
+      : w.state === "preparing" ? "正在准备(第一次要下载约 42MB 的语音模型)……"
+      : w.state === "listening" ? "✓ 正在听“星期五”。识别在电脑本地进行,声音不会上传;喊醒之后说的话才会交给 Claude。"
+      : "打开后麦克风会一直听“星期五”这三个字(只在电脑本地识别,不花钱)。";
+    $("wakeNote").hidden = false;
+    $("wakeNote").textContent = text;
+    $("wakeNote").className = "set-note" + (w.state === "error" ? " warn" : "");
+  }
   const h = s.hotkey;
   $("hotkeyRow").hidden = !h;
   if (h) {
@@ -420,6 +439,7 @@ $("previewVoice").onclick = async () => {
 $("saveRate").onclick = () => saveSetting({ rate: $("setRate").value.trim() });
 $("setAutostart").onchange = (e) => saveSetting({ autostart: e.target.checked });
 $("googleLogin").onclick = () => saveSetting({ google_login: true }, 9000);
+$("setWake").onchange = (e) => saveSetting({ wake: e.target.checked }, 4000);
 $("setHotkey").onchange = (e) => saveSetting({ hotkey: e.target.value });
 $("setBackup").onchange = (e) => saveSetting({ backup_auto: e.target.checked });
 $("backupNow").onclick = () => saveSetting({ backup_now: true }, 4000);

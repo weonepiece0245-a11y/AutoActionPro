@@ -82,6 +82,7 @@ import friday_router  # noqa: E402
 import friday_budget  # noqa: E402
 import friday_backup  # noqa: E402
 import friday_desktop  # noqa: E402
+import friday_wake  # noqa: E402
 import voice  # noqa: E402  assistant.py 已把所在目录加入 sys.path
 
 
@@ -4735,6 +4736,137 @@ class DesktopTest(unittest.TestCase):
                 state = app.hotkey_state(session)
             self.assertEqual(state["value"], "ctrl+shift+space")
             self.assertIn(["ctrl+alt+f", "Ctrl + Alt + F"], state["options"])
+
+
+class WakeWordTest(unittest.TestCase):
+    def result(self, text, conf=None):
+        data = {"text": text}
+        if conf is not None:
+            data["result"] = [{"word": w, "conf": conf} for w in text.split()]
+        return json.dumps(data, ensure_ascii=False)
+
+    def test_heard_wake_word(self):
+        self.assertTrue(friday_wake.heard_wake_word(self.result("星期五", 0.95)))
+        self.assertTrue(friday_wake.heard_wake_word(self.result("星期五")))  # 没有逐字把握度
+        self.assertFalse(friday_wake.heard_wake_word(self.result("星期五", 0.4)))  # 不太像
+        self.assertFalse(friday_wake.heard_wake_word(self.result("星期三", 0.99)))
+        self.assertFalse(friday_wake.heard_wake_word(self.result("[unk]")))
+        self.assertTrue(friday_wake.heard_wake_word(self.result("星期 五", 0.9)))  # 被拆开了
+        self.assertFalse(friday_wake.heard_wake_word("不是 JSON"))
+
+    def test_pause_and_cooldown(self):
+        now = [100.0]
+        paused = [False]
+        wake = friday_wake.WakeWord(lambda: None, lambda t, f: None, lambda: paused[0], clock=lambda: now[0])
+        good = self.result("星期五", 0.95)
+        paused[0] = True
+        self.assertFalse(wake.should_wake(good))  # 自己在说话
+        paused[0] = False
+        self.assertFalse(wake.should_wake(good))  # 刚说完,再等一秒
+        now[0] += 1.5
+        self.assertTrue(wake.should_wake(good))
+        now[0] += 1
+        self.assertFalse(wake.should_wake(good))  # 刚叫醒过
+        now[0] += 3
+        self.assertTrue(wake.should_wake(good))
+
+    def test_listens_and_wakes(self):
+        results = iter([self.result("[unk]"), self.result("星期三", 0.9), self.result("星期五", 0.9)])
+        woke = threading.Event()
+
+        class Recognizer:
+            def __init__(self, model, rate, grammar):
+                self.grammar = json.loads(grammar)
+
+            def SetWords(self, on):
+                pass
+
+            def AcceptWaveform(self, data):
+                return True
+
+            def Result(self):
+                return next(results, self_result_unk)
+
+            def Reset(self):
+                pass
+
+        self_result_unk = self.result("[unk]")
+
+        class Stream:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self, n):
+                time.sleep(0.001)
+                return b"\0" * n * 2, False
+
+        fake_vosk = SimpleNamespace(SetLogLevel=lambda level: None, Model=lambda path: "model", KaldiRecognizer=Recognizer)
+        fake_sd = SimpleNamespace(RawInputStream=lambda **kwargs: Stream())
+        statuses = []
+        now = [0.0]
+
+        def clock():
+            now[0] += 2  # 每次判断都过了 2 秒,不受暂停和冷却影响
+            return now[0]
+
+        wake = friday_wake.WakeWord(woke.set, lambda text, failed: statuses.append((text, failed)),
+                                    lambda: False, clock=clock)
+        with mock.patch.dict(sys.modules, {"vosk": fake_vosk, "sounddevice": fake_sd}), \
+                mock.patch("voice.ensure_vosk_model", return_value="models/x"):
+            wake.start()
+            self.assertTrue(woke.wait(3))
+            wake.stop()
+            wake.thread.join(3)
+        self.assertIn("唤醒已开启", statuses[0][0])
+        self.assertEqual(wake.state, "off")
+
+    def test_missing_components_reported(self):
+        statuses = []
+        wake = friday_wake.WakeWord(lambda: None, lambda text, failed: statuses.append((text, failed)), lambda: False)
+        with mock.patch.dict(sys.modules, {"vosk": None, "sounddevice": None}), \
+                mock.patch.object(friday_wake, "pip_install", return_value=False):
+            wake.start()
+            wake.thread.join(3)
+        self.assertEqual(wake.state, "error")
+        self.assertTrue(statuses[-1][1])
+        self.assertIn("安装失败", wake.error)
+
+    def test_pip_install_command(self):
+        calls = []
+        run = lambda cmd, **kw: calls.append(cmd) or SimpleNamespace(returncode=0)
+        self.assertTrue(friday_wake.pip_install(["vosk", "sounddevice"], run=run))
+        self.assertEqual(calls[0][1:5], ["-m", "pip", "install", "-q"])
+        self.assertEqual(calls[0][-2:], ["vosk", "sounddevice"])
+
+    def test_settings_and_activity(self):
+        env = str(Path(tempfile.mkdtemp(), ".env"))
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        started = []
+        session.wake = SimpleNamespace(state="off", error="", start=lambda: started.append("on"),
+                                       stop=lambda: started.append("off"))
+        with mock.patch.dict(os.environ, {"FRIDAY_WAKE": "off"}):
+            self.assertTrue(app.apply_settings({"wake": True}, session, None, env)["ok"])
+            self.assertEqual(os.environ["FRIDAY_WAKE"], "on")
+            self.assertEqual(app.settings_state(session)["wake"]["enabled"], True)
+            app.apply_settings({"wake": False}, session, None, env)
+        self.assertEqual(started, ["on", "off"])
+
+        ctx = friday_web.WebContext(friday_web.Hub(), queue.Queue(), friday_web.WebApprover(friday_web.Hub()),
+                                    "tok", 0, state=lambda: {})
+        server = friday_web.start_server(ctx)
+        try:
+            ctx.port = server.server_address[1]
+            conn = http.client.HTTPConnection("127.0.0.1", ctx.port, timeout=5)
+            conn.request("POST", "/api/activity", json.dumps({"speaking": True}),
+                         {"X-Friday-Token": "tok", "Content-Type": "application/json"})
+            self.assertEqual(conn.getresponse().status, 200)
+            self.assertEqual(ctx.activity, {"listening": False, "speaking": True})
+        finally:
+            server.shutdown()
+            server.server_close()
 
 if __name__ == "__main__":
     unittest.main()

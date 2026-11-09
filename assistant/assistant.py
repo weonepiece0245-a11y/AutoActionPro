@@ -976,6 +976,7 @@ class WebSession:
     google_account = None  # Google 登录状态(齿轮设定里显示、重新登录)
     backup = None  # Google Drive 备份(friday_backup.DriveBackup)
     hotkey = None  # 全局快捷键(friday_desktop.GlobalHotkey)
+    wake = None  # 喊“星期五”唤醒(friday_wake.WakeWord)
     events = None  # 主循环的事件队列(还原后要重启)
     budget = None  # 每月预算和余额
     meter = None  # 花费统计
@@ -1174,6 +1175,8 @@ def settings_state(session, meter=None) -> dict:
         "google": session.google_account.status() if getattr(session, "google_account", None) else None,
         "budget": session.budget.state() if getattr(session, "budget", None) else None,
         "hotkey": hotkey_state(session),
+        "wake": {"enabled": os.environ.get("FRIDAY_WAKE", "off") == "on", "state": session.wake.state,
+                 "error": session.wake.error} if getattr(session, "wake", None) else None,
         "backup": {"enabled": os.environ.get("FRIDAY_BACKUP", "on") != "off",
                    "last": session.backup.last_backup()} if getattr(session, "backup", None) else None,
     }
@@ -1271,6 +1274,14 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         done.append("已保存 Admin Key,正在读取 Console 的花费" if key else "已删除 Admin Key,改回星期五自己估算")
     if refresh_console and budget is not None:
         threading.Thread(target=budget.refresh_console, daemon=True).start()
+    if "wake" in payload:
+        on = bool(payload["wake"])
+        save_env_value(env, "FRIDAY_WAKE", "on" if on else "off")
+        os.environ["FRIDAY_WAKE"] = "on" if on else "off"
+        wake = getattr(session, "wake", None)
+        if wake is not None:
+            wake.start() if on else wake.stop()
+        done.append("已开启唤醒:喊“星期五”就能叫我(第一次要下载语音模型,稍等一下)" if on else "已关闭唤醒,麦克风不再一直听")
     if "hotkey" in payload:
         import friday_desktop
 
@@ -1588,9 +1599,20 @@ def run_web(args) -> None:
         "quit": lambda: events.put(("eof", None)),
     })
     tray.start()
+
+    import friday_wake
+
+    session.wake = friday_wake.WakeWord(
+        summon_now,
+        on_status=lambda text, failed: hub.broadcast({"type": "error" if failed else "status", "text": text}),
+        paused=lambda: ctx.activity.get("listening") or ctx.activity.get("speaking"),
+    )
+    if os.environ.get("FRIDAY_WAKE", "off") == "on":
+        session.wake.start()
     try:
         web_loop(session, events, voice_module.transcribe_audio)
     finally:
+        session.wake.stop()
         session.hotkey.stop()
         tray.stop()
         server.shutdown()

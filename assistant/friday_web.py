@@ -287,6 +287,7 @@ class WebContext:
         self.synthesize = synthesize
         self.audio = AudioStore()
         self.settings: Callable[[dict], dict] | None = None  # 齿轮设定:保存设置,返回 {"ok"/"error", "message"}
+        self.activity = {"listening": False, "speaking": False}  # 窗口正在录音/朗读(唤醒功能要暂停)
 
 
 def make_handler(ctx: WebContext):
@@ -376,6 +377,8 @@ def make_handler(ctx: WebContext):
                 pass
             finally:
                 ctx.hub.unsubscribe(client)
+                if ctx.hub.connected == 0:  # 窗口都关了:不会再录音或朗读
+                    ctx.activity.update(listening=False, speaking=False)
                 self.close_connection = True
 
         def _sse(self, event: dict) -> None:
@@ -414,6 +417,12 @@ def make_handler(ctx: WebContext):
                     return self._json(400, {"error": "不支持的命令"})
                 ctx.events.put(("command", command))
                 return self._json(202, {"ok": True})
+            if url.path == "/api/activity":
+                if isinstance(data, dict):
+                    for key in ("listening", "speaking"):
+                        if key in data:
+                            ctx.activity[key] = bool(data[key])
+                return self._json(200, {"ok": True})
             if url.path == "/api/settings":
                 if ctx.settings is None or not isinstance(data, dict):
                     return self._json(400, {"error": "不能修改设置"})
