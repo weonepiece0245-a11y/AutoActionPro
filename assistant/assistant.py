@@ -967,6 +967,7 @@ class WebSession:
     _turn = 0
     restart = False  # 更新完要重启
     call_me = ""  # 现在的称呼(齿轮设定里显示)
+    google_account = None  # Google 登录状态(齿轮设定里显示、重新登录)
     meter = None  # 花费统计
     router = None  # 自动选模型
     hub_audio = None  # 由 run_web 设置成 WebContext.audio
@@ -1084,6 +1085,52 @@ def attach_meter(assistant: Assistant, data_dir: str, log: bool = False):
     return meter
 
 
+def google_row(toolbox: Toolbox) -> tuple:
+    """系统面板里 Google 那一行:正常是绿色,快过期或过期是黄色。"""
+    if toolbox.google is None:
+        return ("Google", False, "OFF")
+    status = toolbox.google.account.status()
+    return ("Google", True if status["state"] == "ok" else "warn", status["label"])
+
+
+class GoogleWatcher:
+    """后台定时检查 Google 登录:快过期或已经过期时提醒(同一种情况一天最多提醒一次)。"""
+
+    def __init__(self, account, notify: Callable[[str], None], interval: float = 6 * 3600,
+                 first_delay: float = 20, clock: Callable[[], float] = time.monotonic) -> None:
+        self.account = account
+        self.notify = notify
+        self.interval = interval
+        self.first_delay = first_delay
+        self.clock = clock
+        self.last: dict[str, float] = {}
+
+    def check_once(self) -> dict:
+        status = self.account.check()
+        state = status["state"]
+        if state in ("expiring", "expired"):
+            now = self.clock()
+            if now - self.last.get(state, -1e18) >= 20 * 3600:
+                self.last[state] = now
+                if state == "expired":
+                    self.notify("Google 登录已过期,日历、Gmail、待办暂时用不了。打开右上角齿轮设定,点“重新登录 Google”就好。")
+                else:
+                    self.notify(f"Google 登录{status['label']}就要过期了。有空时打开齿轮设定点“重新登录 Google”,又能用 7 天。")
+        return status
+
+    def start(self) -> None:
+        def run():
+            time.sleep(self.first_delay)
+            while True:
+                try:
+                    self.check_once()
+                except Exception:
+                    pass
+                time.sleep(self.interval)
+
+        threading.Thread(target=run, daemon=True, name="friday-google-watch").start()
+
+
 def settings_state(session, meter=None) -> dict:
     """齿轮设定里要显示的当前值。"""
     import friday_app
@@ -1099,11 +1146,13 @@ def settings_state(session, meter=None) -> dict:
         "voices": voices,
         "rate": meter.rate if meter is not None else None,
         "autostart": friday_app.autostart_enabled(),
+        "google": session.google_account.status() if getattr(session, "google_account", None) else None,
     }
 
 
 def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, ctx=None,
-                   autostart: Callable[[bool], None] | None = None) -> dict:
+                   autostart: Callable[[bool], None] | None = None,
+                   google_login: Callable[[], str] | None = None) -> dict:
     """齿轮设定点了保存:写进 .env(下次启动也有效),并且马上用上。"""
     import friday_app
     import voice as voice_module
@@ -1152,6 +1201,10 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         except Exception as e:
             return {"error": f"设置开机启动失败:{e}"}
         done.append("开机会自动在后台启动" if on else "已关闭开机自动启动")
+    if payload.get("google_login"):
+        if google_login is None:
+            return {"error": "还没有设置 Google(需要先放好 credentials.json)"}
+        done.append(google_login())
     return {"ok": True, "message": ";".join(done) or "没有改动"}
 
 
@@ -1199,7 +1252,7 @@ def web_state(session: WebSession, toolbox: Toolbox, discord, cache: dict) -> di
     system = [
         ("Claude", session.assistant is not None, "ONLINE" if session.assistant else "未设置"),
         ("Discord", discord_on, "ONLINE" if discord_on else ("连接中" if discord is not None else "OFF")),
-        ("Google", toolbox.google is not None, "ONLINE" if toolbox.google else "OFF"),
+        google_row(toolbox),
         ("联网搜索", toolbox.web, "ON" if toolbox.web else "OFF"),
     ]
     meter = getattr(session, "meter", None)
@@ -1310,7 +1363,29 @@ def run_web(args) -> None:
         print(f"端口 {port}~{port + 9} 都被占用了,无法启动界面", file=sys.stderr)
         sys.exit(1)
     session.hub_audio = ctx.audio
-    ctx.settings = lambda payload: apply_settings(payload, session, toolbox, args.env_file, meter, ctx)
+    session.google_account = account if google is not None else None
+    login_busy = threading.Event()
+
+    def google_login() -> str:
+        """在后台打开浏览器重新登录 Google;完成后在窗口里说一声。"""
+        if login_busy.is_set():
+            return "Google 登录页已经打开了,请在浏览器里完成登录"
+
+        def run():
+            login_busy.set()
+            try:
+                account.credentials(interactive=True, force=True)
+                hub.broadcast({"type": "status", "text": "Google 重新登录成功,接下来 7 天都能用日历、Gmail、待办"})
+            except Exception as e:
+                hub.broadcast({"type": "error", "text": f"Google 登录没有完成:{e}"})
+            finally:
+                login_busy.clear()
+
+        threading.Thread(target=run, daemon=True, name="friday-google-login").start()
+        return "已在浏览器打开 Google 登录页:选你的账号,看到“Google 尚未验证此应用”点“继续”,再勾选所有权限并允许"
+
+    ctx.settings = lambda payload: apply_settings(payload, session, toolbox, args.env_file, meter, ctx,
+                                                  google_login=google_login if google is not None else None)
     friday_web.write_instance(instance_file, ctx.port, token)
 
     discord_token = os.environ.get("FRIDAY_DISCORD_TOKEN", "").strip()
@@ -1321,6 +1396,12 @@ def run_web(args) -> None:
         discord.gate.transcriber = voice_module.transcribe_audio
         discord.start()
     ReminderScheduler(toolbox.reminders, events).start()
+    if google is not None:
+        def google_notice(text: str) -> None:
+            hub.broadcast({"type": "reminder", "text": "⚠ " + text})
+            notify_popup("星期五", text)
+
+        GoogleWatcher(account, google_notice).start()
 
     url = friday_web.app_url(ctx.port, token)
     print(f"星期五界面已启动:{url}", flush=True)

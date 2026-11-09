@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Callable
 
 from friday_daily import KINDS, REPEATS, Reminders, Todos, describe_reminder, describe_todo
-from friday_google import GoogleNotReady, GoogleTools
+from friday_google import EXPIRED_HINT, GoogleNotReady, GoogleTools
 from friday_pc import COMPUTER_ACTIONS, CONTROL_ACTIONS, Computer, NeedsUser, ScreenControl
 
 MAX_FACTS = 300
@@ -648,7 +648,11 @@ class Toolbox:
         except (NeedsUser, GoogleNotReady) as e:  # 用户拒绝、接管了,或还没设置好,原话告诉模型
             content, is_error = str(e), True
         except Exception as e:  # 工具出错时把原因告诉模型,让它换个办法
-            content, is_error = f"出错了:{type(e).__name__}: {e}", True
+            if type(e).__name__ == "RefreshError" and self.google is not None:  # Google 登录过期了
+                self.google.account.expired = True
+                content, is_error = EXPIRED_HINT, True
+            else:
+                content, is_error = f"出错了:{type(e).__name__}: {e}", True
         result["content"] = content
         if is_error:
             result["is_error"] = True

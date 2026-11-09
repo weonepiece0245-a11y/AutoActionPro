@@ -43,3 +43,4 @@ assistant/friday_chat.json
 assistant/friday_conversation.json
 assistant/friday_archive.jsonl
 assistant/friday.lock
+assistant/google_login.json

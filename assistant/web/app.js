@@ -211,7 +211,7 @@ async function loadState() {
   for (const [name, on, label] of s.system || []) {
     const item = document.createElement("li");
     const tag = document.createElement("span");
-    tag.className = `tag ${on ? "on" : "off"}`;
+    tag.className = `tag ${on === "warn" ? "warn" : on ? "on" : "off"}`;
     tag.textContent = label || (on ? "ONLINE" : "OFF");
     item.append(document.createTextNode(name), tag);
     sys.append(item);
@@ -322,12 +322,19 @@ function fillSettings() {
   voice.value = s.voice;
   $("setRate").value = s.rate ?? "";
   $("autostartRow").hidden = s.autostart === null || s.autostart === undefined;
+  const g = s.google;
+  $("googleRow").hidden = !g || g.state === "off";
+  if (g) {
+    const left = g.state === "ok" && g.days_left != null ? `(还剩约 ${Math.max(1, Math.ceil(g.days_left))} 天)` : "";
+    $("googleState").textContent = (g.state === "ok" ? "正常" : g.label) + left;
+    $("googleState").className = "google-state " + (g.state === "ok" ? "ok" : "warn");
+  }
   $("setAutostart").checked = !!s.autostart;
 }
-async function saveSetting(change) {
+async function saveSetting(change, ms = 3200) {
   const r = await api("/api/settings", change).catch(() => ({ error: "星期五没有响应" }));
   if (r.error) { toast(r.error, 4000); fillSettings(); return false; }
-  toast(r.message || "已保存", 3200);
+  toast(r.message || "已保存", ms);
   await loadState();
   return true;
 }
@@ -351,6 +358,7 @@ $("previewVoice").onclick = async () => {
 };
 $("saveRate").onclick = () => saveSetting({ rate: $("setRate").value.trim() });
 $("setAutostart").onchange = (e) => saveSetting({ autostart: e.target.checked });
+$("googleLogin").onclick = () => saveSetting({ google_login: true }, 9000);
 
 // ---------- 检查更新:下载新版本后星期五自动重启,这个窗口自己刷新 ----------
 function resetUpdateBtn() { $("updateBtn").disabled = false; $("updateBtn").textContent = "检查更新"; }

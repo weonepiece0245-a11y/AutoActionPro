@@ -155,6 +155,10 @@ body.focus .console { width: min(960px, 100%); justify-self: center; }
 .bright output { width: 38px; text-align: right; font-family: var(--mono); color: var(--text, #cfefff); }
 .tag.on { color: var(--green); }
 .tag.off { color: var(--muted); }
+.tag.warn { color: var(--amber); }
+.google-state { font-family: var(--mono); font-weight: 400; margin-left: 6px; }
+.google-state.ok { color: var(--green); }
+.google-state.warn { color: var(--amber); }
 
 /* ---------- 中间:对话 ---------- */
 .console {

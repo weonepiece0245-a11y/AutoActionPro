@@ -4267,5 +4267,121 @@ class WebLaunchTest(TempDirTest):
         self.assertEqual(opened, ["u"])
 
 
+
+class GoogleLoginStatusTest(TempDirTest):
+    def account(self, token=True, credentials=True, login_days_ago=None):
+        if credentials:
+            Path(self.tmp, "credentials.json").write_text("{}")
+        if token:
+            Path(self.tmp, "google_token.json").write_text(json.dumps({"scopes": gmod.SCOPES}))
+        account = gmod.GoogleAccount(Path(self.tmp, "credentials.json"), Path(self.tmp, "google_token.json"))
+        self.now = 1_800_000_000.0
+        account.clock = lambda: self.now
+        if login_days_ago is not None:
+            account.login_file.write_text(json.dumps({"login_at": self.now - login_days_ago * 86400}))
+        return account
+
+    def fake_google(self, refresh_ok):
+        class Creds:
+            valid = False
+            expired = True
+            refresh_token = "r"
+
+            def refresh(self, request):
+                if not refresh_ok:
+                    raise RuntimeError("invalid_grant")
+
+            def to_json(self):
+                return json.dumps({"scopes": gmod.SCOPES})
+
+        modules = {
+            "google": types.ModuleType("google"),
+            "google.auth": types.ModuleType("google.auth"),
+            "google.auth.transport": types.ModuleType("google.auth.transport"),
+            "google.auth.transport.requests": SimpleNamespace(Request=lambda: None),
+            "google.oauth2": types.ModuleType("google.oauth2"),
+            "google.oauth2.credentials": SimpleNamespace(
+                Credentials=SimpleNamespace(from_authorized_user_file=lambda path: Creds())),
+        }
+        return mock.patch.dict(sys.modules, modules)
+
+    def test_states(self):
+        self.assertEqual(self.account(token=False, credentials=False).status()["state"], "off")
+        self.assertEqual(self.account(token=False).status()["state"], "login")
+        self.assertEqual(self.account().status(), {"state": "ok", "label": "ONLINE", "days_left": None})
+        self.assertEqual(self.account(login_days_ago=1).status()["state"], "ok")
+        soon = self.account(login_days_ago=5.5).status()
+        self.assertEqual((soon["state"], soon["label"]), ("expiring", "还剩 2 天"))
+        self.assertEqual(self.account(login_days_ago=8).status()["label"], "请重新登录")
+        account = self.account(login_days_ago=1)
+        account.expired = True
+        self.assertEqual(account.status()["state"], "expired")
+
+    def test_refresh_failure_marks_expired(self):
+        account = self.account()
+        with self.fake_google(refresh_ok=False):
+            with self.assertRaises(gmod.GoogleNotReady) as ctx:
+                account.credentials()
+            self.assertIn("重新登录 Google", str(ctx.exception))
+            self.assertEqual(account.check()["state"], "expired")
+        with self.fake_google(refresh_ok=True):
+            self.assertEqual(account.check()["state"], "ok")  # 又能刷新了
+
+    def test_new_login_restarts_the_clock(self):
+        account = self.account(login_days_ago=6.5)
+        account._services["calendar"] = object()
+        account.expired = True
+        account._logged_in()
+        self.assertEqual(account._services, {})
+        self.assertEqual(account.status()["state"], "ok")
+        self.assertAlmostEqual(account.status()["days_left"], 7)
+
+    def test_expired_token_during_a_tool_call(self):
+        toolbox = self.make_toolbox()
+        account = self.account()
+
+        class RefreshError(Exception):
+            pass
+
+        def calendar(args, approve, confirm):
+            raise RefreshError("invalid_grant")
+
+        toolbox.google = SimpleNamespace(account=account, calendar=calendar)
+        result = toolbox._handlers["calendar"]  # 先确认有这个工具
+        self.assertTrue(callable(result))
+        with mock.patch.object(toolbox, "_specs", {"calendar": {"required": ["action"]}}):
+            result = toolbox.run(tool_use("calendar", {"action": "list"}), lambda s: None)
+        self.assertEqual(result["content"], gmod.EXPIRED_HINT)
+        self.assertTrue(account.expired)
+
+    def test_watcher_reminds_once_a_day(self):
+        account = self.account(login_days_ago=5.5)
+        notes = []
+        now = [0.0]
+        watcher = app.GoogleWatcher(account, notes.append, clock=lambda: now[0])
+        account.check = account.status  # 不连网
+        watcher.check_once()
+        watcher.check_once()
+        self.assertEqual(len(notes), 1)
+        self.assertIn("还剩 2 天", notes[0])
+        now[0] += 21 * 3600
+        watcher.check_once()
+        self.assertEqual(len(notes), 2)
+        account.expired = True
+        watcher.check_once()
+        self.assertIn("已过期", notes[-1])
+
+    def test_panel_row_and_settings(self):
+        toolbox = self.make_toolbox()
+        self.assertEqual(app.google_row(toolbox), ("Google", False, "OFF"))
+        toolbox.google = SimpleNamespace(account=self.account(login_days_ago=5.5))
+        self.assertEqual(app.google_row(toolbox), ("Google", "warn", "还剩 2 天"))
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        env = str(Path(self.tmp, ".env"))
+        self.assertIn("error", app.apply_settings({"google_login": True}, session, toolbox, env))
+        result = app.apply_settings({"google_login": True}, session, toolbox, env, google_login=lambda: "已打开登录页")
+        self.assertEqual(result["message"], "已打开登录页")
+
+
 if __name__ == "__main__":
     unittest.main()

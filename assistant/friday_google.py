@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+import time
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Callable
@@ -43,6 +44,12 @@ SERVICE_NAMES = {"calendar": "日历", "gmail": "Gmail", "tasks": "Google Tasks"
 SCOPES = [scope for scopes in SERVICE_SCOPES.values() for scope in scopes]
 INSTALL_HINT = "需要先安装 Google 相关的库:python -m pip install -r assistant/requirements.txt"
 SETUP_HINT = "还没有授权 Google 账号。请把 credentials.json 放进 assistant 文件夹,然后双击 google-login.bat 登录授权。"
+EXPIRED_HINT = (
+    "Google 登录已过期(测试模式的授权大约每 7 天要重新登录一次)。"
+    "请在星期五窗口右上角的齿轮设定里点“重新登录 Google”,或者双击 google-login.bat。"
+)
+TESTING_DAYS = 7  # “测试中”的 Google 应用,授权 7 天后失效
+WARN_DAYS = 2  # 还剩这么多天就开始提醒
 MAX_BODY_CHARS = 8000
 
 Approver = Callable[[str], bool]
@@ -59,7 +66,44 @@ class GoogleAccount:
     def __init__(self, credentials_file: str | os.PathLike, token_file: str | os.PathLike) -> None:
         self.credentials_file = Path(credentials_file)
         self.token_file = Path(token_file)
+        self.login_file = self.token_file.with_name("google_login.json")  # 记下登录时间,算还剩几天
         self._services: dict = {}
+        self.expired = False  # 刷新授权失败过(过期或被撤销)
+        self.clock = time.time
+
+    # ---------- 登录状态 ----------
+    def login_age_days(self) -> float | None:
+        try:
+            at = json.loads(self.login_file.read_text(encoding="utf-8")).get("login_at")
+        except (OSError, ValueError):
+            return None
+        return (self.clock() - at) / 86400 if isinstance(at, (int, float)) else None
+
+    def status(self) -> dict:
+        """{"state": off / login / ok / expiring / expired, "label": 给人看的文字, "days_left": 剩几天或 None}"""
+        if not self.configured:
+            return {"state": "off", "label": "未设置", "days_left": None}
+        if self.expired:
+            return {"state": "expired", "label": "已过期", "days_left": 0}
+        if not self.token_file.exists():
+            return {"state": "login", "label": "未登录", "days_left": None}
+        age = self.login_age_days()
+        if age is not None:
+            left = TESTING_DAYS - age
+            if left <= 0:
+                return {"state": "expiring", "label": "请重新登录", "days_left": 0}
+            if left <= WARN_DAYS:
+                return {"state": "expiring", "label": f"还剩 {max(1, int(left + 0.999))} 天", "days_left": left}
+        return {"state": "ok", "label": "ONLINE", "days_left": None if age is None else TESTING_DAYS - age}
+
+    def check(self) -> dict:
+        """试着刷新一下授权(不弹登录页),看看还能不能用。"""
+        if self.token_file.exists():
+            try:
+                self.credentials()
+            except GoogleNotReady:
+                pass
+        return self.status()
 
     @property
     def configured(self) -> bool:
@@ -79,7 +123,8 @@ class GoogleAccount:
         granted = self.granted_scopes()
         return [] if granted is None else [s for s in SCOPES if s not in granted]
 
-    def credentials(self, interactive: bool = False):
+    def credentials(self, interactive: bool = False, force: bool = False):
+        """force=True:不管旧授权还能不能用,都重新登录一次(重新开始算 7 天)。"""
         try:
             from google.auth.transport.requests import Request
             from google.oauth2.credentials import Credentials
@@ -87,7 +132,7 @@ class GoogleAccount:
             raise GoogleNotReady(INSTALL_HINT) from e
 
         creds = None
-        if self.token_file.exists():
+        if self.token_file.exists() and not force:
             creds = Credentials.from_authorized_user_file(str(self.token_file))
             if interactive and self.missing_scopes():
                 creds = None  # 加了新功能,重新登录授权一次
@@ -97,10 +142,12 @@ class GoogleAccount:
             try:
                 creds.refresh(Request())
                 self._save(creds)
+                self.expired = False
                 return creds
             except Exception:  # 授权被撤销或过期(测试模式的应用 7 天过期),需要重新登录
+                self.expired = True
                 if not interactive:
-                    raise GoogleNotReady("Google 授权已过期,请双击 google-login.bat 重新登录。") from None
+                    raise GoogleNotReady(EXPIRED_HINT) from None
         if not interactive:
             raise GoogleNotReady(SETUP_HINT)
         if not self.credentials_file.exists():
@@ -112,7 +159,17 @@ class GoogleAccount:
         flow = InstalledAppFlow.from_client_secrets_file(str(self.credentials_file), SCOPES)
         creds = flow.run_local_server(port=0, open_browser=True)
         self._save(creds)
+        self._logged_in()
         return creds
+
+    def _logged_in(self) -> None:
+        """刚登录完:记下时间,旧的连接作废。"""
+        self.expired = False
+        self._services.clear()
+        try:
+            self.login_file.write_text(json.dumps({"login_at": self.clock()}), encoding="utf-8")
+        except OSError:
+            pass
 
     def _save(self, creds) -> None:
         self.token_file.write_text(creds.to_json(), encoding="utf-8")
