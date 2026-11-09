@@ -4464,11 +4464,23 @@ class BudgetTest(unittest.TestCase):
         self.assertEqual(budget.month_usd(), (3.5, "console"))
         self.assertEqual(budget.state()["source"], "console")
 
+    def test_console_dates_in_utc(self):
+        urls = []
+        console = friday_budget.ConsoleCost("k", lambda url, key: urls.append(url) or {"data": []})
+        # 吉隆坡 11 月 10 日早上 7 点 = UTC 11 月 9 日 23 点:本地“今天”在 UTC 还没开始
+        now = datetime.datetime(2026, 11, 9, 23, 0, tzinfo=datetime.timezone.utc)
+        console.cost_since(datetime.date(2026, 11, 10), now=now)
+        self.assertIn("starting_at=2026-11-09T00%3A00%3A00Z", urls[0])
+        self.assertIn("ending_at=2026-11-10T00%3A00%3A00Z", urls[0])
+        console.cost_since(datetime.date(2026, 11, 1), now=now)
+        self.assertIn("starting_at=2026-11-01T00%3A00%3A00Z", urls[1])
+        self.assertIn("ending_at=2026-11-10T00%3A00%3A00Z", urls[1])
+
     def test_console_errors(self):
         os.environ["FRIDAY_ADMIN_KEY"] = "sk-ant-admin01-x"
 
         def fetch(url, key):
-            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+            raise friday_budget.ConsoleError(404, "Not Found")
 
         budget = friday_budget.Budget(self.meter, console_factory=lambda key: friday_budget.ConsoleCost(key, fetch))
         self.spend(1)

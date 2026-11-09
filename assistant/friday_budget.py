@@ -14,6 +14,7 @@ import json
 import os
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Callable
@@ -35,11 +36,24 @@ def _env_float(name: str) -> float:
         return 0.0
 
 
+class ConsoleError(Exception):
+    def __init__(self, code: int, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 def fetch_json(url: str, key: str, timeout: float = 30) -> dict:
     request = urllib.request.Request(url, headers={
         "x-api-key": key, "anthropic-version": "2023-06-01", "User-Agent": "friday-assistant"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:  # 把 Console 说的原因带出来
+        try:
+            message = json.loads(e.read().decode("utf-8")).get("error", {}).get("message", "")
+        except Exception:
+            message = ""
+        raise ConsoleError(e.code, message or f"HTTP {e.code}") from None
 
 
 class ConsoleCost:
@@ -50,10 +64,16 @@ class ConsoleCost:
         self.fetch = fetch
 
     def cost_since(self, day: datetime.date, now: datetime.datetime | None = None) -> float:
-        now = now or datetime.datetime.now(datetime.timezone.utc)
+        # Console 按 UTC 算日子,马来西亚早 8 小时:本地的“今天”在 UTC 可能还没开始,
+        # 开始时间不能晚于 UTC 的今天,结束时间至少比开始晚一天,否则 Console 会回 400
+        utc = datetime.timezone.utc
+        now = (now or datetime.datetime.now(utc)).astimezone(utc)
+        utc_today = now.date()
+        start = min(day, utc_today)
+        end = max(utc_today, start) + datetime.timedelta(days=1)
         params = {
-            "starting_at": f"{day.isoformat()}T00:00:00Z",
-            "ending_at": (now + datetime.timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z"),
+            "starting_at": f"{start.isoformat()}T00:00:00Z",
+            "ending_at": f"{end.isoformat()}T00:00:00Z",
             "bucket_width": "1d",
             "limit": "31",
         }
@@ -117,11 +137,14 @@ class Budget:
         result: dict = {"at": time.time()}
         try:
             result["month_usd"] = console.cost_since(today.replace(day=1))
-            since = self.credit_since
-            if since:
-                result["since_usd"] = console.cost_since(datetime.date.fromisoformat(since))
         except Exception as e:
-            result = {"at": time.time(), "error": self._describe_error(e)}
+            result["error"] = self._describe_error(e)
+        since = self.credit_since
+        if since and "error" not in result:
+            try:  # 余额那部分出错,本月花费照样用 Console 的
+                result["since_usd"] = console.cost_since(datetime.date.fromisoformat(since))
+            except Exception as e:
+                result["error"] = "余额用估算:" + self._describe_error(e)
         with self.lock:
             self.console = result
         return result
@@ -133,6 +156,8 @@ class Budget:
             return "Admin Key 无效或没有权限"
         if code == 404:
             return "这个账户不能用 Admin API(个人账户要先在 Console 设置组织)"
+        if code == 400:
+            return f"Console 不接受这个查询:{error}"
         return f"读不到 Console:{error}"
 
     def start(self, interval: float = CONSOLE_REFRESH) -> None:
