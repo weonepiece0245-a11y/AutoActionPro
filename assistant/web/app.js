@@ -197,6 +197,7 @@ async function loadState() {
   const s = await api("/api/state");
   if (!s || s.error) return;
   $("versionText").textContent = s.version || "未记录";
+  if (s.settings) settingsState = s.settings;
   if (s.model) showModel(s.model.model, s.model.mode);
   if (s.startup_error) { $("banner").hidden = false; $("banner").textContent = s.startup_error; }
   fillList("memoryList", s.memories, "还没有记忆,多跟我聊聊你自己", (m) => li(m.text, m.added));
@@ -220,15 +221,20 @@ async function loadState() {
 
 // ---------- 发送 ----------
 let speakOn = localStorage.getItem("friday-speak") !== "0";
-function updateSpeakBtn() { $("speakBtn").setAttribute("aria-pressed", String(speakOn)); }
+function updateSpeakBtn() {
+  $("speakBtn").setAttribute("aria-pressed", String(speakOn));
+  $("setSpeak").checked = speakOn;
+}
 updateSpeakBtn();
-$("speakBtn").onclick = () => {
-  speakOn = !speakOn;
+function setSpeak(on) {
+  speakOn = on;
   try { localStorage.setItem("friday-speak", speakOn ? "1" : "0"); } catch {}
   updateSpeakBtn();
   ensureAudio();
   if (!speakOn) stopSpeaking();
-};
+}
+$("speakBtn").onclick = () => setSpeak(!speakOn);
+$("setSpeak").onchange = (e) => setSpeak(e.target.checked);
 
 $("form").onsubmit = async (e) => {
   e.preventDefault();
@@ -279,8 +285,11 @@ function applyPanels() {
   document.body.classList.toggle("focus", !panelsOn);
   $("panelsBtn").setAttribute("aria-pressed", String(panelsOn));
   $("panelsBtn").title = panelsOn ? "隐藏两边的面板" : "显示两边的面板";
+  $("setPanels").checked = panelsOn;
 }
-$("panelsBtn").onclick = () => { panelsOn = !panelsOn; savePrefs("friday-panels", panelsOn); applyPanels(); };
+function setPanels(on) { panelsOn = on; savePrefs("friday-panels", panelsOn); applyPanels(); }
+$("panelsBtn").onclick = () => setPanels(!panelsOn);
+$("setPanels").onchange = (e) => setPanels(e.target.checked);
 applyPanels();
 
 // ---------- 模型:自动 / 只用 Opus / 只用 Sonnet ----------
@@ -295,6 +304,53 @@ $("modelMode").onchange = async (e) => {
   if (r.error) toast(r.error);
   else toast(e.target.value === "auto" ? "自动选模型:日常用 Sonnet,难题用 Opus" : "已固定使用 " + e.target.selectedOptions[0].textContent.replace("只用 ", ""));
 };
+
+// ---------- 齿轮设定 ----------
+let settingsState = null;
+function fillSettings() {
+  const s = settingsState;
+  if (!s) return;
+  $("setCallMe").value = s.call_me || "";
+  const voice = $("setVoice");
+  if (!voice.options.length) {
+    for (const [key, desc] of s.voices || []) {
+      const opt = document.createElement("option");
+      opt.value = key; opt.textContent = desc;
+      voice.append(opt);
+    }
+  }
+  voice.value = s.voice;
+  $("setRate").value = s.rate ?? "";
+  $("autostartRow").hidden = s.autostart === null || s.autostart === undefined;
+  $("setAutostart").checked = !!s.autostart;
+}
+async function saveSetting(change) {
+  const r = await api("/api/settings", change).catch(() => ({ error: "星期五没有响应" }));
+  if (r.error) { toast(r.error, 4000); fillSettings(); return false; }
+  toast(r.message || "已保存", 3200);
+  await loadState();
+  return true;
+}
+function openSettings() { fillSettings(); $("settings").hidden = false; $("settingsClose").focus(); }
+function closeSettings() { $("settings").hidden = true; }
+$("settingsBtn").onclick = openSettings;
+$("settingsClose").onclick = closeSettings;
+$("settings").addEventListener("click", (e) => { if (e.target.id === "settings") closeSettings(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("settings").hidden) closeSettings(); });
+$("saveCallMe").onclick = () => saveSetting({ call_me: $("setCallMe").value.trim() });
+$("setCallMe").onkeydown = (e) => { if (e.key === "Enter") $("saveCallMe").click(); };
+$("setVoice").onchange = (e) => saveSetting({ voice: e.target.value });
+$("previewVoice").onclick = async () => {
+  ensureAudio();
+  const name = ($("setCallMe").value || "老板").trim();
+  const r = await api("/api/speak", { text: `${name},你好,我是星期五,这是我现在的声音。` }).catch(() => ({}));
+  if (!r.url) { toast("试听失败,检查一下网络"); return; }
+  stopSpeaking();
+  audioQueue.push(r.url);
+  playNext();
+};
+$("saveRate").onclick = () => saveSetting({ rate: $("setRate").value.trim() });
+$("setAutostart").onchange = (e) => saveSetting({ autostart: e.target.checked });
 
 // ---------- 检查更新:下载新版本后星期五自动重启,这个窗口自己刷新 ----------
 function resetUpdateBtn() { $("updateBtn").disabled = false; $("updateBtn").textContent = "检查更新"; }

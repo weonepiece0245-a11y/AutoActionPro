@@ -569,6 +569,98 @@ class SingleWindowTest(unittest.TestCase):
         self.assertFalse(friday_web.focus_window() if os.name != "nt" else False)
 
 
+class SettingsTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.env = Path(self.dir, ".env")
+        self.env.write_text("ANTHROPIC_API_KEY=sk-secret\n", encoding="utf-8")
+        self.toolbox = tools.Toolbox(tools.Memory(os.path.join(self.dir, "m.json")), lambda a: True)
+        self.bot = app.Assistant(client=FakeClient(), system=app.friday_persona("老板", self.toolbox).system,
+                                 toolbox=self.toolbox)
+        self.session = app.WebSession(self.bot, app.friday_persona("老板", self.toolbox), friday_web.Hub())
+        self.meter = friday_usage.UsageMeter(Path(self.dir, "u.json"), usd_to_myr=4.1)
+        patcher = mock.patch.dict(os.environ, {}, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for key in ("FRIDAY_CALL_ME", "FRIDAY_TTS_VOICE", "FRIDAY_USD_TO_MYR"):
+            os.environ.pop(key, None)
+
+    def apply(self, payload, **kwargs):
+        return app.apply_settings(payload, self.session, self.toolbox, str(self.env), self.meter, **kwargs)
+
+    def test_call_me_saved_and_used_from_next_topic(self):
+        result = self.apply({"call_me": "阿龙"})
+        self.assertTrue(result["ok"])
+        self.assertIn("FRIDAY_CALL_ME=阿龙", self.env.read_text(encoding="utf-8"))
+        self.assertIn("ANTHROPIC_API_KEY=sk-secret", self.env.read_text(encoding="utf-8"))  # 别的设置不动
+        self.assertNotIn("阿龙", self.bot.system)  # 当前对话不变(不让缓存失效)
+        self.bot.reset()
+        self.assertIn("阿龙", self.bot.system)
+        self.assertEqual(app.settings_state(self.session, self.meter)["call_me"], "阿龙")
+        self.assertIn("error", self.apply({"call_me": ""}))
+        self.assertIn("error", self.apply({"call_me": "a=b"}))
+
+    def test_voice_and_rate_take_effect_now(self):
+        self.assertTrue(self.apply({"voice": "xiaoyi", "rate": "4.05"})["ok"])
+        self.assertEqual(os.environ["FRIDAY_TTS_VOICE"], "xiaoyi")
+        self.assertEqual(self.meter.rate, 4.05)
+        state = app.settings_state(self.session, self.meter)
+        self.assertEqual((state["voice"], state["rate"]), ("xiaoyi", 4.05))
+        self.assertIn(["xiaoyi", "晓伊,女声,活泼"], state["voices"])
+        self.assertIn("error", self.apply({"voice": "siri"}))
+        self.assertIn("error", self.apply({"rate": "abc"}))
+        self.assertIn("error", self.apply({"rate": "400"}))
+
+    def test_autostart(self):
+        calls = []
+        self.assertIn("开机", self.apply({"autostart": True}, autostart=calls.append)["message"])
+        self.apply({"autostart": False}, autostart=calls.append)
+        self.assertEqual(calls, [True, False])
+
+        def broken(on):
+            raise RuntimeError("没有权限")
+
+        self.assertIn("没有权限", self.apply({"autostart": True}, autostart=broken)["error"])
+
+    def test_set_autostart_shortcut(self):
+        calls = []
+
+        def powershell(script, env):
+            calls.append(("create" if "CreateShortcut" in script else "remove", env))
+            return ""
+
+        folder = Path(self.dir)
+        friday_app.set_autostart(True, folder, powershell, pythonw=Path(self.dir, "pythonw.exe"))
+        friday_app.set_autostart(False, folder, powershell)
+        kind, env = calls[0]
+        self.assertEqual((kind, env["FRIDAY_FOLDER"], env["FRIDAY_NAME"]), ("create", "Startup", "星期五(开机启动)"))
+        self.assertTrue(env["FRIDAY_ARGS"].endswith("--no-browser"))
+        self.assertEqual(calls[1][0], "remove")
+
+    def test_settings_endpoint(self):
+        ctx = friday_web.WebContext(friday_web.Hub(), queue.Queue(), friday_web.WebApprover(friday_web.Hub()),
+                                    "tok", 0, state=lambda: {})
+        ctx.settings = lambda payload: {"error": "不行"} if "bad" in payload else {"ok": True, "message": "好"}
+        server = friday_web.start_server(ctx)
+        try:
+            ctx.port = server.server_address[1]
+
+            def post(body, token="tok"):
+                conn = http.client.HTTPConnection("127.0.0.1", ctx.port, timeout=5)
+                conn.request("POST", "/api/settings", json.dumps(body),
+                             {"X-Friday-Token": token, "Content-Type": "application/json"})
+                response = conn.getresponse()
+                body = response.read()
+                return response.status, (json.loads(body) if response.status != 403 else None)
+
+            self.assertEqual(post({"voice": "xiaoyi"}), (200, {"ok": True, "message": "好"}))
+            self.assertEqual(post({"bad": 1})[0], 400)
+            self.assertEqual(post({"voice": "x"}, token="wrong")[0], 403)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
 class ChatLogPersistenceTest(unittest.TestCase):
     def test_window_history_survives_restart(self):
         path = Path(tempfile.mkdtemp(), "chat.json")

@@ -32,6 +32,9 @@
   </div>
   <div class="status-pill" id="modePill"><span class="dot"></span><span id="modeText">待机 STANDBY</span><span class="model-chip" id="modelChip" hidden></span></div>
   <div class="top-right">
+    <button type="button" class="icon-btn small" id="settingsBtn" title="设定" aria-label="设定">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+    </button>
     <button type="button" class="icon-btn small toggle" id="panelsBtn" title="隐藏/显示两边的面板" aria-label="隐藏或显示两边的面板" aria-pressed="true">
       <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path class="side" d="M8 4v16M16 4v16"/></svg>
     </button>
@@ -46,11 +49,6 @@
   <section class="panel" data-panel="system">
     <h2><span>SYSTEM</span>系统</h2>
     <ul class="sys" id="sysList"></ul>
-    <label class="bright">亮度 <input type="range" id="brightness" min="20" max="120" step="5" value="70" aria-label="光球亮度"><output id="brightOut">70%</output></label>
-    <div class="update-row" id="modelRow" hidden><span>模型</span><select class="mini-select" id="modelMode" title="自动:日常用 Sonnet 5.5(便宜一半),难题用 Opus 5.5" aria-label="选择模型">
-      <option value="auto">自动(推荐)</option><option value="opus">只用 Opus 5.5</option><option value="sonnet">只用 Sonnet 5.5</option>
-    </select></div>
-    <div class="update-row"><span>版本 <b id="versionText">—</b></span><button type="button" class="mini-btn" id="updateBtn" title="从 GitHub 下载最新的星期五并自动重启">检查更新</button></div>
   </section>
   <section class="panel grow" data-panel="memory">
     <h2><span>MEMORY</span>我记得的事</h2>
@@ -101,6 +99,45 @@
       <button class="btn ghost" id="approveAll">本次运行都允许</button>
     </div>
     <div class="modal-note" id="approvalNote"></div>
+  </div>
+</div>
+
+<div class="modal" id="settings" hidden>
+  <div class="modal-card settings-card" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <div class="modal-head"><span class="settings-title" id="settingsTitle">SETTINGS</span>设定<button type="button" class="close-x" id="settingsClose" aria-label="关闭">×</button></div>
+
+    <div class="set-group">
+      <h3>星期五</h3>
+      <div class="set-row"><label for="setCallMe">怎么称呼你</label>
+        <span class="set-ctl"><input class="mini-input" id="setCallMe" maxlength="20"><button type="button" class="mini-btn" id="saveCallMe">保存</button></span></div>
+      <div class="set-row" id="modelRow" hidden><label for="modelMode">模型</label>
+        <select class="mini-select" id="modelMode" title="自动:日常用 Sonnet 5.5(便宜一半),难题用 Opus 5.5">
+          <option value="auto">自动(推荐)</option><option value="opus">只用 Opus 5.5</option><option value="sonnet">只用 Sonnet 5.5</option>
+        </select></div>
+    </div>
+
+    <div class="set-group">
+      <h3>声音</h3>
+      <div class="set-row"><label for="setSpeak">朗读回答</label><input type="checkbox" class="switch" id="setSpeak"></div>
+      <div class="set-row"><label for="setVoice">朗读声音</label>
+        <span class="set-ctl"><select class="mini-select" id="setVoice"></select><button type="button" class="mini-btn" id="previewVoice">试听</button></span></div>
+    </div>
+
+    <div class="set-group">
+      <h3>外观</h3>
+      <div class="set-row"><label for="brightness">光球亮度</label>
+        <span class="set-ctl bright"><input type="range" id="brightness" min="20" max="120" step="5" value="70"><output id="brightOut">70%</output></span></div>
+      <div class="set-row"><label for="setPanels">显示两边的面板</label><input type="checkbox" class="switch" id="setPanels"></div>
+    </div>
+
+    <div class="set-group">
+      <h3>其他</h3>
+      <div class="set-row" id="autostartRow" hidden><label for="setAutostart">开机自动启动(后台运行)</label><input type="checkbox" class="switch" id="setAutostart"></div>
+      <div class="set-row"><label for="setRate">汇率(本月花费用)</label>
+        <span class="set-ctl">1 美元 = <input class="mini-input short" id="setRate" inputmode="decimal"> 马币<button type="button" class="mini-btn" id="saveRate">保存</button></span></div>
+      <div class="set-row"><span>版本 <b id="versionText">—</b></span><button type="button" class="mini-btn" id="updateBtn" title="从 GitHub 下载最新的星期五并自动重启">检查更新</button></div>
+    </div>
+    <div class="modal-note">设定会保存起来,下次打开还在。</div>
   </div>
 </div>
 

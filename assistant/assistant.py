@@ -333,6 +333,7 @@ class Assistant:
     def _slim_if_idle(self) -> None:
         if self.messages and self.last_ask is not None and self.clock() - self.last_ask > SLIM_AFTER:
             self.messages = self._slim_messages()
+            self.system = self._build_system()  # 相当于新对话:带上最新的记忆和设置
 
     def _build_system(self) -> str:
         return self._system_factory() if callable(self._system_factory) else self._system_factory
@@ -965,6 +966,7 @@ class WebSession:
     _stream = None
     _turn = 0
     restart = False  # 更新完要重启
+    call_me = ""  # 现在的称呼(齿轮设定里显示)
     meter = None  # 花费统计
     router = None  # 自动选模型
     hub_audio = None  # 由 run_web 设置成 WebContext.audio
@@ -1082,6 +1084,77 @@ def attach_meter(assistant: Assistant, data_dir: str, log: bool = False):
     return meter
 
 
+def settings_state(session, meter=None) -> dict:
+    """齿轮设定里要显示的当前值。"""
+    import friday_app
+    import voice as voice_module
+
+    current = os.environ.get("FRIDAY_TTS_VOICE", "").strip().lower()
+    voices = [[key, desc] for key, (name, desc) in voice_module.EDGE_VOICES.items()]
+    voice_key = next((key for key, (name, _) in voice_module.EDGE_VOICES.items()
+                      if current in (key, name.lower())), "xiaoxiao")
+    return {
+        "call_me": os.environ.get("FRIDAY_CALL_ME") or getattr(session, "call_me", "") or DEFAULT_CALL_ME,
+        "voice": voice_key,
+        "voices": voices,
+        "rate": meter.rate if meter is not None else None,
+        "autostart": friday_app.autostart_enabled(),
+    }
+
+
+def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, ctx=None,
+                   autostart: Callable[[bool], None] | None = None) -> dict:
+    """齿轮设定点了保存:写进 .env(下次启动也有效),并且马上用上。"""
+    import friday_app
+    import voice as voice_module
+    from friday_discord import save_env_value
+
+    env = Path(env_file)
+    done = []
+    if "call_me" in payload:
+        name = str(payload["call_me"]).strip()
+        if not name or len(name) > 20 or any(c in name for c in "\n\r="):
+            return {"error": "称呼要 1~20 个字"}
+        save_env_value(env, "FRIDAY_CALL_ME", name)
+        os.environ["FRIDAY_CALL_ME"] = name
+        persona = friday_persona(name, toolbox, voice=False)
+        session.persona = persona
+        session.call_me = name
+        if session.assistant is not None:  # 新话题开始时生效(中途改设定会让缓存失效)
+            session.assistant._system_factory = persona.system
+            session.assistant.context = persona.context
+        if ctx is not None:
+            ctx.greeting = persona.greeting
+        done.append(f"称呼改成“{name}”,点 ↺ 开新话题后生效")
+    if "voice" in payload:
+        key = str(payload["voice"]).strip().lower()
+        if key not in voice_module.EDGE_VOICES:
+            return {"error": "没有这个声音"}
+        save_env_value(env, "FRIDAY_TTS_VOICE", key)
+        os.environ["FRIDAY_TTS_VOICE"] = key
+        done.append(f"朗读声音改成{voice_module.EDGE_VOICES[key][1].split(',')[0]}")
+    if "rate" in payload:
+        try:
+            rate = float(payload["rate"])
+        except (TypeError, ValueError):
+            return {"error": "汇率要填数字"}
+        if not 1 <= rate <= 10:
+            return {"error": "汇率看起来不对(1 美元大约 4 马币)"}
+        save_env_value(env, "FRIDAY_USD_TO_MYR", f"{rate:g}")
+        os.environ["FRIDAY_USD_TO_MYR"] = f"{rate:g}"
+        if meter is not None:
+            meter.rate = rate
+        done.append(f"汇率改成 1 美元 = {rate:g} 马币")
+    if "autostart" in payload:
+        on = bool(payload["autostart"])
+        try:
+            (autostart or friday_app.set_autostart)(on)
+        except Exception as e:
+            return {"error": f"设置开机启动失败:{e}"}
+        done.append("开机会自动在后台启动" if on else "已关闭开机自动启动")
+    return {"ok": True, "message": ";".join(done) or "没有改动"}
+
+
 def start_model(args) -> str:
     """--model auto(默认)时先用 Opus,之后由自动选模型决定。"""
     return DEFAULT_MODEL if args.model in (None, "auto") else args.model
@@ -1138,7 +1211,8 @@ def web_state(session: WebSession, toolbox: Toolbox, discord, cache: dict) -> di
 
     version = friday_update.current_version(Path(SCRIPT_DIR))[:7]
     return {"memories": memories[:40], "reminders": reminders, "todos": todos[:20], "system": system,
-            "startup_error": session.startup_error, "version": version, "model": model}
+            "startup_error": session.startup_error, "version": version, "model": model,
+            "settings": settings_state(session, meter)}
 
 
 def redirect_output(log_file: str) -> None:
@@ -1213,6 +1287,7 @@ def run_web(args) -> None:
     session = WebSession(assistant, persona, hub, voice_module.synthesize_mp3, startup_error)
     session.meter = meter
     session.router = router
+    session.call_me = call_me
     port = args.port or int(os.environ.get("FRIDAY_WEB_PORT") or friday_web.DEFAULT_PORT)
     token = os.environ.get("FRIDAY_WEB_TOKEN") or friday_web.new_token()  # 更新后重启沿用原来的口令
     discord = None  # 下面启动;界面状态接口会读到它
@@ -1235,6 +1310,7 @@ def run_web(args) -> None:
         print(f"端口 {port}~{port + 9} 都被占用了,无法启动界面", file=sys.stderr)
         sys.exit(1)
     session.hub_audio = ctx.audio
+    ctx.settings = lambda payload: apply_settings(payload, session, toolbox, args.env_file, meter, ctx)
     friday_web.write_instance(instance_file, ctx.port, token)
 
     discord_token = os.environ.get("FRIDAY_DISCORD_TOKEN", "").strip()

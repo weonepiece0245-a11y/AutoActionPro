@@ -183,6 +183,34 @@ def install(folder: Path = SCRIPT_DIR, ask: Callable[[str], str] = input,
     return 0
 
 
+def autostart_path() -> Path | None:
+    appdata = os.environ.get("APPDATA")
+    if os.name != "nt" or not appdata:
+        return None
+    return Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / f"{AUTOSTART_NAME}.lnk"
+
+
+def autostart_enabled() -> bool | None:
+    """开机自动启动有没有打开;不是 Windows 返回 None。"""
+    path = autostart_path()
+    return None if path is None else path.exists()
+
+
+def set_autostart(on: bool, folder: Path = SCRIPT_DIR,
+                  powershell: Callable[[str, dict], str] = run_powershell,
+                  pythonw: Path | None | str = "auto") -> None:
+    """打开或关掉开机自动启动(在后台运行,不弹窗口)。"""
+    if not on:
+        powershell(REMOVE_SHORTCUT, {"FRIDAY_FOLDER": "Startup", "FRIDAY_NAME": AUTOSTART_NAME})
+        return
+    if pythonw == "auto":
+        pythonw = find_pythonw()
+    target, args, minimized = app_launcher(folder, pythonw, "--no-browser")
+    powershell(CREATE_SHORTCUT, _shortcut_env(
+        "Startup", AUTOSTART_NAME, target, folder / ICON_NAME, "开机自动启动星期五(后台)",
+        minimized=minimized, args=args, workdir=folder))
+
+
 def uninstall(powershell: Callable[[str, dict], str] = run_powershell) -> int:
     removed = []
     for name in [s[0] for s in SHORTCUTS] + LEGACY_SHORTCUTS:

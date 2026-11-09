@@ -286,6 +286,7 @@ class WebContext:
         self.transcribe = transcribe
         self.synthesize = synthesize
         self.audio = AudioStore()
+        self.settings: Callable[[dict], dict] | None = None  # 齿轮设定:保存设置,返回 {"ok"/"error", "message"}
 
 
 def make_handler(ctx: WebContext):
@@ -413,6 +414,14 @@ def make_handler(ctx: WebContext):
                     return self._json(400, {"error": "不支持的命令"})
                 ctx.events.put(("command", command))
                 return self._json(202, {"ok": True})
+            if url.path == "/api/settings":
+                if ctx.settings is None or not isinstance(data, dict):
+                    return self._json(400, {"error": "不能修改设置"})
+                try:
+                    result = ctx.settings(data)
+                except Exception as e:
+                    return self._json(500, {"error": f"保存失败:{e}"})
+                return self._json(400 if result.get("error") else 200, result)
             if url.path == "/api/speak":
                 text = str(data.get("text") or "").strip()
                 audio = ctx.synthesize(text) if (ctx.synthesize and text) else None
