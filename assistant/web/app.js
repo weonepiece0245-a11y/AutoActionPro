@@ -253,6 +253,7 @@ function updateSpeakBtn() {
   $("speakBtn").setAttribute("aria-pressed", String(speakOn));
   $("setSpeak").checked = speakOn;
   if ($("setFollowUp")) $("setFollowUp").checked = loadPrefs("friday-followup", true);
+  if ($("setBarge")) $("setBarge").checked = loadPrefs("friday-barge", true);
 }
 updateSpeakBtn();
 function setSpeak(on) {
@@ -265,6 +266,7 @@ function setSpeak(on) {
 $("speakBtn").onclick = () => setSpeak(!speakOn);
 $("setSpeak").onchange = (e) => setSpeak(e.target.checked);
 $("setFollowUp").onchange = (e) => { followUpOn = e.target.checked; savePrefs("friday-followup", followUpOn); };
+$("setBarge").onchange = (e) => { bargeOn = e.target.checked; savePrefs("friday-barge", bargeOn); if (!bargeOn) stopBargeWatch(); };
 
 $("form").onsubmit = async (e) => {
   e.preventDefault();
@@ -603,6 +605,7 @@ function enqueueAudio(url, turn) {
   if (!speaking) playNext();
 }
 function stopSpeaking() {
+  stopBargeWatch();
   if (audioTurn !== null) ignoreTurn = Math.max(ignoreTurn, audioTurn);
   audioQueue.length = 0;
   audioEl.pause();
@@ -610,11 +613,12 @@ function stopSpeaking() {
 }
 function playNext() {
   const url = audioQueue.shift();
-  if (!url) { speaking = false; orbState.level = 0; refreshMode(); maybeFollowUp(); return; }
+  if (!url) { speaking = false; orbState.level = 0; stopBargeWatch(); refreshMode(); maybeFollowUp(); return; }
   ensureAudio();
   speaking = true; refreshMode();
   audioEl.src = `${url}?t=${encodeURIComponent(token)}`;
   audioEl.play().then(() => {
+    startBargeWatch();
     if (levelLoop) return;
     levelLoop = true;
     const loop = () => {
@@ -698,6 +702,46 @@ async function listen({ followUp = false, stream = null, spoke = false } = {}) {
   watch();
 }
 $("micBtn").onclick = () => (recorder ? recorder.stop() : listen());
+
+// ---------- 说话打断她:她在说话时你一开口,她就停下来听你说 ----------
+let bargeOn = loadPrefs("friday-barge", true);
+let bargeStream = null;
+async function startBargeWatch() {
+  if (!bargeOn || bargeStream || recorder || !audioCtx) return;
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+  } catch { return; }
+  if (!speaking || recorder || bargeStream) { stream.getTracks().forEach((t) => t.stop()); return; }
+  bargeStream = stream;
+  const an = audioCtx.createAnalyser();
+  an.fftSize = 1024;
+  audioCtx.createMediaStreamSource(stream).connect(an);
+  const started = performance.now();
+  let baseline = 0.01, loud = 0;
+  const loop = () => {
+    if (bargeStream !== stream) return;
+    if (!speaking) { stopBargeWatch(); return; }
+    const level = rms(an);
+    if (performance.now() - started < 500) {
+      baseline = Math.max(baseline, level);  // 先量一下她自己的声音从喇叭漏回麦克风有多大
+    } else if (level > Math.max(0.06, baseline * 2.5)) {
+      if (++loud >= 15) {  // 大约 0.25 秒都比她的声音大:是你在说话
+        bargeStream = null;
+        stopSpeaking();
+        listen({ stream, spoke: true });
+        return;
+      }
+    } else {
+      loud = Math.max(0, loud - 2);
+    }
+    requestAnimationFrame(loop);
+  };
+  loop();
+}
+function stopBargeWatch() {
+  if (bargeStream) { bargeStream.getTracks().forEach((t) => t.stop()); bargeStream = null; }
+}
 
 // ---------- 连续对话:用语音问的,她说完后自动再听几秒,你可以直接接着说 ----------
 let followUpOn = loadPrefs("friday-followup", true);
