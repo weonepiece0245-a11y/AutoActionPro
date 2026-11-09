@@ -358,7 +358,15 @@ function fillSettings() {
         phrases.append(opt);
       }
     }
-    phrases.value = w.phrase;
+    if (!phrases.querySelector('option[value="__custom"]')) {
+      const opt = document.createElement("option");
+      opt.value = "__custom"; opt.textContent = "自定义…";
+      phrases.append(opt);
+    }
+    const custom = !w.phrases.includes(w.phrase);
+    phrases.value = custom ? "__custom" : w.phrase;
+    phrases.querySelector('option[value="__custom"]').textContent = custom ? `“${w.phrase}”(自定义)` : "自定义…";
+    showWakeCustom(custom, custom ? w.phrase : "");
     $("setWakeSensitivity").value = w.sensitivity;
     const text = w.state === "error" ? "⚠ " + w.error
       : w.state === "preparing" ? "正在准备(第一次要下载约 42MB 的语音模型)……"
@@ -463,7 +471,24 @@ $("saveRate").onclick = () => saveSetting({ rate: $("setRate").value.trim() });
 $("setAutostart").onchange = (e) => saveSetting({ autostart: e.target.checked });
 $("googleLogin").onclick = () => saveSetting({ google_login: true }, 9000);
 $("setWake").onchange = (e) => saveSetting({ wake: e.target.checked }, 4000);
-$("setWakePhrase").onchange = (e) => saveSetting({ wake_phrase: e.target.value });
+function showWakeCustom(show, value) {
+  $("setWakeCustom").hidden = $("saveWakeCustom").hidden = !show;
+  if (value !== undefined) $("setWakeCustom").value = value;
+}
+$("setWakePhrase").onchange = (e) => {
+  if (e.target.value === "__custom") { showWakeCustom(true); $("setWakeCustom").focus(); return; }
+  showWakeCustom(false);
+  saveSetting({ wake_phrase: e.target.value });
+};
+$("saveWakeCustom").onclick = async () => {
+  const phrase = $("setWakeCustom").value.trim();
+  if (!phrase) { toast("先打你想用的唤醒词,例如“小五在吗”"); return; }
+  if (!(await saveSetting({ wake_phrase: phrase }, 4000))) {  // 不合格:留着输入框给你改
+    $("setWakePhrase").value = "__custom";
+    showWakeCustom(true, phrase);
+  }
+};
+$("setWakeCustom").onkeydown = (e) => { if (e.key === "Enter") $("saveWakeCustom").click(); };
 $("setWakeSensitivity").onchange = (e) => saveSetting({ wake_sensitivity: e.target.value });
 $("setHotkey").onchange = (e) => saveSetting({ hotkey: e.target.value });
 $("saveCloud").onclick = async () => {

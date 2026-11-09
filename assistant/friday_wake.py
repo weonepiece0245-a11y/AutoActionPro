@@ -31,9 +31,43 @@ SENSITIVITY = {"high": 0.6, "normal": 0.75, "low": 0.9}  # 灵敏度高 = 把握
 MIN_CONFIDENCE = SENSITIVITY["normal"]
 
 
+CUSTOM_MIN, CUSTOM_MAX = 2, 10
+KEEP_WORDS = ["星期五", "你好"]  # 自定义唤醒词里有这些就当一个词,其余拆成单字
+
+
+def check_custom(phrase: str) -> str:
+    """检查自定义唤醒词;不行就抛 ValueError(说明原因)。返回整理后的唤醒词。"""
+    phrase = "".join(phrase.split())
+    if not CUSTOM_MIN <= len(phrase) <= CUSTOM_MAX:
+        raise ValueError(f"唤醒词要 {CUSTOM_MIN}~{CUSTOM_MAX} 个字(建议 3~6 个字,太短容易误判)")
+    if not all("\u4e00" <= c <= "\u9fff" for c in phrase):
+        raise ValueError("唤醒词只能用中文字(离线识别听不懂英文和符号)")
+    return phrase
+
+
+def spellings(phrase: str) -> list[str]:
+    """给识别器的几种写法:整个词、拆成单字、保留常见词再拆(模型词表里没有整个词时也能认出来)。"""
+    if phrase in PHRASES:
+        return PHRASES[phrase]
+    forms = [phrase, " ".join(phrase)]
+    kept = phrase
+    for word in KEEP_WORDS:
+        kept = kept.replace(word, f"\0{word}\0")
+    parts = []
+    for chunk in kept.split("\0"):
+        parts.extend([chunk] if chunk in KEEP_WORDS else list(chunk))
+    forms.append(" ".join(p for p in parts if p))
+    return list(dict.fromkeys(forms))
+
+
 def wake_phrase() -> str:
     value = os.environ.get("FRIDAY_WAKE_PHRASE", "").strip().replace(" ", "")
-    return value if value in PHRASES else DEFAULT_PHRASE
+    if value in PHRASES:
+        return value
+    try:
+        return check_custom(value)
+    except ValueError:
+        return DEFAULT_PHRASE
 
 
 def wake_sensitivity() -> str:
@@ -42,8 +76,8 @@ def wake_sensitivity() -> str:
 
 
 def grammar(phrase: str) -> list[str]:
-    spellings = PHRASES[phrase]
-    return spellings + [w for w in DISTRACTORS if w not in spellings]
+    forms = spellings(phrase)
+    return forms + [w for w in DISTRACTORS if w not in forms]
 
 
 def _forms(phrase: str) -> list[str]:

@@ -164,6 +164,7 @@
       <div class="set-row" id="wakeRow" hidden><label for="setWake">喊我就回应(语音唤醒)</label><input type="checkbox" class="switch" id="setWake"></div>
       <div class="set-row" id="wakeOptions" hidden><label for="setWakePhrase">唤醒词 / 灵敏度</label>
         <span class="set-ctl"><select class="mini-select" id="setWakePhrase"></select>
+        <input class="mini-input" id="setWakeCustom" maxlength="10" placeholder="自己的唤醒词" hidden><button type="button" class="mini-btn" id="saveWakeCustom" hidden>保存</button>
         <select class="mini-select" id="setWakeSensitivity"><option value="high">灵敏</option><option value="normal">一般</option><option value="low">严格(少误判)</option></select></span></div>
       <div class="set-note" id="wakeNote" hidden></div>
       <div class="set-row" id="hotkeyRow" hidden><label for="setHotkey">快捷键:叫出星期五并开始听</label>

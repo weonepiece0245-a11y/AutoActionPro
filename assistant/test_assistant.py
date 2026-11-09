@@ -4776,16 +4776,37 @@ class WakeWordTest(unittest.TestCase):
         self.assertIn("星期五", grammar)  # 单独的“星期五”也要能被识别出来,才不会硬凑成唤醒词
         self.assertIn("[unk]", grammar)
 
+    def test_custom_phrase(self):
+        self.assertEqual(friday_wake.check_custom(" 小五 在吗 "), "小五在吗")
+        for bad, why in (("五", "个字"), ("hey friday", "中文"), ("你好呀星期五星期五星期五", "个字")):
+            with self.assertRaises(ValueError) as ctx:
+                friday_wake.check_custom(bad)
+            self.assertIn(why, str(ctx.exception))
+        self.assertEqual(friday_wake.spellings("早安星期五"), ["早安星期五", "早 安 星 期 五", "早 安 星期五"])
+        self.assertEqual(friday_wake.spellings("小五在吗"), ["小五在吗", "小 五 在 吗"])
+        heard = lambda text: friday_wake.heard_wake_word(self.result(text, 0.9), 0.75, "早安星期五")
+        self.assertTrue(heard("早 安 星期五"))
+        self.assertFalse(heard("星期五"))
+        with mock.patch.dict(os.environ, {"FRIDAY_WAKE_PHRASE": "早安星期五"}):
+            self.assertEqual(friday_wake.wake_phrase(), "早安星期五")
+        env = str(Path(tempfile.mkdtemp(), ".env"))
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.wake = SimpleNamespace(state="off", error="", restart=lambda: None)
+        self.assertIn("中文", app.apply_settings({"wake_phrase": "OK Friday"}, session, None, env)["error"])
+        self.assertTrue(app.apply_settings({"wake_phrase": "小五在吗"}, session, None, env)["ok"])
+        self.assertEqual(app.wake_state(session)["phrase"], "小五在吗")
+        self.assertNotIn("小五在吗", app.wake_state(session)["phrases"])
+
     def test_choices_from_settings(self):
         with mock.patch.dict(os.environ, {"FRIDAY_WAKE_PHRASE": "嘿 星期五", "FRIDAY_WAKE_SENSITIVITY": "low"}):
             self.assertEqual((friday_wake.wake_phrase(), friday_wake.wake_sensitivity()), ("嘿星期五", "low"))
-        with mock.patch.dict(os.environ, {"FRIDAY_WAKE_PHRASE": "芝麻开门", "FRIDAY_WAKE_SENSITIVITY": "max"}):
+        with mock.patch.dict(os.environ, {"FRIDAY_WAKE_PHRASE": "hello", "FRIDAY_WAKE_SENSITIVITY": "max"}):
             self.assertEqual((friday_wake.wake_phrase(), friday_wake.wake_sensitivity()), ("你好星期五", "normal"))
         env = str(Path(tempfile.mkdtemp(), ".env"))
         session = app.WebSession(None, app.default_persona(), friday_web.Hub())
         restarted = threading.Event()
         session.wake = SimpleNamespace(state="listening", error="", restart=restarted.set)
-        self.assertIn("error", app.apply_settings({"wake_phrase": "芝麻开门"}, session, None, env))
+        self.assertIn("error", app.apply_settings({"wake_phrase": "Hi"}, session, None, env))
         result = app.apply_settings({"wake_phrase": "嘿星期五", "wake_sensitivity": "low"}, session, None, env)
         self.assertIn("嘿星期五", result["message"])
         self.assertTrue(restarted.wait(2))  # 换了唤醒词要重新开始听

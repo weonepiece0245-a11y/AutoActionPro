@@ -1423,9 +1423,12 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         import friday_wake
 
         if "wake_phrase" in payload:
-            phrase = str(payload["wake_phrase"]).replace(" ", "")
+            phrase = "".join(str(payload["wake_phrase"]).split())
             if phrase not in friday_wake.PHRASES:
-                return {"error": "没有这个唤醒词"}
+                try:
+                    phrase = friday_wake.check_custom(phrase)  # 自定义的
+                except ValueError as e:
+                    return {"error": str(e)}
             save_env_value(env, "FRIDAY_WAKE_PHRASE", phrase)
             os.environ["FRIDAY_WAKE_PHRASE"] = phrase
             done.append(f"唤醒词改成“{phrase}”")
