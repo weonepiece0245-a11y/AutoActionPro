@@ -131,9 +131,11 @@ class SpeechStream:
     MORE = "其余内容请看文字。"
 
     def __init__(self, synthesize: Callable[[str], bytes | None], publish: Callable[[bytes], None],
-                 max_chars: int = 800, batch_chars: int = 200) -> None:
+                 max_chars: int = 800, batch_chars: int = 200,
+                 on_end: Callable[[], None] | None = None) -> None:
         self.synthesize = synthesize
         self.publish = publish
+        self.on_end = on_end  # 整段话都送出去了(窗口播完就可以接着听你说话)
         self.max_chars = max_chars  # 一次回答最多读这么多字,太长的看文字
         self.batch_chars = batch_chars
         self.buffer = ""
@@ -208,6 +210,11 @@ class SpeechStream:
         while True:
             batch = self._next_batch()
             if batch is None:
+                if not self.cancelled and self.on_end is not None:
+                    try:
+                        self.on_end()
+                    except Exception:
+                        pass
                 return
             try:
                 audio = self.synthesize(batch)

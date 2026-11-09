@@ -3871,6 +3871,18 @@ class SpeechStreamTest(unittest.TestCase):
         self.assertEqual(text.count(friday_web.SpeechStream.MORE), 1)
         self.assertLessEqual(len(text) - len(friday_web.SpeechStream.MORE), 30)
 
+    def test_end_signal_only_when_finished(self):
+        ended = []
+        stream = friday_web.SpeechStream(lambda text: b"x", lambda audio: None, on_end=lambda: ended.append(1))
+        stream.feed("说完了。")
+        stream.finish()
+        stream.thread.join(2)
+        self.assertEqual(ended, [1])
+        stream = friday_web.SpeechStream(lambda text: b"x", lambda audio: None, on_end=lambda: ended.append(2))
+        stream.cancel()  # 被新问题打断:不算说完
+        stream.thread.join(2)
+        self.assertEqual(ended, [1])
+
     def test_cancel_and_failures(self):
         said, published = self.run_stream(["一。二。"], synthesize=lambda text: None)
         self.assertEqual(published, [])
@@ -4170,8 +4182,8 @@ class WebSessionTest(TempDirTest):
         self.assertEqual(session.ask("天气?", speak=True), "晴天")
         session._stream.thread.join(2)  # 语音在后台合成
         events = self.drain()
-        self.assertEqual([e["type"] for e in events], ["user", "thinking", "delta", "delta", "done", "audio"])
-        self.assertEqual(events[-1]["turn"], 1)
+        self.assertEqual([e["type"] for e in events], ["user", "thinking", "delta", "delta", "done", "audio", "audio_end"])
+        self.assertEqual((events[-2]["turn"], events[-1]["turn"]), (1, 1))  # 说完了:窗口可以接着听
 
     def test_starts_speaking_before_answer_is_finished(self):
         session = self.make(FakeClient(FakeStream(["好的,马上查。", "今天晴天"])))

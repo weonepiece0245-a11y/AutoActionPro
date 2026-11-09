@@ -132,7 +132,7 @@ if (listenOnOpen) {  // 只在这一次生效,刷新页面不会又开始录音
 }
 function startListening() {
   window.focus();
-  if (!recorder && !$("micBtn").disabled) $("micBtn").onclick();
+  if (!recorder && !$("micBtn").disabled) listen();
 }
 
 // ---------- 打招呼:只在窗口里还没有对话时(第一次打开或点了新话题之后) ----------
@@ -162,7 +162,12 @@ function handle(ev) {
     case "status":
       addLine(ev.text); break;
     case "done":
-      busy = false; finishAnswer(ev.text, ev.source); refreshMode(); loadState(); break;
+      busy = false; finishAnswer(ev.text, ev.source); refreshMode(); loadState();
+      if (ev.source === "voice") { followUpTurn = ev.turn ?? "none"; maybeFollowUp(); }
+      break;
+    case "audio_end":
+      audioEndTurns.add(ev.turn);
+      maybeFollowUp(); break;
     case "error":
       busy = false;
       if (current) { current.remove(); current = null; }
@@ -247,6 +252,7 @@ let speakOn = localStorage.getItem("friday-speak") !== "0";
 function updateSpeakBtn() {
   $("speakBtn").setAttribute("aria-pressed", String(speakOn));
   $("setSpeak").checked = speakOn;
+  if ($("setFollowUp")) $("setFollowUp").checked = loadPrefs("friday-followup", true);
 }
 updateSpeakBtn();
 function setSpeak(on) {
@@ -258,6 +264,7 @@ function setSpeak(on) {
 }
 $("speakBtn").onclick = () => setSpeak(!speakOn);
 $("setSpeak").onchange = (e) => setSpeak(e.target.checked);
+$("setFollowUp").onchange = (e) => { followUpOn = e.target.checked; savePrefs("friday-followup", followUpOn); };
 
 $("form").onsubmit = async (e) => {
   e.preventDefault();
@@ -265,6 +272,7 @@ $("form").onsubmit = async (e) => {
   if (!text || busy) return;
   ensureAudio();
   stopSpeaking();
+  followUpTurn = null;  // 打字问的,不用接着听
   beep(660, 0.06);
   $("input").value = "";
   const r = await api("/api/ask", { text, speak: speakOn });
@@ -602,7 +610,7 @@ function stopSpeaking() {
 }
 function playNext() {
   const url = audioQueue.shift();
-  if (!url) { speaking = false; orbState.level = 0; refreshMode(); return; }
+  if (!url) { speaking = false; orbState.level = 0; refreshMode(); maybeFollowUp(); return; }
   ensureAudio();
   speaking = true; refreshMode();
   audioEl.src = `${url}?t=${encodeURIComponent(token)}`;
@@ -630,17 +638,20 @@ function beep(freq, dur) {
 }
 
 // ---------- 语音输入:说完停顿 2 秒自动结束 ----------
+// followUp:回答完自动再听(没说话就安静地结束);stream/spoke:说话打断她时,沿用已经打开的麦克风
 let recorder = null;
-$("micBtn").onclick = async () => {
-  if (recorder) { recorder.stop(); return; }
+async function listen({ followUp = false, stream = null, spoke = false } = {}) {
+  if (recorder) return;
+  followUpTurn = null;
   ensureAudio();
-  stopSpeaking();
-  let stream;
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
-  } catch {
-    toast("无法打开麦克风,请检查麦克风权限");
-    return;
+  if (!spoke) stopSpeaking();
+  if (!stream) {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    } catch {
+      if (!followUp) toast("无法打开麦克风,请检查麦克风权限");
+      return;
+    }
   }
   const micAnalyser = audioCtx.createAnalyser();
   micAnalyser.fftSize = 1024;
@@ -649,11 +660,13 @@ $("micBtn").onclick = async () => {
   const type = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "";
   recorder = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
   recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
-  let spoke = false, quietSince = performance.now();
+  let quietSince = performance.now();
   const started = performance.now();
+  const noSpeechLimit = followUp ? 6000 : 10000;
   const btn = $("micBtn");
   btn.classList.add("on");
-  beep(990, 0.08);
+  btn.classList.toggle("follow", followUp);
+  beep(followUp ? 760 : 990, followUp ? 0.05 : 0.08);
   refreshMode();
 
   const watch = () => {
@@ -663,7 +676,7 @@ $("micBtn").onclick = async () => {
     btn.style.setProperty("--mic", orbState.level.toFixed(2));
     const now = performance.now();
     if (level > 0.035) { spoke = true; quietSince = now; }
-    if ((spoke && now - quietSince > 2000) || (!spoke && now - started > 10000) || now - started > 60000) {
+    if ((spoke && now - quietSince > 2000) || (!spoke && now - started > noSpeechLimit) || now - started > 60000) {
       recorder.stop();
       return;
     }
@@ -671,19 +684,31 @@ $("micBtn").onclick = async () => {
   };
   recorder.onstop = async () => {
     stream.getTracks().forEach((t) => t.stop());
-    btn.classList.remove("on");
+    btn.classList.remove("on", "follow");
     btn.style.removeProperty("--mic");
     recorder = null;
     orbState.level = 0;
     refreshMode();
-    if (!spoke) { toast("没听到声音"); return; }
+    if (!spoke) { if (!followUp) toast("没听到声音"); return; }
     addLine("识别中……");
     const r = await api("/api/voice", new Blob(chunks, { type: type || "audio/webm" }), { "X-Speak": speakOn ? "1" : "0" });
     if (!r.text) toast(r.error ? `语音识别失败:${r.error}` : "没听清,再说一次?", 3500);
   };
   recorder.start(250);
   watch();
-};
+}
+$("micBtn").onclick = () => (recorder ? recorder.stop() : listen());
+
+// ---------- 连续对话:用语音问的,她说完后自动再听几秒,你可以直接接着说 ----------
+let followUpOn = loadPrefs("friday-followup", true);
+let followUpTurn = null;  // 等这一轮说完
+let audioEndTurns = new Set();
+function maybeFollowUp() {
+  if (!followUpOn || followUpTurn === null || busy || recorder || speaking || audioQueue.length) return;
+  if (followUpTurn !== "none" && speakOn && !audioEndTurns.has(followUpTurn)) return;  // 还有话没送来
+  followUpTurn = null;
+  setTimeout(() => { if (!busy && !recorder && !speaking) listen({ followUp: true }); }, 350);
+}
 
 // ---------- 授权弹窗 ----------
 let approvalId = null;

@@ -213,6 +213,7 @@ body.focus .console { width: min(960px, 100%); justify-self: center; }
 .icon-btn:hover { border-color: var(--accent); box-shadow: 0 0 14px var(--accent); color: #fff; }
 .icon-btn.mic { width: 48px; height: 48px; border-radius: 50%; color: var(--accent); }
 .icon-btn.mic.on { color: #fff; background: var(--magenta); border-color: var(--magenta); box-shadow: 0 0 0 calc(4px + var(--mic, 0) * 18px) rgba(217,70,239,.25), 0 0 26px var(--magenta); }
+.icon-btn.mic.on.follow { background: var(--cyan, #22d3ee); border-color: var(--cyan, #22d3ee); box-shadow: 0 0 0 calc(4px + var(--mic, 0) * 18px) rgba(34,211,238,.25), 0 0 22px var(--cyan, #22d3ee); }
 .icon-btn.toggle[aria-pressed="false"] { opacity: .45; }
 .icon-btn.toggle[aria-pressed="false"] .wave { display: none; }
 .icon-btn.power:hover { border-color: var(--red); box-shadow: 0 0 14px var(--red); color: var(--red); }

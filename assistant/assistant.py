@@ -1051,7 +1051,9 @@ class WebSession:
             print(f"回答出错:{type(e).__name__}: {e}", flush=True)
             hub.broadcast({"type": "error", "text": message})
             return None
-        hub.broadcast({"type": "done", "text": result, "source": source})
+        # turn:这次回答的朗读编号(窗口用来知道什么时候说完,好接着听)
+        hub.broadcast({"type": "done", "text": result, "source": source,
+                       "turn": self._turn if stream is not None else None})
         if stream is not None:
             stream.finish()
         return result
@@ -1077,7 +1079,9 @@ class WebSession:
         def publish(audio: bytes) -> None:
             self.hub.broadcast({"type": "audio", "url": f"/audio/{self.hub_audio.put(audio)}.mp3", "turn": turn})
 
-        self._stream = friday_web.SpeechStream(self.synthesize, publish)
+        self._stream = friday_web.SpeechStream(
+            self.synthesize, publish,
+            on_end=lambda: self.hub.broadcast({"type": "audio_end", "turn": turn}))
         return self._stream
 
     _stream = None
