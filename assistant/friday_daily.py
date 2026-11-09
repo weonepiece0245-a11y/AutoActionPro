@@ -137,6 +137,15 @@ class Reminders:
                 _save(self.path, "reminders", self.items)
         return removed
 
+    def set_field(self, number: int, key: str, value) -> None:
+        """给某条提醒加一项资料(例如 Google 日历里对应的活动 id)。"""
+        with self.lock:
+            for item in self.items:
+                if item.get("id") == number:
+                    item[key] = value
+                    _save(self.path, "reminders", self.items)
+                    return
+
     def upcoming(self) -> list[dict]:
         with self.lock:
             return sorted(self.items, key=lambda i: i["time"])

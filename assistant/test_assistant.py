@@ -2829,6 +2829,35 @@ class GoogleToolboxTest(TempDirTest):
         confirm.assert_called_once()
         approve.assert_not_called()
 
+    def test_reminders_also_go_to_google_calendar(self):
+        toolbox = self.make_toolbox({"events.insert": {"id": "ev1"}, "events.delete": {}})
+        toolbox.reminders = daily.Reminders(os.path.join(self.tmp, "r.json"), clock=lambda: datetime.datetime(2026, 11, 10, 9, 0))
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+        with mock.patch.dict(os.environ, {"FRIDAY_REMIND_CALENDAR": "on", "FRIDAY_TIMEZONE": ""}):
+            result = toolbox.run(tool_use("reminder", {"action": "add", "time": "2026-11-10 21:00", "message": "倒垃圾",
+                                                       "repeat": "weekdays"}), lambda t: None)
+            self.assertIn("电脑关着也会响", result["content"])
+            name, kwargs = self.account.log[-1]
+            self.assertEqual(name, "events.insert")
+            body = kwargs["body"]
+            self.assertEqual(body["summary"], "⏰ 倒垃圾")
+            self.assertEqual(body["start"], {"dateTime": "2026-11-10T21:00:00", "timeZone": "Asia/Kuala_Lumpur"})
+            self.assertEqual(body["reminders"]["overrides"], [{"method": "popup", "minutes": 0}])
+            self.assertEqual(body["recurrence"], ["RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"])
+            self.assertEqual(toolbox.reminders.upcoming()[0]["calendar_event"], "ev1")
+            toolbox.run(tool_use("reminder", {"action": "cancel", "key": "倒垃圾"}), lambda t: None)
+            self.assertEqual(self.account.log[-1][0], "events.delete")
+            self.assertEqual(self.account.log[-1][1]["eventId"], "ev1")
+            # 定时任务、关掉这个选项时:不放进日历
+            count = len(self.account.log)
+            toolbox.run(tool_use("reminder", {"action": "add", "time": "2026-11-10 22:00", "message": "早报",
+                                              "kind": "task"}), lambda t: None)
+        with mock.patch.dict(os.environ, {"FRIDAY_REMIND_CALENDAR": "off"}):
+            result = toolbox.run(tool_use("reminder", {"action": "add", "time": "2026-11-10 23:00", "message": "睡觉"}),
+                                 lambda t: None)
+            self.assertIn("只在星期五开着时才会响", result["content"])
+        self.assertEqual(len(self.account.log), count)
+
     def test_not_logged_in_message(self):
         account = gmod.GoogleAccount(os.path.join(self.tmp, "credentials.json"), os.path.join(self.tmp, "token.json"))
         toolbox = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m.json")), lambda a: True,

@@ -869,3 +869,58 @@ def login(folder: str | os.PathLike | None = None, search: list[Path] | None = N
 
 if __name__ == "__main__":
     sys.exit(login(sys.argv[1] if len(sys.argv) > 1 else None))
+
+
+# ---------------- 提醒放进 Google 日历(电脑关机时手机也会响) ----------------
+
+RECURRENCE = {
+    "daily": "RRULE:FREQ=DAILY",
+    "weekdays": "RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
+    "weekly": "RRULE:FREQ=WEEKLY",
+}
+
+
+def remind_calendar_enabled() -> bool:
+    return os.environ.get("FRIDAY_REMIND_CALENDAR", "on") != "off"
+
+
+def local_timezone() -> str:
+    return os.environ.get("FRIDAY_TIMEZONE", "").strip() or "Asia/Kuala_Lumpur"
+
+
+class ReminderCalendar:
+    """把提醒抄一份到 Google 日历:到点手机上的 Google 日历会弹通知,电脑关着也一样。"""
+
+    def __init__(self, service: Callable[[], object]) -> None:
+        self.service = service  # () -> calendar API
+
+    @staticmethod
+    def event_body(item: dict) -> dict:
+        start = datetime.datetime.strptime(item["time"], "%Y-%m-%d %H:%M")
+        end = start + datetime.timedelta(minutes=10)
+        tz = local_timezone()
+        body = {
+            "summary": "⏰ " + item["message"],
+            "description": "星期五设的提醒。到点手机上的 Google 日历会提醒你(电脑关着也会)。",
+            "start": {"dateTime": start.strftime("%Y-%m-%dT%H:%M:00"), "timeZone": tz},
+            "end": {"dateTime": end.strftime("%Y-%m-%dT%H:%M:00"), "timeZone": tz},
+            "reminders": {"useDefault": False, "overrides": [{"method": "popup", "minutes": 0}]},
+            "extendedProperties": {"private": {"friday_reminder": str(item.get("id", ""))}},
+        }
+        rule = RECURRENCE.get(item.get("repeat", "none"))
+        if rule:
+            body["recurrence"] = [rule]
+        return body
+
+    def add(self, item: dict) -> str:
+        event = self.service().events().insert(calendarId="primary", body=self.event_body(item),
+                                               sendUpdates="none").execute()
+        return event["id"]
+
+    def remove(self, event_id: str) -> None:
+        try:
+            self.service().events().delete(calendarId="primary", eventId=event_id, sendUpdates="none").execute()
+        except Exception as e:
+            if "404" not in str(e) and "410" not in str(e):  # 已经在日历里删掉了
+                raise
+

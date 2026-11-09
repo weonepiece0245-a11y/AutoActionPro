@@ -129,7 +129,7 @@ FRIDAY_PROMPT = """你是“星期五”,{call_me}的私人 AI 助手。
 - {call_me}让你看屏幕时用 screen;必须在界面上点来点去才能办的事,用 control 控制鼠标键盘,
   并严格遵守 control 工具说明里的规则。
 - 用 reminder 设提醒和定时任务(比如“半小时后提醒我喝水”“每天早上 9 点给我做个早报”),
-  用 {todo_tool} 管理待办清单。{call_me}说花了多少钱(“午饭 15 块”“Grab 12 块”)就用 expense 记账(马币),记完简短说一句。提醒只在星期五开着时才会响,第一次设提醒时顺便告诉{call_me}这一点。
+  用 {todo_tool} 管理待办清单。{call_me}说花了多少钱(“午饭 15 块”“Grab 12 块”)就用 expense 记账(马币),记完简短说一句。{reminder_note}
 - 消息以“[定时任务]”开头时,是之前设好的任务到点了,{call_me}可能不在电脑前:
   直接把事情做完,结果说得简短清楚;需要确认的操作不能做,留到{call_me}回来再说。
 - 能直接办到的事就直接办,办完简要汇报结果;做不到的事坦白说,并给出替代方案。
@@ -202,6 +202,14 @@ def default_persona() -> Persona:
     )
 
 
+def reminder_note(toolbox, call_me: str) -> str:
+    from friday_google import remind_calendar_enabled
+
+    if toolbox is not None and toolbox.google is not None and remind_calendar_enabled():
+        return "一般提醒会同时放进 Google 日历,电脑关着时手机上的 Google 日历也会响(定时任务要星期五开着才会做)。"
+    return f"提醒只在星期五开着时才会响,第一次设提醒时顺便告诉{call_me}这一点。"
+
+
 def version_text() -> str:
     """给提示词用的版本说明(用“检查更新”装的才有)。"""
     import friday_update
@@ -231,6 +239,7 @@ def friday_persona(
             memories=toolbox.memory.as_prompt() if toolbox else "(本次没有开启记忆)",
             # 接了 Google 时只有 google_tasks(Google Tasks,手机上也能看到),没有 todo
             todo_tool="google_tasks" if toolbox is not None and toolbox.google is not None else "todo",
+            reminder_note=reminder_note(toolbox, call_me),
             app_dir=SCRIPT_DIR,
             changes=os.path.join(SCRIPT_DIR, "CHANGES.md"),
             version=version_text(),
@@ -1356,6 +1365,17 @@ def wake_state(session) -> dict | None:
             "sensitivity": friday_wake.wake_sensitivity()}
 
 
+def remind_calendar_state(session) -> bool | None:
+    """提醒放进 Google 日历:没登录 Google 时不显示这个选项。"""
+    from friday_google import remind_calendar_enabled
+
+    assistant = getattr(session, "assistant", None)
+    toolbox = getattr(assistant, "toolbox", None)
+    if toolbox is None or getattr(toolbox, "google", None) is None:
+        return None
+    return remind_calendar_enabled()
+
+
 def care_state(session) -> dict | None:
     import friday_care
 
@@ -1404,6 +1424,7 @@ def settings_state(session, meter=None) -> dict:
         "cloud": cloud_state(session),
         "care": care_state(session),
         "push": push_mode() if getattr(session, "discord", None) is not None else None,
+        "remind_calendar": remind_calendar_state(session),
         "wake": wake_state(session),
         "backup": {"enabled": os.environ.get("FRIDAY_BACKUP", "on") != "off",
                    "last": session.backup.last_backup()} if getattr(session, "backup", None) else None,
@@ -1509,6 +1530,11 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
             save_env_value(env, env_name, "on" if on else "off")
             os.environ[env_name] = "on" if on else "off"
             done.append(("已开启" if on else "已关闭") + label)
+    if "remind_calendar" in payload:
+        on = bool(payload["remind_calendar"])
+        save_env_value(env, "FRIDAY_REMIND_CALENDAR", "on" if on else "off")
+        os.environ["FRIDAY_REMIND_CALENDAR"] = "on" if on else "off"
+        done.append("以后的提醒会同时放进 Google 日历,电脑关着手机也会响" if on else "以后的提醒不放进 Google 日历了")
     if "push" in payload:
         mode = str(payload["push"]).lower()
         if mode not in ("always", "away", "off"):

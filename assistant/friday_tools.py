@@ -920,7 +920,7 @@ class Toolbox:
                 args["time"], args["message"], args.get("kind") or "notify", args.get("repeat") or "none"
             )
             on_status(f"已设提醒:{describe_reminder(item)}")
-            return f"已设置:{describe_reminder(item)}。提醒只在星期五开着时才会响。", False
+            return f"已设置:{describe_reminder(item)}。{self._reminder_to_calendar(item)}", False
         if action == "list":
             items = self.reminders.upcoming()
             return ("现在的提醒:\n" + "\n".join(describe_reminder(i) for i in items)) if items else "没有提醒", False
@@ -929,9 +929,33 @@ class Toolbox:
             removed = self.reminders.cancel(args["key"])
             if not removed:
                 return f"没有找到“{args['key']}”对应的提醒", True
+            for item in removed:
+                if item.get("calendar_event") and self.google is not None:
+                    try:
+                        self.reminder_calendar().remove(item["calendar_event"])
+                    except Exception:
+                        pass  # 日历里的那条留着也无妨
             on_status("已取消提醒:" + ";".join(i["message"] for i in removed))
             return "已取消:" + ";".join(describe_reminder(i) for i in removed), False
         raise ValueError(f"不支持的 action:{action}")
+
+    def reminder_calendar(self):
+        from friday_google import ReminderCalendar
+
+        return ReminderCalendar(lambda: self.google.account.service("calendar"))
+
+    def _reminder_to_calendar(self, item: dict) -> str:
+        """一般提醒抄一份到 Google 日历,电脑关着时手机也会响。返回给星期五看的说明。"""
+        from friday_google import remind_calendar_enabled
+
+        if item.get("kind") != "notify" or self.google is None or not remind_calendar_enabled():
+            return "提醒只在星期五开着时才会响。"
+        try:
+            event_id = self.reminder_calendar().add(item)
+        except Exception as e:
+            return f"提醒只在星期五开着时才会响(放进 Google 日历没成功:{e})。"
+        self.reminders.set_field(item["id"], "calendar_event", event_id)
+        return "也放进了 Google 日历:到点手机上的 Google 日历会提醒,电脑关着也会响。"
 
     def _todo(self, args, on_status):
         action = args["action"]
