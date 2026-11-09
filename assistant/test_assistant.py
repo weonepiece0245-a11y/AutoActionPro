@@ -507,11 +507,30 @@ class ConversationArchiveTest(unittest.TestCase):
                          ["Dota 2 帕克怎么出装", "明天天气怎么样"])
         self.assertEqual(len(self.archive.search("", limit=1)), 1)
 
-    def test_describe_keeps_results_short(self):
+    def test_full_answer_when_few_results(self):
         text = self.archive.describe(self.archive.search("帕克"))
         self.assertIn("用户问:Dota 2 帕克怎么出装", text)
-        self.assertLess(len(text), 600)
+        self.assertIn("长" * 1000, text)  # 只有一条:给完整回答
         self.assertEqual(self.archive.describe([]), "聊天记录里没有找到相关的内容")
+
+    def test_many_results_preview_then_full_by_id(self):
+        text = self.archive.describe(self.archive.search(""))  # 三条:先给开头
+        self.assertNotIn("长" * 1000, text)
+        self.assertIn("完整内容用 id=2 再查", text)
+        self.assertIn("[#2 ", text)
+        entry = self.archive.get(2)
+        self.assertEqual(entry["q"], "Dota 2 帕克怎么出装")
+        self.assertIsNone(self.archive.get(99))
+
+    def test_tool_reads_full_entry(self):
+        toolbox = tools.Toolbox(tools.Memory(os.path.join(tempfile.mkdtemp(), "m.json")), lambda a: True)
+        toolbox.attach_archive(self.archive)
+        statuses = []
+        result = toolbox.run(tool_use("search_history", {"id": 2}), statuses.append)
+        self.assertIn("长" * 1000, result["content"])
+        self.assertEqual(statuses, ["看聊天记录 #2 的完整内容"])
+        self.assertTrue(toolbox.run(tool_use("search_history", {"id": 50}), statuses.append)["is_error"])
+        self.assertNotIn("is_error", toolbox.run(tool_use("search_history", {}), statuses.append))
 
     def test_broken_line_is_skipped(self):
         with open(self.archive.path, "a", encoding="utf-8") as f:

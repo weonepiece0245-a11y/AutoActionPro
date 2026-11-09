@@ -34,8 +34,9 @@ StatusFn = Callable[[str], None]
 class ConversationArchive:
     """所有问答的长期档案(每行一条 JSON,不会自动删除)。星期五需要时用 search_history 搜索。"""
 
-    MAX_ANSWER = 4000  # 存档里每个回答最多存这么多字
-    SHOW_ANSWER = 400  # 搜索结果里每个回答只给这么多字(省钱)
+    MAX_ANSWER = 8000  # 存档里每个回答最多存这么多字
+    SHOW_ANSWER = 400  # 搜到很多条时,每个回答先给这么多字(省钱),要看全文再按编号取
+    FULL_WHEN = 2  # 只搜到这么几条时,直接给完整回答
 
     def __init__(self, path: str | os.PathLike, clock: Callable[[], float] | None = None) -> None:
         self.path = Path(path)
@@ -56,14 +57,17 @@ class ConversationArchive:
         except OSError:
             return []
         entries = []
-        for line in lines:
+        for number, line in enumerate(lines, 1):
             try:
                 entry = json.loads(line)
             except ValueError:
                 continue  # 写到一半断电的那一行,跳过
             if isinstance(entry, dict) and isinstance(entry.get("q"), str):
-                entries.append(entry)
+                entries.append({**entry, "n": number})  # 编号 = 第几行,以后不会变
         return entries
+
+    def get(self, number: int) -> dict | None:
+        return next((e for e in self._entries() if e["n"] == number), None)
 
     def search(self, query: str = "", days: int | None = None, limit: int = 8) -> list[dict]:
         """按关键词(空格分开,全部要出现;找不到就放宽到任意一个)找,最近的优先。query 为空就给最近的。"""
@@ -80,16 +84,20 @@ class ConversationArchive:
             entries = matched
         return entries[-limit:]
 
-    def describe(self, entries: list[dict]) -> str:
+    def describe(self, entries: list[dict], full: bool | None = None) -> str:
+        """full=None:只有一两条就给完整回答,多了先给开头,并告诉编号。"""
         if not entries:
             return "聊天记录里没有找到相关的内容"
+        if full is None:
+            full = len(entries) <= self.FULL_WHEN
         lines = []
         for e in entries:
             when = datetime.datetime.fromtimestamp(e.get("t", 0)).strftime("%Y-%m-%d %H:%M")
             answer = str(e.get("a", ""))
-            if len(answer) > self.SHOW_ANSWER:
-                answer = answer[: self.SHOW_ANSWER] + "……"
-            lines.append(f"[{when}] 用户问:{e['q']}\n星期五答:{answer}")
+            cut = not full and len(answer) > self.SHOW_ANSWER
+            if cut:
+                answer = answer[: self.SHOW_ANSWER] + f"……(只显示开头,完整内容用 id={e.get('n')} 再查)"
+            lines.append(f"[#{e.get('n')} {when}] 用户问:{e['q']}\n星期五答:{answer}")
         return "\n\n".join(lines)
 
 
@@ -335,15 +343,17 @@ HISTORY_TOOL = {
         "翻以前和用户的聊天记录(所有问答都长期存着)。用户问“我之前问过你什么”“上次说的那个……”"
         "“你还记得……吗”“前几天聊过……”,而现在的对话里没有时调用。"
         "query 填关键词,多个用空格隔开(例如“Apex 出装”);想看最近聊过什么就留空。"
-        "days 可以只看最近几天。结果里的回答只有开头一段。"
+        "days 可以只看最近几天。只搜到一两条时会给完整回答;搜到很多条时先给开头和编号(#12),"
+        "要准确回答“上次说的那个”时,再用 id 取那一条的完整内容。"
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "关键词,空格隔开;留空就是最近的对话"},
             "days": {"type": "integer", "description": "只看最近几天,可不填"},
+            "id": {"type": "integer", "description": "要看完整内容的那一条的编号(搜索结果里 # 后面的数字)"},
         },
-        "required": ["query"],
+        "required": [],
     },
 }
 
@@ -776,9 +786,16 @@ class Toolbox:
             return f"天气服务暂时连不上({type(e).__name__}),可以改用 web_search 搜一下", True
 
     def _search_history(self, args, on_status):
+        number = args.get("id")
+        if isinstance(number, int) and number > 0:
+            entry = self.archive.get(number)
+            if entry is None:
+                return f"聊天记录里没有编号 #{number} 的内容", True
+            on_status(f"看聊天记录 #{number} 的完整内容")
+            return self.archive.describe([entry], full=True), False
         days = args.get("days")
         days = days if isinstance(days, int) and days > 0 else None
-        query = args["query"].strip()
+        query = str(args.get("query") or "").strip()
         on_status(f"翻聊天记录:{query}" if query else "翻最近的聊天记录")
         return self.archive.describe(self.archive.search(query, days)), False
 
