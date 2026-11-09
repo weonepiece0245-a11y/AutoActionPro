@@ -230,7 +230,7 @@ async function loadState() {
   if (s.settings) settingsState = s.settings;
   if (s.model) showModel(s.model.model, s.model.mode);
   if (s.startup_error) { $("banner").hidden = false; $("banner").textContent = s.startup_error; }
-  fillList("memoryList", s.memories, "还没有记忆,多跟我聊聊你自己", (m) => li(m.text, m.added));
+  fillList("memoryList", s.memories, "还没有记忆,多跟我聊聊你自己", (m) => li(m.text, `${m.category || "其他"} · ${m.added}`));
   fillList("reminderList", s.reminders, "没有提醒", (r) => li(r.text, r.when));
   fillList("todoList", s.todos, "没有待办", (t) => li(t.text, t.due || ""));
   setCount("memory", (s.memories || []).length);

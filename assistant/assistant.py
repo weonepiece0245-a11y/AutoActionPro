@@ -977,7 +977,7 @@ def merge_cloud_changes(changes: dict, toolbox: Toolbox, assistant: Assistant | 
         for fact in cloud_facts:
             text = fact.get("text") if isinstance(fact, dict) else None
             if isinstance(text, str) and text not in known:
-                toolbox.memory.add(text)
+                toolbox.memory.add(text, category=fact.get("category"))
                 known.add(text)
                 added += 1
     for name, key, store in (("friday_reminders.json", "reminders", toolbox.reminders),
@@ -1640,7 +1640,8 @@ def restart_command(argv: list[str], port: int) -> list[str]:
 
 def web_state(session: WebSession, toolbox: Toolbox, discord, cache: dict) -> dict:
     """界面左右面板要显示的内容。"""
-    memories = [{"text": f["text"], "added": f.get("added", "")} for f in reversed(toolbox.memory.facts)]
+    memories = [{"text": f["text"], "added": f.get("updated") or f.get("added", ""),
+                 "category": f.get("category") or "其他"} for f in reversed(toolbox.memory.facts)]
     reminders = []
     for r in (toolbox.reminders.upcoming() if toolbox.reminders else [])[:12]:
         repeat = {"daily": "每天 ", "weekdays": "工作日 ", "weekly": "每周 "}.get(r.get("repeat"), "")

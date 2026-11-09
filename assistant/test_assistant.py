@@ -900,7 +900,7 @@ class MemoryTest(TempDirTest):
         memory.add("用户 喜欢 爬山")  # 重复的不再记
 
         again = tools.Memory(path)
-        self.assertEqual(again.facts, [{"text": "用户 喜欢 爬山", "added": "2026-11-06"}])
+        self.assertEqual(again.facts, [{"text": "用户 喜欢 爬山", "added": "2026-11-06", "category": "其他"}])
         self.assertIn("- 用户 喜欢 爬山(记于 2026-11-06)", again.as_prompt())
 
     def test_forget_by_keyword(self):
@@ -982,7 +982,8 @@ class ToolboxTest(TempDirTest):
     def test_definitions(self):
         names = [t["name"] for t in self.make_toolbox().definitions()]
         self.assertEqual(
-            names, ["web_search", "web_fetch", "remember", "forget", "run_command", "read_file", "write_file", "weather"]
+            names, ["web_search", "web_fetch", "remember", "update_memory", "forget", "run_command", "read_file",
+                    "write_file", "weather"]
         )
 
 
@@ -5321,6 +5322,50 @@ class PromptWordingTest(TempDirTest):
         self.assertNotIn("用 todo 管理", prompt)
         self.assertIn("用 weather 工具", prompt.replace("查天气用 weather 工具", "用 weather 工具"))
         self.assertIn("update_memory", prompt)
+
+
+class MemoryCategoryTest(TempDirTest):
+    def test_categories_and_grouped_prompt(self):
+        memory = tools.Memory(os.path.join(self.tmp, "m.json"))
+        self.assertIn("(偏好)", memory.add("老板喜欢美式咖啡", category="偏好"))
+        memory.add("老板在做 jarvis 项目", category="项目")
+        memory.add("老板住吉隆坡")  # 没给分类:其他
+        memory.add("老板住吉隆坡", category="个人信息")  # 同一件事补上分类
+        prompt = memory.as_prompt()
+        self.assertLess(prompt.index("【个人信息】"), prompt.index("【偏好】"))
+        self.assertLess(prompt.index("【偏好】"), prompt.index("【项目】"))
+        self.assertNotIn("【其他】", prompt)
+        self.assertEqual(len(memory.facts), 3)
+
+    def test_update_in_place(self):
+        memory = tools.Memory(os.path.join(self.tmp, "m.json"))
+        memory.add("老板在 A 公司做设计", today=datetime.date(2026, 1, 1), category="个人信息")
+        memory.add("老板喜欢 Apex", category="偏好")
+        message = memory.update("A 公司", "老板在 B 公司做产品经理", today=datetime.date(2026, 11, 10))
+        self.assertIn("原来是:老板在 A 公司做设计", message)
+        fact = memory.facts[0]
+        self.assertEqual((fact["text"], fact["category"], fact["added"], fact["updated"]),
+                         ("老板在 B 公司做产品经理", "个人信息", "2026-01-01", "2026-11-10"))
+        memory.update("Apex", "", category="习惯")  # 只改分类
+        self.assertEqual((memory.facts[1]["text"], memory.facts[1]["category"]), ("老板喜欢 Apex", "习惯"))
+        with self.assertRaises(ValueError) as ctx:
+            memory.update("老板", "x")  # 对上好几条
+        self.assertIn("2 条", str(ctx.exception))
+        with self.assertRaises(ValueError):
+            memory.update("Dota", "x")
+        self.assertEqual(tools.Memory(os.path.join(self.tmp, "m.json")).facts[0]["text"], "老板在 B 公司做产品经理")
+
+    def test_tools_and_window(self):
+        toolbox = self.make_toolbox()
+        toolbox.run(tool_use("remember", {"fact": "老板 12 月去日本", "category": "日程"}), lambda s: None)
+        result = toolbox.run(tool_use("update_memory", {"keyword": "日本", "new_text": "老板 12 月 20 日去东京"}),
+                             lambda s: None)
+        self.assertNotIn("is_error", result)
+        self.assertTrue(toolbox.run(tool_use("update_memory", {"keyword": "台湾", "new_text": "x"}),
+                                    lambda s: None)["is_error"])
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        memories = app.web_state(session, toolbox, None, {})["memories"]
+        self.assertEqual((memories[0]["text"], memories[0]["category"]), ("老板 12 月 20 日去东京", "日程"))
 
 if __name__ == "__main__":
     unittest.main()

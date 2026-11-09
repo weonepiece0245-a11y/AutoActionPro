@@ -21,6 +21,8 @@ from friday_pc import COMPUTER_ACTIONS, CONTROL_ACTIONS, Computer, NeedsUser, Sc
 
 MAX_FACTS = 300
 MAX_FACT_CHARS = 500
+MEMORY_CATEGORIES = ["个人信息", "偏好", "习惯", "项目", "日程", "人际", "其他"]
+DEFAULT_CATEGORY = "其他"
 MAX_OUTPUT_CHARS = 20000
 MAX_READ_CHARS = 100000
 COMMAND_TIMEOUT = 120  # 秒
@@ -122,20 +124,53 @@ class Memory:
         tmp.write_text(json.dumps({"facts": self.facts}, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, self.path)  # 先写临时文件再替换,中途断电也不会写坏
 
-    def add(self, text: str, today: datetime.date | None = None) -> str:
+    @staticmethod
+    def _clean(text: str) -> str:
         text = " ".join(text.split())
         if not text:
             raise ValueError("要记住的内容是空的")
         if len(text) > MAX_FACT_CHARS:
             raise ValueError(f"单条记忆最多 {MAX_FACT_CHARS} 个字,请精简后再记")
-        if any(f["text"] == text for f in self.facts):
-            return f"已经记得了:{text}"
+        return text
+
+    @staticmethod
+    def _category(category: str | None) -> str:
+        category = (category or "").strip()
+        return category if category in MEMORY_CATEGORIES else DEFAULT_CATEGORY
+
+    def add(self, text: str, today: datetime.date | None = None, category: str | None = None) -> str:
+        text = self._clean(text)
+        for fact in self.facts:
+            if fact["text"] == text:
+                if category and fact.get("category") != self._category(category):  # 同一件事换了分类
+                    fact["category"] = self._category(category)
+                    self.save()
+                return f"已经记得了:{text}"
         if len(self.facts) >= MAX_FACTS:
             raise ValueError(f"记忆已满({MAX_FACTS} 条),请先用 forget 删掉过时的内容")
         day = (today or datetime.date.today()).isoformat()
-        self.facts.append({"text": text, "added": day})
+        self.facts.append({"text": text, "added": day, "category": self._category(category)})
         self.save()
-        return f"已记住:{text}"
+        return f"已记住({self._category(category)}):{text}"
+
+    def update(self, keyword: str, new_text: str, category: str | None = None,
+               today: datetime.date | None = None) -> str:
+        """直接改一条记忆(不用先删再记)。关键词要刚好对上一条。"""
+        keyword = keyword.strip()
+        matches = [f for f in self.facts if keyword and keyword in f["text"]]
+        if not matches:
+            raise ValueError(f"记忆里没有包含“{keyword}”的内容;要记新的事请用 remember")
+        if len(matches) > 1:
+            listed = ";".join(f["text"] for f in matches[:5])
+            raise ValueError(f"有 {len(matches)} 条记忆都包含“{keyword}”:{listed}。请用更具体的关键词")
+        fact = matches[0]
+        old = fact["text"]
+        fact["text"] = self._clean(new_text) if new_text and new_text.strip() else old
+        if category:
+            fact["category"] = self._category(category)
+        fact["updated"] = (today or datetime.date.today()).isoformat()
+        self.save()
+        return f"已改成({fact.get('category', DEFAULT_CATEGORY)}):{fact['text']}(原来是:{old})"
 
     def forget(self, keyword: str) -> list[str]:
         keyword = keyword.strip()
@@ -150,7 +185,15 @@ class Memory:
     def as_prompt(self) -> str:
         if not self.facts:
             return "(还没有任何记忆。这是你们刚认识的时候,可以在合适时机自然地了解对方。)"
-        return "\n".join(f"- {f['text']}(记于 {f.get('added', '?')})" for f in self.facts)
+        groups: dict[str, list[dict]] = {}
+        for fact in self.facts:
+            groups.setdefault(fact.get("category") or DEFAULT_CATEGORY, []).append(fact)
+        lines = []
+        for category in MEMORY_CATEGORIES:
+            if category in groups:
+                lines.append(f"【{category}】")
+                lines.extend(f"- {f['text']}(记于 {f.get('updated') or f.get('added', '?')})" for f in groups[category])
+        return "\n".join(lines)
 
 
 def _decode(data: bytes) -> str:
@@ -191,8 +234,29 @@ CLIENT_TOOLS = [
         ),
         "input_schema": {
             "type": "object",
-            "properties": {"fact": {"type": "string", "description": "要记住的一句话,例如“用户在上海做产品经理”"}},
+            "properties": {
+                "fact": {"type": "string", "description": "要记住的一句话,例如“用户在上海做产品经理”"},
+                "category": {"type": "string", "enum": MEMORY_CATEGORIES,
+                             "description": "分类:个人信息(称呼、工作、住哪)、偏好(喜欢什么、回答风格)、习惯(作息饮食)、"
+                                            "项目(正在做的事)、日程(重要日子、固定安排)、人际(家人朋友)、其他"},
+            },
             "required": ["fact"],
+        },
+    },
+    {
+        "name": "update_memory",
+        "description": (
+            "直接修改一条已经记住的事,不用先删再记。用户说某件事变了(换工作、搬家、改了喜好)、或者某条记忆说错了时调用。"
+            "keyword 填那条记忆里的关键词(要刚好对上一条),new_text 填改好的完整一句话;只想改分类时 new_text 可以留空。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "keyword": {"type": "string", "description": "要改的那条记忆里的关键词"},
+                "new_text": {"type": "string", "description": "改好之后的完整一句话"},
+                "category": {"type": "string", "enum": MEMORY_CATEGORIES, "description": "可选:改分类"},
+            },
+            "required": ["keyword"],
         },
     },
     {
@@ -586,6 +650,7 @@ class Toolbox:
         self.weather_fetch = None  # 测试时换成假的天气服务
         self._handlers = {
             "remember": self._remember,
+            "update_memory": self._update_memory,
             "forget": self._forget,
             "run_command": self._run_command,
             "read_file": self._read_file,
@@ -681,8 +746,16 @@ class Toolbox:
     # ---- 各个工具 ----
 
     def _remember(self, args, on_status):
-        message = self.memory.add(args["fact"])
+        message = self.memory.add(args["fact"], category=args.get("category"))
         on_status(f"记住了:{args['fact']}")
+        return message, False
+
+    def _update_memory(self, args, on_status):
+        try:
+            message = self.memory.update(args["keyword"], str(args.get("new_text") or ""), args.get("category"))
+        except ValueError as e:
+            return str(e), True
+        on_status("改了记忆:" + message.split(":", 1)[1].split("(原来是")[0])
         return message, False
 
     def _weather(self, args, on_status):
