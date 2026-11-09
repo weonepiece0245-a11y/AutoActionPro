@@ -6,6 +6,8 @@
 import array
 import asyncio
 import base64
+import shutil
+import subprocess
 import datetime
 import importlib.util
 import http.client
@@ -83,6 +85,7 @@ import friday_budget  # noqa: E402
 import friday_backup  # noqa: E402
 import friday_desktop  # noqa: E402
 import friday_wake  # noqa: E402
+import friday_cloud  # noqa: E402
 import voice  # noqa: E402  assistant.py 已把所在目录加入 sys.path
 
 
@@ -4867,6 +4870,185 @@ class WakeWordTest(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
+
+
+@unittest.skipUnless(shutil.which("openssl"), "需要 openssl 生成测试证书")
+class CloudLinkTest(unittest.TestCase):
+    def setUp(self):
+        self.cloud_dir = Path(tempfile.mkdtemp())
+        self.pc_dir = Path(tempfile.mkdtemp())
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+                        "-subj", "/CN=friday-cloud", "-keyout", str(self.cloud_dir / friday_cloud.KEY_FILE),
+                        "-out", str(self.cloud_dir / friday_cloud.CERT_FILE)], check=True, capture_output=True)
+        self.secret = "s" * 40
+        self.now = [1_800_000_000.0]
+        self.state = friday_cloud.CloudState(self.cloud_dir, clock=lambda: self.now[0])
+        self.synced = []
+        self.server = friday_cloud.start_server(self.cloud_dir, self.secret, self.state, self.synced.extend,
+                                                port=0, host="127.0.0.1")
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.port = self.server.server_address[1]
+        self.fp = friday_cloud.cert_fingerprint(self.cloud_dir / friday_cloud.CERT_FILE)
+        self.pulled = []
+        (self.pc_dir / "friday_memory.json").write_text(
+            json.dumps({"facts": [{"text": "老板在吉隆坡"}]}, ensure_ascii=False), encoding="utf-8")
+        (self.pc_dir / ".env").write_text("ANTHROPIC_API_KEY=sk-secret", encoding="utf-8")
+
+    def client(self, secret=None, fp=None):
+        code = friday_cloud.make_code("127.0.0.1", self.port, secret or self.secret, fp or self.fp)
+        return friday_cloud.CloudClient(code, self.pc_dir, self.pulled.append, clock=lambda: self.now[0])
+
+    def test_heartbeat_and_sync(self):
+        client = self.client()
+        self.assertFalse(self.state.pc_online())
+        self.assertTrue(client.run_once())
+        self.assertTrue(self.state.pc_online())
+        self.assertEqual(self.synced, ["friday_memory.json"])
+        self.assertIn("吉隆坡", (self.cloud_dir / "friday_memory.json").read_text(encoding="utf-8"))
+        self.assertFalse((self.cloud_dir / ".env").exists())  # 钥匙不同步
+        self.assertEqual(client.push(), [])  # 没变化就不重传
+        self.now[0] += friday_cloud.PC_STALE + 1
+        self.assertFalse(self.state.pc_online())  # 电脑 3 分钟没消息
+        client.goodbye()
+
+    def test_goodbye_hands_over_now(self):
+        client = self.client()
+        client.run_once()
+        client.goodbye()
+        self.assertFalse(self.state.pc_online())
+
+    def test_wrong_certificate_sends_nothing(self):
+        client = self.client(fp="0" * 64)
+        self.assertFalse(client.run_once())
+        self.assertIn("证书对不上", client.error)
+        self.assertEqual(self.state.pc_last_seen, 0)
+
+    def test_wrong_password(self):
+        client = self.client(secret="x" * 40)
+        self.assertFalse(client.run_once())
+        self.assertIn("密码不对", client.error)
+
+    def test_sync_only_accepts_known_files(self):
+        written = friday_cloud.write_files(self.cloud_dir, {
+            ".env": base64.b64encode(b"ANTHROPIC_API_KEY=attacker").decode(),
+            "../evil.json": base64.b64encode(b"x").decode(),
+            "friday_todos.json": base64.b64encode(b"{}").decode()}, friday_cloud.SYNC_FILES)
+        self.assertEqual(written, ["friday_todos.json"])
+        self.assertFalse((self.cloud_dir / ".env").exists())
+
+    def test_pc_pulls_changes_after_takeover(self):
+        client = self.client()
+        client.run_once()
+        self.now[0] += friday_cloud.PC_STALE + 1
+        self.assertTrue(self.state.take_over())
+        self.assertFalse(self.state.take_over())  # 只算第一次
+        archive = tools.ConversationArchive(self.cloud_dir / "friday_archive.jsonl")
+        archive.add("旧的问题", "旧的回答", when=self.now[0] - 999)
+        archive.add("提醒我明天开会", "好的", when=self.now[0] + 5)
+        self.now[0] += 60
+        self.assertTrue(client.run_once())
+        self.assertEqual(len(self.pulled), 1)
+        self.assertEqual([e["q"] for e in self.pulled[0]["exchanges"]], ["提醒我明天开会"])
+        self.assertIn("friday_memory.json", self.pulled[0]["files"])
+        self.assertIsNone(self.state.took_over_at)  # 已经交还给电脑
+        client.run_once()
+        self.assertEqual(len(self.pulled), 1)
+
+    def test_pairing_code(self):
+        code = friday_cloud.make_code("34.1.2.3", 443, self.secret, self.fp)
+        self.assertTrue(code.startswith("FRIDAY-"))
+        info = friday_cloud.parse_code("  " + code[:20] + "\n" + code[20:] + " ")  # 复制时多了空格换行也没关系
+        self.assertEqual((info["host"], info["port"]), ("34.1.2.3", 443))
+        for bad in ("hello", "FRIDAY-abc", code[:-10]):
+            with self.assertRaises(ValueError):
+                friday_cloud.parse_code(bad)
+
+
+class CloudStandbyTest(TempDirTest):
+    def test_standby_waits_for_pc_and_replays_reminders(self):
+        now = [1000.0]
+        state = friday_cloud.CloudState(Path(self.tmp), clock=lambda: now[0])
+        state.heartbeat()
+        reloads = []
+        events = queue.Queue()
+        standby = app.CloudStandby(state, lambda: reloads.append(1), events, clock=lambda: now[0])
+        self.assertFalse(standby.allow("discord", "在吗"))  # 电脑在线
+        now[0] += 30
+        self.assertFalse(standby.allow("reminder", {"message": "开会"}))  # 先记下
+        now[0] += friday_cloud.PC_STALE
+        self.assertTrue(standby.allow("discord", "在吗"))  # 电脑离线了:接手
+        self.assertEqual(reloads, [1])
+        self.assertEqual(events.get_nowait(), ("reminder", {"message": "开会"}))  # 电脑那时可能已经关了,补发
+        self.assertTrue(standby.allow("discord", "还在吗"))
+        self.assertEqual(reloads, [1])
+
+    def test_serve_skips_while_pc_online(self):
+        events = queue.Queue()
+        replies = []
+        events.put(("discord", dmod.DiscordMessage("在吗", reply=replies.append, ask=lambda q: False)))
+        events.put(("eof", None))
+        standby = SimpleNamespace(allow=lambda kind, payload: False)
+        bot = app.Assistant(client=FakeClient())
+        with mock.patch("builtins.print"):
+            app.serve(bot, app.default_persona(), events, None, standby=standby)
+        self.assertEqual(replies, [])
+
+    def test_merge_back_on_pc(self):
+        toolbox = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m.json")), lambda a: True,
+                                reminders=daily.Reminders(os.path.join(self.tmp, "r.json")),
+                                todos=daily.Todos(os.path.join(self.tmp, "t.json")))
+        toolbox.memory.add("老板在吉隆坡")
+        toolbox.attach_archive(tools.ConversationArchive(Path(self.tmp, "archive.jsonl")))
+        bot = app.Assistant(client=FakeClient(), toolbox=toolbox)
+        bot.enable_history(Path(self.tmp, "conversation.json"))
+        cloud_memory = {"facts": [{"text": "老板在吉隆坡"}, {"text": "老板下周去槟城出差"}]}
+        cloud_reminders = {"reminders": [{"id": 1, "time": "2030-01-01 09:00", "message": "订机票",
+                                          "kind": "notify", "repeat": "none", "done": False}]}
+        b64 = lambda obj: base64.b64encode(json.dumps(obj, ensure_ascii=False).encode()).decode()
+        hub = friday_web.Hub()
+        client, _ = hub.subscribe()
+        text = app.merge_cloud_changes({
+            "files": {"friday_memory.json": b64(cloud_memory), "friday_reminders.json": b64(cloud_reminders)},
+            "exchanges": [{"q": "[来自手机 Discord]下周提醒我订机票", "a": "好的", "t": 1_800_000_000}],
+        }, toolbox, bot, hub)
+        self.assertIn("回答了 1 条消息", text)
+        self.assertIn("记住了 1 件新的事", text)
+        self.assertEqual([f["text"] for f in toolbox.memory.facts], ["老板在吉隆坡", "老板下周去槟城出差"])
+        self.assertEqual([r["message"] for r in toolbox.reminders.items], ["订机票"])
+        self.assertEqual(len(toolbox.archive.search("机票")), 1)
+        self.assertEqual(bot.exchanges[-1]["a"], "好的")
+        kinds = [client.get_nowait()["type"] for _ in range(2)]
+        self.assertEqual(kinds, ["user", "done"])
+
+    def test_cloud_gate_stays_quiet_with_strangers(self):
+        sent = []
+        gate = dmod.DiscordGate(Path(self.tmp, "discord.json"), queue.Queue(), lambda ch, text: sent.append(text),
+                                on_status=lambda t: None)
+        gate.pairing_disabled = True
+        code = gate.pair_code
+        gate.handle(42, "someone", True, "你好", "ch")
+        gate.handle(42, "someone", True, code, "ch")
+        self.assertEqual(sent, [])
+        self.assertEqual(gate.owners, {})
+
+    def test_cloud_settings(self):
+        env = str(Path(self.tmp, ".env"))
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        started = []
+        session.start_cloud = lambda code: started.append(code) or SimpleNamespace(
+            stop=lambda: started.append("stop"), connected=False, state=lambda: {"connected": False, "error": "",
+                                                                                 "host": "1.2.3.4", "last_ok": None})
+        self.assertEqual(app.cloud_state(session), {"configured": False})
+        with mock.patch.dict(os.environ, {}, clear=False):
+            self.assertIn("error", app.apply_settings({"cloud_code": "hello"}, session, None, env))
+            code = friday_cloud.make_code("1.2.3.4", 443, "s" * 40, "a" * 64)
+            self.assertTrue(app.apply_settings({"cloud_code": code}, session, None, env)["ok"])
+            self.assertEqual(started, [code])
+            self.assertTrue(app.cloud_state(session)["configured"])
+            app.apply_settings({"cloud_code": ""}, session, None, env)
+            self.assertEqual(started[-1], "stop")
+            self.assertIsNone(session.cloud)
 
 if __name__ == "__main__":
     unittest.main()

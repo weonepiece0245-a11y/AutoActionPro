@@ -47,3 +47,6 @@ assistant/google_login.json
 assistant/friday_backup.json
 assistant/friday_restore_pending.zip
 assistant/friday_before_restore.zip
+assistant/cloud_cert.pem
+assistant/cloud_key.pem
+assistant/friday_cloud_state.json

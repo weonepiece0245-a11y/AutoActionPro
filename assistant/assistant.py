@@ -871,7 +871,7 @@ def handle_reminder_server(item: dict, assistant: Assistant, persona: Persona, d
 
 
 def serve(assistant: Assistant, persona: Persona, events: queue.Queue, discord, transcribe=None,
-          clock: Callable[[], float] = time.monotonic) -> None:
+          clock: Callable[[], float] = time.monotonic, standby=None) -> None:
     """云端模式的主循环:没有键盘输入,只处理 Discord 消息、提醒和后台提示。"""
     print(f"星期五云端模式已启动,当前时间 {format_now(datetime.datetime.now())}", flush=True)
     last_active = clock()
@@ -886,6 +886,8 @@ def serve(assistant: Assistant, persona: Persona, events: queue.Queue, discord, 
             continue
         if kind == "eof":
             return
+        if standby is not None and kind in ("discord", "reminder") and not standby.allow(kind, payload):
+            continue  # 电脑开着:交给电脑处理
         # 闲置太久或对话太长,就开始新对话(记忆、提醒、待办都还在)
         if clock() - last_active > SESSION_IDLE_RESET or len(assistant.messages) > MAX_HISTORY_MESSAGES:
             assistant.reset()
@@ -896,6 +898,106 @@ def serve(assistant: Assistant, persona: Persona, events: queue.Queue, discord, 
         elif kind == "reminder":
             handle_reminder_server(payload, assistant, persona, discord)
         sys.stdout.flush()
+
+
+class CloudStandby:
+    """云端模式当后备时:电脑在线就不处理;电脑离线后第一次处理前,先换上电脑最后同步来的资料。
+
+    电脑在线时到点的提醒先记下来:如果电脑其实已经关了(还没满 3 分钟),接手时补发,不会漏掉。
+    """
+
+    def __init__(self, state, reload: Callable[[], None], events: queue.Queue,
+                 clock: Callable[[], float] = time.time) -> None:
+        self.state = state
+        self.reload = reload
+        self.events = events
+        self.clock = clock
+        self.deferred: list[tuple[float, dict]] = []
+
+    def allow(self, kind: str, payload) -> bool:
+        if self.state.pc_online():
+            if kind == "reminder":
+                now = self.clock()
+                self.deferred = [(at, p) for at, p in self.deferred if now - at < 15 * 60] + [(now, payload)]
+            return False
+        if self.state.take_over():
+            print("电脑离线了,云端星期五接手", flush=True)
+            self.reload()
+            last_seen = self.state.pc_last_seen
+            for at, item in self.deferred:
+                if at > last_seen:  # 电脑那时候可能已经关了,补发
+                    self.events.put(("reminder", item))
+            self.deferred.clear()
+        return True
+
+
+def reload_friday_data(toolbox: Toolbox, assistant: Assistant, router=None, discord=None) -> None:
+    """换上电脑同步过来的记忆、提醒、待办、对话(云端接手时)。"""
+    import friday_daily
+
+    toolbox.memory.facts = toolbox.memory._load()
+    if toolbox.reminders is not None:
+        toolbox.reminders.items = friday_daily._load(toolbox.reminders.path, "reminders")
+    if toolbox.todos is not None:
+        toolbox.todos.items = friday_daily._load(toolbox.todos.path, "todos")
+    if toolbox.google is not None:
+        toolbox.google.account._services.clear()
+        toolbox.google.account.expired = False
+    if router is not None:
+        router._load()
+    if discord is not None and getattr(discord, "gate", None) is not None:
+        discord.gate.owners = discord.gate._load_owners()
+    if assistant.history_file is not None:
+        assistant.enable_history(assistant.history_file)
+    assistant.system = assistant._build_system()
+
+
+def merge_cloud_changes(changes: dict, toolbox: Toolbox, assistant: Assistant | None, hub=None) -> str:
+    """电脑回来了:把云端接手期间的变化合并进来,返回给人看的说明。"""
+    import base64
+
+    import friday_daily
+
+    files = {}
+    for name, content in (changes.get("files") or {}).items():
+        try:
+            files[name] = base64.b64decode(content)
+        except ValueError:
+            continue
+    added = 0
+    if "friday_memory.json" in files:
+        try:
+            cloud_facts = json.loads(files["friday_memory.json"].decode("utf-8"))
+            cloud_facts = cloud_facts.get("facts", []) if isinstance(cloud_facts, dict) else cloud_facts
+        except ValueError:
+            cloud_facts = []
+        known = {f["text"] for f in toolbox.memory.facts}
+        for fact in cloud_facts:
+            text = fact.get("text") if isinstance(fact, dict) else None
+            if isinstance(text, str) and text not in known:
+                toolbox.memory.add(text)
+                known.add(text)
+                added += 1
+    for name, key, store in (("friday_reminders.json", "reminders", toolbox.reminders),
+                             ("friday_todos.json", "todos", toolbox.todos)):
+        if name in files and store is not None:  # 云端接手期间提醒和待办以云端为准
+            Path(store.path).write_bytes(files[name])
+            store.items = friday_daily._load(store.path, key)
+    exchanges = [e for e in changes.get("exchanges") or [] if isinstance(e, dict) and isinstance(e.get("q"), str)]
+    for e in exchanges:
+        if toolbox.archive is not None:
+            toolbox.archive.add(e["q"], str(e.get("a", "")), e.get("t"))
+        if hub is not None:  # 窗口里也看得到
+            hub.broadcast({"type": "user", "text": e["q"], "source": "discord"})
+            hub.broadcast({"type": "done", "text": str(e.get("a", "")), "source": "discord"})
+    if exchanges and assistant is not None:
+        assistant.exchanges = (assistant.exchanges + [
+            {"q": e["q"], "a": str(e.get("a", "")), "t": e.get("t", 0)} for e in exchanges])[-KEEP_EXCHANGES:]
+        assistant._save_exchanges()
+    summary = f"电脑关机期间,云端星期五回答了 {len(exchanges)} 条消息"
+    if added:
+        summary += f",记住了 {added} 件新的事"
+    return summary + ",已经同步回来了"
 
 
 class WebSession:
@@ -977,6 +1079,8 @@ class WebSession:
     backup = None  # Google Drive 备份(friday_backup.DriveBackup)
     hotkey = None  # 全局快捷键(friday_desktop.GlobalHotkey)
     wake = None  # 喊“星期五”唤醒(friday_wake.WakeWord)
+    cloud = None  # 云端后备的连接(friday_cloud.CloudClient)
+    start_cloud = None  # 用配对码连接云端
     events = None  # 主循环的事件队列(还原后要重启)
     budget = None  # 每月预算和余额
     meter = None  # 花费统计
@@ -1083,6 +1187,9 @@ def web_update(session: WebSession, updater=None) -> bool:
     hub.broadcast({"type": "status", "text": f"更新完成(改了 {len(result['changed'])} 个文件),正在重启星期五……"})
     hub.broadcast({"type": "restarting"})
     session.restart = True
+    cloud = getattr(session, "cloud", None)
+    if cloud is not None and cloud.connected:  # 云端也一起更新
+        threading.Thread(target=lambda: _quietly(cloud.update_cloud), daemon=True).start()
     return True
 
 
@@ -1147,6 +1254,15 @@ class GoogleWatcher:
         threading.Thread(target=run, daemon=True, name="friday-google-watch").start()
 
 
+def cloud_state(session) -> dict | None:
+    if getattr(session, "start_cloud", None) is None:
+        return None
+    cloud = getattr(session, "cloud", None)
+    if cloud is None:
+        return {"configured": False}
+    return {"configured": True, **cloud.state()}
+
+
 def hotkey_state(session) -> dict | None:
     import friday_desktop
 
@@ -1175,6 +1291,7 @@ def settings_state(session, meter=None) -> dict:
         "google": session.google_account.status() if getattr(session, "google_account", None) else None,
         "budget": session.budget.state() if getattr(session, "budget", None) else None,
         "hotkey": hotkey_state(session),
+        "cloud": cloud_state(session),
         "wake": {"enabled": os.environ.get("FRIDAY_WAKE", "off") == "on", "state": session.wake.state,
                  "error": session.wake.error} if getattr(session, "wake", None) else None,
         "backup": {"enabled": os.environ.get("FRIDAY_BACKUP", "on") != "off",
@@ -1274,6 +1391,24 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         done.append("已保存 Admin Key,正在读取 Console 的花费" if key else "已删除 Admin Key,改回星期五自己估算")
     if refresh_console and budget is not None:
         threading.Thread(target=budget.refresh_console, daemon=True).start()
+    if "cloud_code" in payload:
+        import friday_cloud
+
+        code = "".join(str(payload["cloud_code"] or "").split())
+        if code:
+            try:
+                friday_cloud.parse_code(code)
+            except ValueError as e:
+                return {"error": str(e)}
+        old = getattr(session, "cloud", None)
+        if old is not None:
+            old.stop()
+            session.cloud = None
+        save_env_value(env, "FRIDAY_CLOUD", code)
+        os.environ["FRIDAY_CLOUD"] = code
+        if code and getattr(session, "start_cloud", None) is not None:
+            session.cloud = session.start_cloud(code)
+        done.append("正在连接云端星期五……" if code else "已断开云端星期五,电脑关机时不会有人接手")
     if "wake" in payload:
         on = bool(payload["wake"])
         save_env_value(env, "FRIDAY_WAKE", "on" if on else "off")
@@ -1361,6 +1496,22 @@ def attach_router(assistant: Assistant, args, data_dir: str, on_change=None):
     return router
 
 
+def _quietly(call: Callable[[], object]) -> None:
+    try:
+        call()
+    except Exception:
+        pass
+
+
+def start_cloud_client(code: str, folder: Path, on_pull, on_status):
+    """连上云端的星期五(配对码不对会抛 ValueError)。"""
+    import friday_cloud
+
+    client = friday_cloud.CloudClient(code, folder, on_pull, on_status)
+    client.start()
+    return client
+
+
 def restart_command(argv: list[str], port: int) -> list[str]:
     """更新后重启:同一个端口,不再开新窗口(原来的窗口会自己刷新)。"""
     args = [a for a in argv if a != "--no-browser"]
@@ -1407,6 +1558,9 @@ def web_state(session: WebSession, toolbox: Toolbox, discord, cache: dict) -> di
                            f"约 US$ {remaining:.2f}" if remaining > 0 else "可能用完了"))
     elif meter is not None:
         system.append(("本月花费", True, f"约 RM {meter.month_myr():.2f}"))
+    cloud = getattr(session, "cloud", None)
+    if cloud is not None:
+        system.append(("云端", True if cloud.connected else "warn", "待命" if cloud.connected else "未连上"))
     router = getattr(session, "router", None)
     model = {"model": router.label(), "mode": router.mode} if router is not None else None
     import friday_update
@@ -1600,6 +1754,21 @@ def run_web(args) -> None:
     })
     tray.start()
 
+    def cloud_pull(changes: dict) -> None:
+        text = merge_cloud_changes(changes, toolbox, assistant, hub)
+        hub.broadcast({"type": "status", "text": "☁ " + text})
+
+    def cloud_status(text: str, failed: bool) -> None:
+        hub.broadcast({"type": "error" if failed else "status", "text": "☁ " + text})
+
+    session.start_cloud = lambda code: start_cloud_client(code, Path(data_dir), cloud_pull, cloud_status)
+    session.cloud = None
+    if os.environ.get("FRIDAY_CLOUD", "").strip():
+        try:
+            session.cloud = session.start_cloud(os.environ["FRIDAY_CLOUD"])
+        except ValueError as e:
+            print(f"云端配对码有问题:{e}", flush=True)
+
     import friday_wake
 
     session.wake = friday_wake.WakeWord(
@@ -1613,6 +1782,10 @@ def run_web(args) -> None:
         web_loop(session, events, voice_module.transcribe_audio)
     finally:
         session.wake.stop()
+        if session.cloud is not None:
+            session.cloud.stop()
+            if not session.restart:
+                session.cloud.goodbye()  # 正常关掉:云端马上接手
         session.hotkey.stop()
         tray.stop()
         server.shutdown()
@@ -1675,7 +1848,42 @@ def run_server(args) -> None:
     discord.gate.transcriber = voice_module.transcribe_audio
     discord.start()
     ReminderScheduler(toolbox.reminders, events).start()
-    serve(assistant, persona, events, discord, voice_module.transcribe_audio)
+    standby = start_cloud_standby(Path(data_dir), toolbox, assistant, router, discord, events)
+    serve(assistant, persona, events, discord, voice_module.transcribe_audio, standby=standby)
+
+
+def start_cloud_standby(folder: Path, toolbox: Toolbox, assistant: Assistant, router, discord,
+                        events: queue.Queue):
+    """装了云端连接(证书和密码)就当电脑的后备;没装就像以前一样一直自己回答。"""
+    import friday_cloud
+
+    secret = os.environ.get("FRIDAY_CLOUD_SECRET", "").strip()
+    if not secret or not (folder / friday_cloud.CERT_FILE).exists():
+        return None
+    state = friday_cloud.CloudState(folder)
+
+    def on_sync(names: list[str]) -> None:
+        if "google_token.json" in names and toolbox.google is not None:
+            toolbox.google.account._services.clear()
+            toolbox.google.account.expired = False
+        if "friday_discord.json" in names and getattr(discord, "gate", None) is not None:
+            discord.gate.owners = discord.gate._load_owners()  # 电脑上配对的账号
+
+    if getattr(discord, "gate", None) is not None:
+        discord.gate.pairing_disabled = True  # 配对只在电脑上做
+
+    def on_update() -> dict:
+        import friday_update
+
+        result = friday_update.update(Path(SCRIPT_DIR))
+        if result["status"] == "updated":  # systemd 会马上用新版本重新启动
+            threading.Timer(2, os._exit, args=(0,)).start()
+        return {"status": result["status"], "changed": len(result.get("changed", []))}
+
+    port = int(os.environ.get("FRIDAY_CLOUD_PORT") or friday_cloud.DEFAULT_PORT)
+    friday_cloud.start_server(folder, secret, state, on_sync, port=port, on_update=on_update)
+    print(f"云端后备已启动(端口 {port}):电脑在线时由电脑回答,电脑离线 3 分钟后云端接手", flush=True)
+    return CloudStandby(state, lambda: reload_friday_data(toolbox, assistant, router, discord), events)
 
 
 def main(argv: list[str] | None = None) -> None:

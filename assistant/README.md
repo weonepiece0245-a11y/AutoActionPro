@@ -191,29 +191,35 @@
 
 ### 云端模式:电脑关机也能用
 
-把“星期五”放到一台一直开着的云服务器上(比如 DigitalOcean 新加坡机房最便宜的 1GB 方案,约 5~6 美元/月),手机 Discord 随时能找它。
+云端的星期五是电脑的**后备**:电脑开着时由电脑回答;电脑关机、睡眠或断网超过 3 分钟(在窗口里点电源按钮关掉的话是马上),云端就接手回答手机 Discord、按时提醒;电脑回来后,云端这段时间记住的事、提醒、待办和聊过的内容会自动合并回电脑。电脑每分钟把记忆、提醒、待办、对话、Google 登录同步给云端,所以云端也认得你、能查日历和 Gmail。云端碰不到你的电脑,所以不能开程序、看屏幕。
 
-| 云端能做 | 云端做不到(要回电脑上) |
-|---|---|
-| Discord 聊天、语音消息、记忆、上网、Google 各项服务、提醒和定时任务(到点私信你) | 执行命令、读写电脑文件、看屏幕、鼠标键盘、音量、打开程序和游戏、电脑上的语音模式 |
+两边用 HTTPS 连接:云端用自己生成的证书,电脑只认这一张(配对码里有它的指纹),再加一串只有你有的密码。
 
-**搬到云端的步骤**
-1. 在 DigitalOcean 创建一台服务器(Droplet):系统选 **Ubuntu 24.04**,机房选 **Singapore**,方案选最便宜的 **1GB 内存**,登录方式选 **Password** 并设一个密码。记下服务器的 IP 地址。
-2. 在电脑上打开 PowerShell,把整个 `assistant` 文件夹传上去(你的 Key、Google 授权、Discord 配对、记忆、提醒都会一起过去;IP 换成你的):
-   ```
-   scp -r "D:\Monday AI\AutoActionPro-claude-zealous-thompson-eoxylu\assistant" root@你的IP:/opt/friday
-   ```
-3. 登录服务器(DigitalOcean 网页上点 **Console**,或在 PowerShell 里 `ssh root@你的IP`),运行:
-   ```
-   cd /opt/friday && bash server-install.sh
-   ```
-   看到 `active (running)` 就成功了,以后服务器重启也会自动运行。
-4. 回到电脑上的“星期五”,输入 `/discord off` 再重新打开,把 Discord 交给云端(否则两边会同时回复)。想换回电脑负责,输入 `/discord on`。
+**在 Google Cloud 免费主机(e2-micro)上安装:**
 
-**注意**
-- 云端和电脑上的记忆、提醒是各自分开的。
-- Google 授权如果每 7 天过期(“发布应用”没开的话),在电脑上双击 `google-login.bat` 重新登录,再把 `google_token.json` 传上去:`scp "...\assistant\google_token.json" root@你的IP:/opt/friday/`,然后在服务器上 `chown friday /opt/friday/google_token.json && systemctl restart friday`。
-- 服务器上看日志:`journalctl -u friday -f`;重启:`systemctl restart friday`。
+1. 打开 console.cloud.google.com,选你之前做 Google 登录的那个项目。左上角菜单 → **结算**,关联一个结算账号(要绑卡;可以顺便在“预算和提醒”里设一个 US$1 的预算提醒,万一有收费马上知道)。
+2. 菜单 → **Compute Engine → 虚拟机实例** → 启用 API → **创建实例**:
+   - 名称:`friday`
+   - 区域:`us-central1`、`us-west1` 或 `us-east1`(只有这三个区域有免费额度)
+   - 机器类型:**e2-micro**
+   - 启动磁盘:点“更改”,选 **Ubuntu 24.04 LTS**,磁盘类型选 **标准永久性磁盘**,大小 10~30 GB
+   - 防火墙:勾选 **允许 HTTPS 流量**
+   - 点 **创建**
+3. 实例建好后,点它那一行的 **SSH**,会打开一个黑色的网页终端。把下面几行逐行贴进去(每行贴完按回车):
+   ```bash
+   sudo apt-get update && sudo apt-get install -y unzip
+   curl -L -o friday.zip https://github.com/weonepiece0245-a11y/AutoActionPro/archive/refs/heads/claude/zealous-thompson-eoxylu.zip
+   unzip -q friday.zip && cd AutoActionPro-claude-zealous-thompson-eoxylu/assistant
+   sudo bash server-install.sh
+   ```
+   它会问你 Claude API Key 和 Discord Token(贴上时屏幕上看不到,正常),然后自动装好,最后显示一串 **FRIDAY-** 开头的配对码。
+4. 在电脑上星期五的 **齿轮设定 → 云端星期五**,把配对码贴进去,点“连接”。左边“系统”会多一行“云端 待命”。
+5. 试一下:在星期五窗口点电源按钮关掉,用手机 Discord 问一句,云端会回答;再打开电脑上的星期五,刚才的对话会出现在窗口里。
+
+- 电脑上点“检查更新”时,云端也会一起更新。
+- 不要“停止”这台虚拟机:停止再开机,公网 IP 可能会变,要在 SSH 里运行 `cd ~/AutoActionPro-*/assistant && sudo -u friday venv/bin/python friday_cloud.py code` 拿新的配对码。重新启动(reboot)不影响。
+- 查看云端运行记录:SSH 里运行 `journalctl -u friday -f`。
+- 用 DigitalOcean 等其他 Ubuntu 服务器也一样:把第 3 步的几行在服务器上运行就行(要开放 443 端口)。
 
 ### 语音对话
 

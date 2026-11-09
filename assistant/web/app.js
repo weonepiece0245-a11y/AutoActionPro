@@ -394,6 +394,18 @@ function fillSettings() {
       : "没有 Admin Key 时用星期五自己的估算。Admin Key 只在你的电脑上保存,只用来读花费报表。";
     $("consoleNote").className = "set-note" + (b.console_error ? " warn" : "");
   }
+  const c = s.cloud;
+  $("cloudGroup").hidden = !c;
+  if (c) {
+    $("setCloud").value = "";
+    $("setCloud").placeholder = c.configured ? "已配对(要换就贴新的)" : "FRIDAY-…";
+    $("dropCloud").hidden = !c.configured;
+    $("cloudNote").textContent = !c.configured
+      ? "在云端服务器装好星期五后,会显示一串 FRIDAY- 开头的配对码,贴到这里。电脑开着时电脑回答,关机 3 分钟后云端接手手机 Discord 和提醒。"
+      : c.connected ? `✓ 已连上云端(${c.host}),正在待命。电脑开着时由电脑回答。`
+      : c.error ? "⚠ " + c.error : "正在连接云端……";
+    $("cloudNote").className = "set-note" + (c.configured && !c.connected && c.error ? " warn" : "");
+  }
   const k = s.backup;
   $("backupGroup").hidden = !k;
   if (k) {
@@ -441,6 +453,14 @@ $("setAutostart").onchange = (e) => saveSetting({ autostart: e.target.checked })
 $("googleLogin").onclick = () => saveSetting({ google_login: true }, 9000);
 $("setWake").onchange = (e) => saveSetting({ wake: e.target.checked }, 4000);
 $("setHotkey").onchange = (e) => saveSetting({ hotkey: e.target.value });
+$("saveCloud").onclick = async () => {
+  const code = $("setCloud").value.trim();
+  if (!code) { toast("先把配对码贴进来"); return; }
+  if (await saveSetting({ cloud_code: code }, 4000)) setTimeout(() => loadState().then(fillSettings), 5000);
+};
+$("dropCloud").onclick = () => {
+  if (confirm("断开后,电脑关机时就没有人接手手机 Discord 和提醒了。确定吗?")) saveSetting({ cloud_code: "" });
+};
 $("setBackup").onchange = (e) => saveSetting({ backup_auto: e.target.checked });
 $("backupNow").onclick = () => saveSetting({ backup_now: true }, 4000);
 $("backupRestore").onclick = () => {

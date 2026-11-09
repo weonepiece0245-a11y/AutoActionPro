@@ -28,7 +28,8 @@ PROTECTED = {
     ".env", "credentials.json", "google_token.json", "friday_discord.json", "friday_memory.json",
     "friday_reminders.json", "friday_todos.json", "friday_web.json", "friday.log", "friday_usage.json", "friday_router.json",
     "friday_chat.json", "friday_conversation.json", "friday_archive.jsonl", "friday.lock", "google_login.json", "friday_backup.json",
-    "friday_restore_pending.zip", "friday_before_restore.zip", VERSION_FILE,
+    "friday_restore_pending.zip", "friday_before_restore.zip",
+    "cloud_cert.pem", "cloud_key.pem", "friday_cloud_state.json", VERSION_FILE,
 }
 MAX_DOWNLOAD = 50 * 1024 * 1024
 

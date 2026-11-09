@@ -114,6 +114,7 @@ class DiscordGate:
         self.owners: dict[int, str] = self._load_owners()
         self.pair_code: str | None = None
         self.pair_expires: float | None = None
+        self.pairing_disabled = False  # 云端后备:只认电脑同步过来的配对,不跟陌生人说话
         if not self.owners:
             self.pair_code = self._code()  # 第一次:一直有效,直到配对成功
         self.answers: queue.Queue = queue.Queue()
@@ -179,6 +180,8 @@ class DiscordGate:
             return
         text = (text or "").strip()
         if author_id not in self.owners:
+            if self.pairing_disabled:
+                return
             if self._pair_code_valid() and text == self.pair_code:
                 self.owners[author_id] = author_name
                 self.pair_code = self.pair_expires = None
