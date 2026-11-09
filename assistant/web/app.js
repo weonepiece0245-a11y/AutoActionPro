@@ -704,17 +704,18 @@ async function listen({ followUp = false, stream = null, spoke = false } = {}) {
   refreshMode();
 
   const watch = () => {
-    if (!recorder) return;
-    const level = rms(micAnalyser);
-    orbState.level = Math.min(1, level * 6);
-    btn.style.setProperty("--mic", orbState.level.toFixed(2));
-    const now = performance.now();
-    if (level > 0.035) { spoke = true; quietSince = now; }
-    if ((spoke && now - quietSince > 2000) || (!spoke && now - started > noSpeechLimit) || now - started > 60000) {
-      recorder.stop();
-      return;
-    }
-    requestAnimationFrame(watch);
+    const timer = setInterval(() => {
+      if (!recorder) { clearInterval(timer); return; }
+      const level = rms(micAnalyser);
+      orbState.level = Math.min(1, level * 6);
+      btn.style.setProperty("--mic", orbState.level.toFixed(2));
+      const now = performance.now();
+      if (level > 0.035) { spoke = true; quietSince = now; }
+      if ((spoke && now - quietSince > 2000) || (!spoke && now - started > noSpeechLimit) || now - started > 60000) {
+        clearInterval(timer);
+        recorder.stop();
+      }
+    }, 30);
   };
   recorder.onstop = async () => {
     stream.getTracks().forEach((t) => t.stop());
@@ -748,27 +749,28 @@ async function startBargeWatch() {
   an.fftSize = 1024;
   audioCtx.createMediaStreamSource(stream).connect(an);
   const started = performance.now();
-  let baseline = 0.01, loud = 0;
-  const loop = () => {
-    if (bargeStream !== stream) return;
-    if (!speaking) { stopBargeWatch(); return; }
+  let baseline = 0.008, loud = 0;
+  // 用定时器而不是动画帧:窗口被挡住时动画帧会暂停,定时器还会继续
+  const timer = setInterval(() => {
+    if (bargeStream !== stream) { clearInterval(timer); return; }
+    if (!speaking) { clearInterval(timer); stopBargeWatch(); return; }
     const level = rms(an);
-    if (performance.now() - started < 500) {
+    if (performance.now() - started < 400) {
       baseline = Math.max(baseline, level);  // 先量一下她自己的声音从喇叭漏回麦克风有多大
-    } else if (level > Math.max(0.06, baseline * 2.5)) {
-      if (++loud >= 15) {  // 大约 0.25 秒都比她的声音大:是你在说话
+    } else if (level > Math.max(BARGE_MIN, baseline * BARGE_RATIO)) {
+      if (++loud >= BARGE_FRAMES) {  // 大约 0.2 秒都比她的声音大:是你在说话
+        clearInterval(timer);
         bargeStream = null;
         stopSpeaking();
         listen({ stream, spoke: true });
-        return;
       }
     } else {
-      loud = Math.max(0, loud - 2);
+      loud = Math.max(0, loud - 1);
     }
-    requestAnimationFrame(loop);
-  };
-  loop();
+  }, 30);
 }
+// 门槛:开了回声消除和降噪后,正常说话的音量常常只有 0.03~0.1
+const BARGE_MIN = 0.025, BARGE_RATIO = 1.8, BARGE_FRAMES = 6;
 function stopBargeWatch() {
   if (bargeStream) { bargeStream.getTracks().forEach((t) => t.stop()); bargeStream = null; }
 }

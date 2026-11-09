@@ -651,7 +651,10 @@ def open_window(url: str, profile_dir: Path, edge: str | None = None,
     if edge:
         profile_dir.mkdir(parents=True, exist_ok=True)
         popen([edge, f"--app={url}", f"--user-data-dir={profile_dir}", "--window-size=1280,820",
-               "--autoplay-policy=no-user-gesture-required", "--no-first-run", "--no-default-browser-check"])
+               "--autoplay-policy=no-user-gesture-required", "--no-first-run", "--no-default-browser-check",
+               # 窗口被挡住或最小化时也不要降速:录音、打断、连续对话都要靠它及时反应
+               "--disable-background-timer-throttling", "--disable-renderer-backgrounding",
+               "--disable-backgrounding-occluded-windows", "--disable-features=CalculateNativeWinOcclusion"])
         return "edge"
     browser_open(url)
     return "browser"
