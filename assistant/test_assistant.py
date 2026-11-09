@@ -4467,14 +4467,25 @@ class BudgetTest(unittest.TestCase):
     def test_console_dates_in_utc(self):
         urls = []
         console = friday_budget.ConsoleCost("k", lambda url, key: urls.append(url) or {"data": []})
-        # 吉隆坡 11 月 10 日早上 7 点 = UTC 11 月 9 日 23 点:本地“今天”在 UTC 还没开始
+        # 吉隆坡 11 月 10 日早上 7 点 = UTC 11 月 9 日 23 点
         now = datetime.datetime(2026, 11, 9, 23, 0, tzinfo=datetime.timezone.utc)
-        console.cost_since(datetime.date(2026, 11, 10), now=now)
-        self.assertIn("starting_at=2026-11-09T00%3A00%3A00Z", urls[0])
+        # 今天(或 UTC 还没到的日子)充值:Console 还没有数据,不去查(查了会 400),改用估算
+        self.assertIsNone(console.cost_since(datetime.date(2026, 11, 10), now=now))
+        self.assertIsNone(console.cost_since(datetime.date(2026, 11, 9), now=now))
+        self.assertEqual(urls, [])
+        self.assertEqual(console.cost_since(datetime.date(2026, 11, 1), now=now), 0)
+        self.assertIn("starting_at=2026-11-01T00%3A00%3A00Z", urls[0])
         self.assertIn("ending_at=2026-11-10T00%3A00%3A00Z", urls[0])
-        console.cost_since(datetime.date(2026, 11, 1), now=now)
-        self.assertIn("starting_at=2026-11-01T00%3A00%3A00Z", urls[1])
-        self.assertIn("ending_at=2026-11-10T00%3A00%3A00Z", urls[1])
+
+    def test_top_up_today_uses_estimate_for_balance(self):
+        os.environ.update(FRIDAY_ADMIN_KEY="sk-ant-admin01-x", FRIDAY_CREDIT_USD="23.26",
+                          FRIDAY_CREDIT_SINCE=datetime.date.today().isoformat())
+        fetch = lambda url, key: {"data": [{"results": [{"amount": "1000"}]}]}
+        budget = friday_budget.Budget(self.meter, console_factory=lambda key: friday_budget.ConsoleCost(key, fetch))
+        state = budget.refresh_console()
+        self.assertNotIn("error", state)
+        self.assertNotIn("since_usd", state)  # 余额先用估算
+        self.assertIsNotNone(budget.remaining_usd())
 
     def test_console_errors(self):
         os.environ["FRIDAY_ADMIN_KEY"] = "sk-ant-admin01-x"

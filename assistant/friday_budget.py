@@ -63,14 +63,19 @@ class ConsoleCost:
         self.key = key
         self.fetch = fetch
 
-    def cost_since(self, day: datetime.date, now: datetime.datetime | None = None) -> float:
-        # Console 按 UTC 算日子,马来西亚早 8 小时:本地的“今天”在 UTC 可能还没开始,
-        # 开始时间不能晚于 UTC 的今天,结束时间至少比开始晚一天,否则 Console 会回 400
+    def cost_since(self, day: datetime.date, now: datetime.datetime | None = None) -> float | None:
+        """day 以来的花费(美元)。要查的日子还没过完一天时 Console 没有数据,返回 None(改用估算)。
+
+        Console 按 UTC 算日子(马来西亚早 8 小时),而且查询的开始必须早于“现在这一天”的开头,
+        否则会回 400“ending date must be after starting date”。
+        """
         utc = datetime.timezone.utc
         now = (now or datetime.datetime.now(utc)).astimezone(utc)
         utc_today = now.date()
-        start = min(day, utc_today)
-        end = max(utc_today, start) + datetime.timedelta(days=1)
+        if day >= utc_today:
+            return None
+        start = day
+        end = utc_today + datetime.timedelta(days=1)
         params = {
             "starting_at": f"{start.isoformat()}T00:00:00Z",
             "ending_at": f"{end.isoformat()}T00:00:00Z",
@@ -136,13 +141,17 @@ class Budget:
         today = self.clock().date()
         result: dict = {"at": time.time()}
         try:
-            result["month_usd"] = console.cost_since(today.replace(day=1))
+            month = console.cost_since(today.replace(day=1))
+            if month is not None:  # 每月 1 号 Console 还没有数据,先用估算
+                result["month_usd"] = month
         except Exception as e:
             result["error"] = self._describe_error(e)
         since = self.credit_since
         if since and "error" not in result:
             try:  # 余额那部分出错,本月花费照样用 Console 的
-                result["since_usd"] = console.cost_since(datetime.date.fromisoformat(since))
+                spent = console.cost_since(datetime.date.fromisoformat(since))
+                if spent is not None:  # 充值就在今天:Console 明天才有数据,先用估算
+                    result["since_usd"] = spent
             except Exception as e:
                 result["error"] = "余额用估算:" + self._describe_error(e)
         with self.lock:
