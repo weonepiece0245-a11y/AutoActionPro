@@ -59,6 +59,7 @@ def run_powershell(script: str, env: dict) -> str:
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
          "[Console]::OutputEncoding = [Text.Encoding]::UTF8;" + script],
         capture_output=True, timeout=60, env={**os.environ, **env},
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),  # 不闪黑色窗口
     )
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.decode("utf-8", errors="replace").strip() or "PowerShell 出错")

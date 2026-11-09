@@ -825,6 +825,7 @@ class Toolbox:
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 timeout=COMMAND_TIMEOUT,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),  # 不闪黑色窗口
             )
         except subprocess.TimeoutExpired:
             return f"命令超过 {COMMAND_TIMEOUT} 秒没有结束,已停止。", True

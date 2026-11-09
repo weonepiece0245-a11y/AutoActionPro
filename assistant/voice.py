@@ -569,6 +569,7 @@ def decode_audio(data: bytes, rate: int = SAMPLE_RATE) -> bytes:
         [imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-i", "pipe:0",
          "-f", "s16le", "-ac", "1", "-ar", str(rate), "pipe:1"],
         input=data, capture_output=True, timeout=120,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),  # 不闪黑色窗口
     )
     if proc.returncode != 0 or not proc.stdout:
         detail = proc.stderr.decode(errors="replace").strip()[-200:]

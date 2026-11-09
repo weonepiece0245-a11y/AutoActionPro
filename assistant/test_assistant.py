@@ -3437,6 +3437,7 @@ class AudioHelpersTest(unittest.TestCase):
         self.assertEqual(args[0], "/bin/ffmpeg")
         self.assertEqual(args[-7:], ["-f", "s16le", "-ac", "1", "-ar", "16000", "pipe:1"])  # 16kHz 单声道 16 位
         self.assertEqual(run.call_args.kwargs["input"], b"OGG")
+        self.assertIn("creationflags", run.call_args.kwargs)  # Windows 上不闪黑色窗口
         failed = SimpleNamespace(returncode=1, stdout=b"", stderr=b"Invalid data")
         with mock.patch.dict(sys.modules, {"imageio_ffmpeg": ffmpeg}), \
                 mock.patch.object(voice.subprocess, "run", return_value=failed):

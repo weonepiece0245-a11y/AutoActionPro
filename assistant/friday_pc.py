@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # 后台跑 PowerShell 等程序时不闪黑色窗口
 Approver = Callable[[str], bool]
 Clock = Callable[[], datetime.datetime]
 
@@ -244,7 +245,7 @@ class WindowsPC:
         os.startfile(target)  # noqa: S606
 
     def run(self, args: list[str]) -> tuple[int, str]:
-        proc = subprocess.run(args, capture_output=True, timeout=30)
+        proc = subprocess.run(args, capture_output=True, timeout=30, creationflags=NO_WINDOW)
         out = (proc.stdout + proc.stderr).decode(errors="replace").strip()
         return proc.returncode, out
 
@@ -259,6 +260,7 @@ class WindowsPC:
             capture_output=True,
             timeout=120,
             env={**os.environ, **(env or {})},
+            creationflags=NO_WINDOW,
         )
         out = proc.stdout.decode("utf-8", errors="replace").strip()
         if proc.returncode not in (0, 3):
