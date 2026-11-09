@@ -146,6 +146,50 @@ export function start(canvas, state) {
   let level = 0;
   let spin = 0;
 
+  // ---------- 互动:跟着鼠标转、拖着转、点一下开始说话 ----------
+  const pointer = { x: 0, y: 0 };  // -1~1
+  const tilt = { x: 0, y: 0 };
+  let dragging = null;  // {x, y, moved, at}
+  let dragSpin = 0;  // 拖动带来的转速(放手后慢慢停)
+  let hover = 0;
+  const center = new THREE.Vector3();
+  const edge = new THREE.Vector3();
+
+  function orbOnScreen() {
+    group.getWorldPosition(center);
+    edge.copy(center).add(new THREE.Vector3(1.75, 0, 0));
+    center.project(camera);
+    edge.project(camera);
+    const w = window.innerWidth, h = window.innerHeight;
+    const cx = (center.x + 1) / 2 * w, cy = (1 - center.y) / 2 * h;
+    const r = Math.abs((edge.x - center.x) / 2 * w);
+    return { cx, cy, r };
+  }
+  function overOrb(x, y) {
+    const { cx, cy, r } = orbOnScreen();
+    return Math.hypot(x - cx, y - cy) <= r;
+  }
+  window.addEventListener("pointermove", (e) => {
+    pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
+    pointer.y = (e.clientY / window.innerHeight) * 2 - 1;
+    if (dragging) {
+      const dx = e.clientX - dragging.x;
+      dragging.moved = Math.max(dragging.moved, Math.hypot(dx, e.clientY - dragging.y));
+      dragSpin = dx * 0.02;
+      dragging.x = e.clientX; dragging.y = e.clientY;
+    }
+    canvas.style.cursor = dragging ? "grabbing" : overOrb(e.clientX, e.clientY) ? "pointer" : "";
+  });
+  canvas.addEventListener("pointerdown", (e) => {
+    dragging = { x: e.clientX, y: e.clientY, moved: 0, at: performance.now(), onOrb: overOrb(e.clientX, e.clientY) };
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener("pointerup", (e) => {
+    const d = dragging;
+    dragging = null;
+    if (d && d.onOrb && d.moved < 6 && performance.now() - d.at < 400 && state.onOrbClick) state.onOrbClick();
+  });
+
   function frame() {
     const dt = Math.min(clock.getDelta(), 0.05);
     const t = clock.elapsedTime;
@@ -157,7 +201,14 @@ export function start(canvas, state) {
     level += (wanted - level) * 0.25;
 
     const speed = mode === "thinking" ? 2.6 : mode === "speaking" ? 1.4 : 0.6;
-    spin += dt * speed;
+    spin += dt * speed + dragSpin;
+    if (!dragging) dragSpin *= 0.94;  // 放手后惯性慢慢停
+    else dragSpin *= 0.6;
+    tilt.x += (pointer.y * 0.25 - tilt.x) * 0.05;  // 跟着鼠标微微转向你
+    tilt.y += (pointer.x * 0.35 - tilt.y) * 0.05;
+    group.rotation.x = tilt.x;
+    group.rotation.y = tilt.y;
+    hover += ((canvas.style.cursor === "pointer" ? 1 : 0) - hover) * 0.1;
 
     coreUniforms.uTime.value = t;
     coreUniforms.uLevel.value = level;
@@ -181,7 +232,7 @@ export function start(canvas, state) {
     particleMaterial.size = 0.026 + level * 0.006;
 
     group.position.y = Math.sin(t * 0.8) * 0.06;
-    bloom.strength = 0.65 + level * 0.12;  // 说话时几乎不加亮,只靠起伏表现
+    bloom.strength = 0.65 + level * 0.12 + hover * 0.12;  // 说话时几乎不加亮,只靠起伏表现;鼠标移上去亮一点
 
     composer.render();
     requestAnimationFrame(frame);

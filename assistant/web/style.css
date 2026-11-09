@@ -43,6 +43,7 @@ body[data-mode="speaking"] { --accent: #38bdf8; }
 /* ---------- 背景:3D 全息球、网格地面、扫描线 ---------- */
 #orb, .css-orb { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 0; }
 .css-orb { display: none; place-items: center; pointer-events: none; }
+.css-orb i { pointer-events: auto; cursor: pointer; }
 .css-orb.on { display: grid; }
 .css-orb i {
   position: absolute; width: 230px; height: 230px; border-radius: 50%;

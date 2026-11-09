@@ -743,6 +743,10 @@ function stopBargeWatch() {
   if (bargeStream) { bargeStream.getTracks().forEach((t) => t.stop()); bargeStream = null; }
 }
 
+// ---------- 点光球:开始说话(再点一下结束) ----------
+orbState.onOrbClick = () => (recorder ? recorder.stop() : listen());
+$("cssOrb").addEventListener("click", () => orbState.onOrbClick());
+
 // ---------- 连续对话:用语音问的,她说完后自动再听几秒,你可以直接接着说 ----------
 let followUpOn = loadPrefs("friday-followup", true);
 let followUpTurn = null;  // 等这一轮说完
