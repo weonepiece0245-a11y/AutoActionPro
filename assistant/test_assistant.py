@@ -532,6 +532,43 @@ class ConversationArchiveTest(unittest.TestCase):
         self.assertTrue(Path(folder, "friday_archive.jsonl").exists())
 
 
+class SingleWindowTest(unittest.TestCase):
+    def test_only_one_friday_runs(self):
+        path = Path(tempfile.mkdtemp(), "friday.lock")
+        first, second = friday_web.InstanceLock(path), friday_web.InstanceLock(path)
+        self.assertTrue(first.acquire())
+        self.assertFalse(second.acquire())  # 连点第二下:不再启动
+        first.release()
+        self.assertTrue(second.acquire())  # 更新重启时先释放,新版本就能启动
+        second.release()
+
+    def test_waits_for_the_other_friday_to_be_ready(self):
+        path = Path(tempfile.mkdtemp(), "friday_web.json")
+        checks = []
+
+        def sleep(seconds):
+            if not path.exists():
+                friday_web.write_instance(path, 47800, "tok")
+
+        info = friday_web.wait_for_instance(path, timeout=5, sleep=sleep, alive=lambda i: checks.append(i) or True)
+        self.assertEqual(info["port"], 47800)
+        self.assertIsNone(friday_web.wait_for_instance(Path(tempfile.mkdtemp(), "none.json"), timeout=0,
+                                                       sleep=lambda s: None))
+
+    def test_existing_window_is_brought_to_front(self):
+        opened = []
+        opener = lambda url, profile: opened.append(url) or "edge"
+        self.assertEqual(friday_web.show_window("u", Path("."), focus=lambda: True, opener=opener), "focused")
+        self.assertEqual(opened, [])  # 已经有窗口:不再开第二个
+        self.assertEqual(friday_web.show_window("u", Path("."), focus=lambda: False, opener=opener), "edge")
+        self.assertEqual(opened, ["u"])  # 窗口关掉了(星期五在后台):才开新的
+
+    def test_window_title_matches_page(self):
+        page = (Path(app.SCRIPT_DIR) / "web" / "index.html").read_text(encoding="utf-8")
+        self.assertIn(f"<title>{friday_web.WINDOW_TITLE}</title>", page)
+        self.assertFalse(friday_web.focus_window() if os.name != "nt" else False)
+
+
 class ChatLogPersistenceTest(unittest.TestCase):
     def test_window_history_survives_restart(self):
         path = Path(tempfile.mkdtemp(), "chat.json")

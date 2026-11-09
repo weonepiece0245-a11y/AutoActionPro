@@ -1160,12 +1160,13 @@ def run_web(args) -> None:
     instance_file = Path(data_dir) / "friday_web.json"
     profile_dir = Path(data_dir) / "browser-profile"
 
-    # 已经在运行了:只打开窗口
-    existing = friday_web.read_instance(instance_file)
-    if existing and friday_web.instance_alive(existing):
-        if not args.no_browser:
-            friday_web.open_window(friday_web.app_url(existing["port"], existing["token"]), profile_dir)
-        print("星期五已经在运行,打开了它的窗口")
+    # 已经在运行(或者正在启动,比如连点了两下):不再启动第二个,只把它的窗口叫出来
+    lock = friday_web.InstanceLock(Path(data_dir) / "friday.lock")
+    if not lock.acquire():
+        existing = friday_web.wait_for_instance(instance_file)
+        if existing and not args.no_browser:
+            friday_web.show_window(friday_web.app_url(existing["port"], existing["token"]), profile_dir)
+        print("星期五已经在运行,把它的窗口叫到了前面")
         return
 
     call_me = args.call_me or os.environ.get("FRIDAY_CALL_ME") or DEFAULT_CALL_ME
@@ -1259,6 +1260,7 @@ def run_web(args) -> None:
         except OSError:
             pass
     if session.restart:
+        lock.release()  # 让新版本能启动
         command = restart_command(sys.argv[1:], ctx.port)
         print("用新版本重新启动:" + " ".join(command), flush=True)
         subprocess.Popen(command, cwd=SCRIPT_DIR, env={**ORIGINAL_ENV, "FRIDAY_WEB_TOKEN": token},

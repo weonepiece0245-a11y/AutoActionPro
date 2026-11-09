@@ -511,6 +511,114 @@ def find_edge() -> str | None:
     return shutil.which("msedge")
 
 
+WINDOW_TITLE = "星期五 · FRIDAY"  # 和 web/index.html 的 <title> 一致
+
+
+class InstanceLock:
+    """保证同一时间只有一个星期五在运行(快速连点两下也只会启动一个)。进程结束时自动释放。"""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self.file = None
+
+    def acquire(self) -> bool:
+        handle = open(self.path, "a+")
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            handle.close()
+            return False
+        self.file = handle
+        return True
+
+    def release(self) -> None:
+        if self.file is None:
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                self.file.seek(0)
+                msvcrt.locking(self.file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self.file, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        self.file.close()
+        self.file = None
+
+
+def wait_for_instance(path: Path, timeout: float = 30.0, sleep: Callable[[float], None] = time.sleep,
+                      alive: Callable[[dict], bool] | None = None) -> dict | None:
+    """另一个星期五正在启动:等它准备好(最多 timeout 秒)。"""
+    alive = alive or instance_alive
+    deadline = time.monotonic() + timeout
+    while True:
+        info = read_instance(path)
+        if info and alive(info):
+            return info
+        if time.monotonic() >= deadline:
+            return None
+        sleep(0.5)
+
+
+def focus_window(title: str = WINDOW_TITLE) -> bool:
+    """把已经打开的星期五窗口叫到最前面(最小化了就还原)。找不到窗口返回 False。只支持 Windows。"""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        found: list = []
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def check(hwnd, _):
+            if user32.IsWindowVisible(hwnd):
+                length = user32.GetWindowTextLengthW(hwnd)
+                if length:
+                    buffer = ctypes.create_unicode_buffer(length + 1)
+                    user32.GetWindowTextW(hwnd, buffer, length + 1)
+                    if buffer.value.startswith(title):
+                        found.append(hwnd)
+                        return False
+            return True
+
+        user32.EnumWindows(check, 0)
+        if not found:
+            return False
+        hwnd = found[0]
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        if not user32.SetForegroundWindow(hwnd):
+            # Windows 有时不让别的程序抢前台:模拟按一下 Alt 再试
+            user32.keybd_event(0x12, 0, 0, 0)
+            user32.keybd_event(0x12, 0, 2, 0)
+            user32.SetForegroundWindow(hwnd)
+        return True
+    except Exception:
+        return False
+
+
+def show_window(url: str, profile_dir: Path, focus: Callable[[], bool] = focus_window,
+                opener: Callable[[str, Path], str] | None = None) -> str:
+    """星期五已经在运行:有窗口就把它叫到前面,没有窗口才开一个新的。"""
+    if focus():
+        return "focused"
+    return (opener or open_window)(url, profile_dir)
+
+
 def open_window(url: str, profile_dir: Path, edge: str | None = None,
                 popen: Callable = subprocess.Popen, browser_open: Callable = webbrowser.open) -> str:
     """用 Edge 应用模式打开独立窗口(单独的配置目录,不影响你平时的 Edge);没有 Edge 就用默认浏览器。"""
