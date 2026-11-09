@@ -4777,6 +4777,20 @@ class WakeWordTest(unittest.TestCase):
         self.assertIn("星期五", grammar)  # 单独的“星期五”也要能被识别出来,才不会硬凑成唤醒词
         self.assertIn("[unk]", grammar)
 
+    def test_strict_is_not_too_strict(self):
+        self.assertEqual(friday_wake.SENSITIVITY, {"high": 0.5, "normal": 0.62, "low": 0.75})
+        now = [100.0]
+        wake = friday_wake.WakeWord(lambda: None, lambda t, f: None, lambda: False, clock=lambda: now[0])
+        heard = self.result("你好 星期五", 0.8)  # 离线模型常见的把握度
+        with mock.patch.dict(os.environ, {"FRIDAY_WAKE_SENSITIVITY": "low"}):
+            self.assertTrue(wake.should_wake(heard))
+        now[0] += 10
+        with mock.patch.dict(os.environ, {"FRIDAY_WAKE_SENSITIVITY": "low"}), \
+                mock.patch("builtins.print") as fake_print:
+            self.assertFalse(wake.should_wake(self.result("你好 星期五", 0.7)))
+        self.assertIn("把握度 0.70", fake_print.call_args.args[0])  # 差一点的记进运行记录
+        self.assertEqual(friday_wake.wake_confidence(self.result("星期三", 0.9), "你好星期五"), None)
+
     def test_custom_phrase(self):
         self.assertEqual(friday_wake.check_custom(" 小五 在吗 "), "小五在吗")
         for bad, why in (("五", "个字"), ("hey friday", "中文"), ("你好呀星期五星期五星期五", "个字")):

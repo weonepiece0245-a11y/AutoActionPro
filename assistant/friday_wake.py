@@ -27,7 +27,9 @@ PHRASES = {
 DEFAULT_PHRASE = "你好星期五"
 # 只让识别器在这些词里选,别的声音都归到 [unk];放进其他“星期几”是为了不把它们听成“星期五”
 DISTRACTORS = ["星期五", "星期一", "星期二", "星期三", "星期四", "星期六", "星期天", "星期日", "你好", "[unk]"]
-SENSITIVITY = {"high": 0.6, "normal": 0.75, "low": 0.9}  # 灵敏度高 = 把握度要求低,容易叫醒也容易误判
+# 灵敏度高 = 把握度要求低,容易叫醒也容易误判。离线模型给的把握度常在 0.6~0.85,
+# 之前“严格”要 0.9,十次只中一次;唤醒词已经够长了,严格一点用 0.75 就够
+SENSITIVITY = {"high": 0.5, "normal": 0.62, "low": 0.75}
 MIN_CONFIDENCE = SENSITIVITY["normal"]
 
 
@@ -89,21 +91,27 @@ SAMPLE_RATE = 16000
 BLOCK = 4000  # 每次读 0.25 秒
 
 
-def heard_wake_word(result_json: str, min_confidence: float = MIN_CONFIDENCE, phrase: str = WAKE_WORD) -> bool:
-    """Vosk 的一句识别结果里有没有整句唤醒词(有逐字把握度时,唤醒词里每个词都要够高)。"""
+def wake_confidence(result_json: str, phrase: str = WAKE_WORD) -> float | None:
+    """一句识别结果里有唤醒词的话,返回唤醒词那几个词里最低的把握度(没有逐字把握度算 1.0);没有就返回 None。"""
     try:
         result = json.loads(result_json)
     except ValueError:
-        return False
+        return None
     text = str(result.get("text", "")).replace(" ", "")
     form = next((f for f in _forms(phrase) if f in text), None)
     if form is None:
-        return False
+        return None
     words = result.get("result")
     if not words:
-        return True
+        return 1.0
     confidences = [w.get("conf", 1.0) for w in words if str(w.get("word", "")) and str(w.get("word", "")) in form]
-    return bool(confidences) and min(confidences) >= min_confidence
+    return min(confidences) if confidences else None
+
+
+def heard_wake_word(result_json: str, min_confidence: float = MIN_CONFIDENCE, phrase: str = WAKE_WORD) -> bool:
+    """一句识别结果里有没有整句唤醒词(唤醒词里每个词的把握度都要够高)。"""
+    confidence = wake_confidence(result_json, phrase)
+    return confidence is not None and confidence >= min_confidence
 
 
 def pip_install(packages: list[str], run=subprocess.run) -> bool:
@@ -139,9 +147,15 @@ class WakeWord:
             return False
         if now < self.paused_until or now - self.last_wake < COOLDOWN:
             return False
-        if heard_wake_word(result_json, SENSITIVITY[wake_sensitivity()], self.phrase):
+        confidence = wake_confidence(result_json, self.phrase)
+        if confidence is None:
+            return False
+        needed = SENSITIVITY[wake_sensitivity()]
+        if confidence >= needed:
             self.last_wake = now
             return True
+        # 差一点:记进运行记录(friday.log),以后可以按实际情况调灵敏度
+        print(f"听到像唤醒词的声音,把握度 {confidence:.2f},现在要 {needed:.2f} 才叫醒", flush=True)
         return False
 
     # ---------- 开关 ----------
