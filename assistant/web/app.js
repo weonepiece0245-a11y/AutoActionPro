@@ -61,20 +61,25 @@ function setMode(mode) {
 let mini = null;
 const MINI_TEXT = { idle: "待机", thinking: "思考中", speaking: "说话中", listening: "在听" };
 const MINI_CSS = `
-  body { margin: 0; height: 100vh; display: flex; align-items: center; gap: 12px; padding: 0 14px; box-sizing: border-box;
-         background: #050b14; color: #e6f6ff; font: 13px "Microsoft YaHei", system-ui, sans-serif; overflow: hidden; user-select: none; }
-  .orb { flex: none; width: 54px; height: 54px; border-radius: 50%; cursor: pointer; border: none;
+  html, body { height: 100%; }
+  body { margin: 0; display: flex; align-items: center; justify-content: center; gap: clamp(10px, 4vw, 28px);
+         padding: 8px 14px; box-sizing: border-box; overflow: hidden; user-select: none; color: #e6f6ff;
+         font: 13px "Microsoft YaHei", system-ui, sans-serif;
+         background: radial-gradient(ellipse at 30% 50%, var(--bg2, #061227) 0%, #02050c 70%); }
+  .orb { flex: none; width: clamp(44px, 62vh, 220px); aspect-ratio: 1; border-radius: 50%; cursor: pointer; border: none; padding: 0;
          background: radial-gradient(circle at 35% 30%, #fff 0%, var(--c) 35%, transparent 72%);
-         box-shadow: 0 0 22px var(--c), inset 0 0 14px var(--c); animation: breathe 3s ease-in-out infinite; }
+         box-shadow: 0 0 calc(18px + 4vh) var(--c), inset 0 0 14px var(--c); animation: breathe 3s ease-in-out infinite; }
   body[data-mode="listening"] .orb { animation-duration: .7s; }
   body[data-mode="speaking"] .orb { animation-duration: 1.1s; }
   body[data-mode="thinking"] .orb { animation: spin 1.2s linear infinite; }
-  @keyframes breathe { 50% { transform: scale(.88); opacity: .8; } }
+  @keyframes breathe { 50% { transform: scale(.9); opacity: .82; } }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .info { min-width: 0; flex: 1; }
-  .mode { font-weight: 600; color: var(--c); letter-spacing: .05em; }
-  .chips { font-size: 12px; opacity: .85; margin-top: 2px; }
-  .last { font-size: 12px; opacity: .7; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }`;
+  .info { min-width: 0; max-width: min(60vw, 520px); }
+  .mode { font-weight: 600; color: var(--c); letter-spacing: .05em; font-size: clamp(13px, 7vh, 26px); }
+  .chips { font-size: clamp(12px, 5vh, 18px); opacity: .9; margin-top: 2px; }
+  .last { font-size: clamp(11px, 4.5vh, 16px); opacity: .7; margin-top: 4px; line-height: 1.35;
+          display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  @media (max-aspect-ratio: 1/1) { body { flex-direction: column; text-align: center; } .info { max-width: 90vw; } }`;
 function miniColor() {
   return getComputedStyle(document.body).getPropertyValue("--accent").trim() || "#22d3ee";
 }
@@ -84,6 +89,7 @@ function syncMini() {
   const mode = orbState.mode || "idle";
   doc.body.dataset.mode = mode;
   doc.body.style.setProperty("--c", miniColor());
+  doc.body.style.setProperty("--bg2", getComputedStyle(document.body).getPropertyValue("--bg2").trim() || "#061227");
   doc.getElementById("miniMode").textContent = "星期五 · " + (MINI_TEXT[mode] || mode);
   const chips = [$("focusChip"), $("sleepChip")].filter((c) => !c.hidden).map((c) => c.textContent);
   doc.getElementById("miniChips").textContent = chips.join("  ");
@@ -96,7 +102,8 @@ async function openMini() {
   if (mini && !mini.closed) { mini.close(); mini = null; return; }
   if (!("documentPictureInPicture" in window)) { toast("这个浏览器不支持悬浮窗,用最新的 Edge 或 Chrome 打开星期五就有", 4000); return; }
   try {
-    mini = await documentPictureInPicture.requestWindow({ width: 280, height: 96 });
+    // preferInitialWindowPlacement:每次都用这个小尺寸打开(不然浏览器会照上次拉大的尺寸开)
+    mini = await documentPictureInPicture.requestWindow({ width: 300, height: 110, preferInitialWindowPlacement: true });
   } catch { toast("悬浮窗没打开"); return; }
   const doc = mini.document;
   doc.title = "星期五";
