@@ -286,7 +286,7 @@ function handle(ev) {
       readerEvent(ev); break;
     case "sleeptimer":
       showSleepTimer(ev); break;
-    case "listen":  // 点了桌面小光球:开始听(在听就停)
+    case "orb_click":  // 点了桌面小光球:开始听(在听就停)
       ensureAudio();
       if (orbState.onOrbClick) orbState.onOrbClick();
       break;

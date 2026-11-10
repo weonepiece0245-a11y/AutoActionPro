@@ -150,61 +150,22 @@ class Frames:
 
 # ======================== Windows 透明窗口 ========================
 
+MENU_TALK, MENU_OPEN, MENU_HIDE = 1, 2, 3
+_WIN: dict = {}  # Windows 的函数和结构(第一次用时准备好,整个星期五只准备一次)
+_HANDLERS: dict[int, Callable] = {}  # 每个小光球窗口 -> 处理消息的函数
+_CLASS_LOCK = threading.Lock()
+CLASS_NAME = "FridayFloatOrb"
 
-class FloatOrb:
-    def __init__(self, state_path: str | os.PathLike, mode: Callable[[], str] = lambda: "idle",
-                 color: Callable[[], str] = lambda: "#22d3ee", on_click: Callable[[], None] = lambda: None,
-                 on_close: Callable[[], None] = lambda: None, level: Callable[[], float | None] = lambda: None) -> None:
-        self.state_path = Path(state_path)
-        self.mode = mode
-        self.level = level  # 现在的声音有多大(窗口传来的,0~1;没有就是 None)
-        self.color = color
-        self.on_click = on_click
-        self.on_close = on_close
-        self.frames = Frames()
-        self.hwnd = None
-        self.thread: threading.Thread | None = None
-        self.x, self.y = self._load_position()
-        self.index = 0
-        self._press = None  # 按下去的位置(看是点一下还是拖动)
-        self.dragging = False
 
-    @property
-    def running(self) -> bool:
-        return self.thread is not None and self.thread.is_alive()
+def _win32() -> dict:
+    """准备 Windows 的函数、结构,并且只登记一次窗口类别。
 
-    def _load_position(self) -> tuple[int | None, int | None]:
-        try:
-            data = json.loads(self.state_path.read_text(encoding="utf-8"))
-            return int(data["x"]), int(data["y"])
-        except (OSError, ValueError, KeyError, TypeError):
-            return None, None
-
-    def _save_position(self) -> None:
-        try:
-            self.state_path.write_text(json.dumps({"x": self.x, "y": self.y}), encoding="utf-8")
-        except OSError:
-            pass
-
-    def start(self) -> bool:
-        if os.name != "nt":
-            return False
-        if self.running:
-            return True
-        ready = threading.Event()
-        self.thread = threading.Thread(target=self._run, args=(ready,), daemon=True, name="friday-floatorb")
-        self.thread.start()
-        ready.wait(5)
-        return self.running
-
-    def stop(self) -> None:
-        if self.hwnd and self.running:
-            import ctypes
-
-            ctypes.windll.user32.PostMessageW(self.hwnd, 0x0010, 0, 0)  # WM_CLOSE
-
-    # ---- 窗口线程 ----
-    def _run(self, ready: threading.Event) -> None:
+    以前每次打开小光球都重新登记、收起时注销,第二次打开时 Windows 还拿着第一次的旧函数,就会“没有响应”。
+    现在整个星期五只登记一次,处理消息的函数也一直留着,开关多少次都没事。
+    """
+    with _CLASS_LOCK:
+        if _WIN:
+            return _WIN
         import ctypes
         from ctypes import wintypes
 
@@ -243,7 +204,18 @@ class FloatOrb:
         user32.GetDC.argtypes = [wintypes.HWND]
         user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
         user32.SetTimer.argtypes = [wintypes.HWND, ctypes.c_size_t, wintypes.UINT, wintypes.LPVOID]
+        user32.KillTimer.argtypes = [wintypes.HWND, ctypes.c_size_t]
         user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                        ctypes.c_int, wintypes.UINT]
+        user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+        user32.MonitorFromPoint.restype = wintypes.HANDLE
+        user32.CreatePopupMenu.restype = wintypes.HMENU
+        user32.AppendMenuW.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_size_t, wintypes.LPCWSTR]
+        user32.TrackPopupMenu.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                          wintypes.HWND, wintypes.LPVOID]
+        user32.TrackPopupMenu.restype = ctypes.c_int
+        user32.DestroyMenu.argtypes = [wintypes.HMENU]
         gdi32.CreateCompatibleDC.restype = wintypes.HDC
         gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
         gdi32.CreateDIBSection.restype = wintypes.HBITMAP
@@ -255,10 +227,108 @@ class FloatOrb:
         gdi32.DeleteDC.argtypes = [wintypes.HDC]
         kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 
-        user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int,
-                                        ctypes.c_int, wintypes.UINT]
-        user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
-        user32.MonitorFromPoint.restype = wintypes.HANDLE
+        def dispatch(hwnd, msg, wparam, lparam):
+            handler = _HANDLERS.get(int(hwnd or 0))
+            if handler is not None:
+                try:
+                    result = handler(hwnd, msg, wparam, lparam)
+                except Exception:  # 出错也不能让小光球卡死
+                    result = None
+                if result is not None:
+                    return result
+            return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+        proc = WNDPROC(dispatch)  # 一直留着,不会被回收
+        instance = kernel32.GetModuleHandleW(None)
+        wc = WNDCLASSEXW(ctypes.sizeof(WNDCLASSEXW), 0, proc, 0, 0, instance, None,
+                         user32.LoadCursorW(None, ctypes.c_void_p(32649)), None, None, CLASS_NAME, None)  # 手形光标
+        user32.RegisterClassExW(ctypes.byref(wc))  # 已经登记过(1410)也没关系
+        _WIN.update(ctypes=ctypes, wintypes=wintypes, user32=user32, gdi32=gdi32, instance=instance, proc=proc,
+                    BITMAPINFOHEADER=BITMAPINFOHEADER, BLENDFUNCTION=BLENDFUNCTION)
+        return _WIN
+
+
+class FloatOrb:
+    def __init__(self, state_path: str | os.PathLike, mode: Callable[[], str] = lambda: "idle",
+                 color: Callable[[], str] = lambda: "#22d3ee", on_click: Callable[[], None] = lambda: None,
+                 on_close: Callable[[], None] = lambda: None, level: Callable[[], float | None] = lambda: None,
+                 on_open: Callable[[], None] = lambda: None) -> None:
+        self.state_path = Path(state_path)
+        self.mode = mode
+        self.level = level  # 现在的声音有多大(窗口传来的,0~1;没有就是 None)
+        self.color = color
+        self.on_click = on_click  # 点一下:说话
+        self.on_open = on_open  # 右键选单“打开星期五窗口”
+        self.on_close = on_close  # 用右键选单收起来了
+        self.frames = Frames()
+        self.hwnd = None
+        self.thread: threading.Thread | None = None
+        self.x, self.y = self._load_position()
+        self.index = 0
+        self._press = None  # 按下去的位置(看是点一下还是拖动)
+        self.dragging = False
+        self.closed_by_menu = False
+
+    @property
+    def running(self) -> bool:
+        return self.thread is not None and self.thread.is_alive()
+
+    def _load_position(self) -> tuple[int | None, int | None]:
+        try:
+            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+            return int(data["x"]), int(data["y"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None, None
+
+    def _save_position(self) -> None:
+        try:
+            self.state_path.write_text(json.dumps({"x": self.x, "y": self.y}), encoding="utf-8")
+        except OSError:
+            pass
+
+    def start(self) -> bool:
+        if os.name != "nt":
+            return False
+        if self.running:
+            return True
+        ready = threading.Event()
+        self.closed_by_menu = False
+        self.thread = threading.Thread(target=self._run, args=(ready,), daemon=True, name="friday-floatorb")
+        self.thread.start()
+        ready.wait(5)
+        return self.running and bool(self.hwnd)
+
+    def stop(self, wait: float = 3.0) -> None:
+        thread, hwnd = self.thread, self.hwnd
+        if hwnd and thread is not None and thread.is_alive():
+            _win32()["user32"].PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
+            thread.join(wait)  # 等它真的关好,马上再开也不会撞在一起
+
+    def _menu(self, hwnd) -> int:
+        """右键:弹出小选单,选了才做(不会一按右键就不见)。"""
+        win = _win32()
+        user32, wintypes, ctypes = win["user32"], win["wintypes"], win["ctypes"]
+        menu = user32.CreatePopupMenu()
+        user32.AppendMenuW(menu, 0, MENU_TALK, "说话")
+        user32.AppendMenuW(menu, 0, MENU_OPEN, "打开星期五窗口")
+        user32.AppendMenuW(menu, 0x800, 0, None)  # 分隔线
+        user32.AppendMenuW(menu, 0, MENU_HIDE, "收起小光球")
+        point = wintypes.POINT()
+        user32.GetCursorPos(ctypes.byref(point))
+        user32.SetForegroundWindow(hwnd)  # 不先这样做,选单点别处不会自己关
+        choice = user32.TrackPopupMenu(menu, 0x0100 | 0x0002, point.x, point.y, 0, hwnd, None)  # 回传选了哪一项
+        user32.PostMessageW(hwnd, 0, 0, 0)
+        user32.DestroyMenu(menu)
+        return choice
+
+    # ---- 窗口线程 ----
+    def _run(self, ready: threading.Event) -> None:
+        try:
+            win = _win32()
+        except Exception:
+            ready.set()
+            return
+        ctypes, wintypes, user32, gdi32 = win["ctypes"], win["wintypes"], win["user32"], win["gdi32"]
         HWND_TOPMOST = wintypes.HWND(-1)
         on_screen = self.x is not None and user32.MonitorFromPoint(
             wintypes.POINT(int(self.x) + SIZE // 2, int(self.y) + SIZE // 2), 0)  # MONITOR_DEFAULTTONULL
@@ -268,11 +338,11 @@ class FloatOrb:
 
         screen_dc = user32.GetDC(None)
         mem_dc = gdi32.CreateCompatibleDC(screen_dc)
-        info = BITMAPINFOHEADER(ctypes.sizeof(BITMAPINFOHEADER), SIZE, -SIZE, 1, 32, 0, 0, 0, 0, 0, 0)
+        info = win["BITMAPINFOHEADER"](ctypes.sizeof(win["BITMAPINFOHEADER"]), SIZE, -SIZE, 1, 32, 0, 0, 0, 0, 0, 0)
         bits = ctypes.c_void_p()
         bitmap = gdi32.CreateDIBSection(mem_dc, ctypes.byref(info), 0, ctypes.byref(bits), None, 0)
         old_bitmap = gdi32.SelectObject(mem_dc, bitmap)
-        blend = BLENDFUNCTION(0, 0, 255, 1)  # AC_SRC_OVER, 用每个点自己的透明度
+        blend = win["BLENDFUNCTION"](0, 0, 255, 1)  # AC_SRC_OVER, 用每个点自己的透明度
         size = wintypes.SIZE(SIZE, SIZE)
         source = wintypes.POINT(0, 0)
 
@@ -303,11 +373,8 @@ class FloatOrb:
                 user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
             user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)  # 不动大小、位置、焦点
 
-        def proc(hwnd, msg, wparam, lparam):
-            try:
-                return handle(hwnd, msg, wparam, lparam)
-            except Exception:  # 出错也不能让小光球卡死
-                return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+        def background(job) -> None:
+            threading.Thread(target=lambda: _quiet(job), daemon=True).start()
 
         def handle(hwnd, msg, wparam, lparam):
             if msg == 0x0113:  # WM_TIMER:下一帧
@@ -337,32 +404,39 @@ class FloatOrb:
                 if self.dragging:
                     self._save_position()
                 elif pressed is not None:
-                    threading.Thread(target=self.on_click, daemon=True).start()
+                    background(self.on_click)
                 self.dragging = False
                 return 0
-            if msg == 0x0205:  # 右键:收起
-                user32.PostMessageW(hwnd, 0x0010, 0, 0)
+            if msg == 0x0205:  # 右键放开:小选单
+                choice = self._menu(hwnd)
+                if choice == MENU_TALK:
+                    background(self.on_click)
+                elif choice == MENU_OPEN:
+                    background(self.on_open)
+                elif choice == MENU_HIDE:
+                    self.closed_by_menu = True
+                    user32.PostMessageW(hwnd, 0x0010, 0, 0)
                 return 0
             if msg == 0x0010:  # WM_CLOSE
+                user32.KillTimer(hwnd, 1)
                 user32.DestroyWindow(hwnd)
                 return 0
             if msg == 0x0002:  # WM_DESTROY
                 user32.PostQuitMessage(0)
                 return 0
-            return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+            return None  # 其他的交给 Windows
 
-        self._proc = WNDPROC(proc)  # 留着引用,不然会被回收
-        instance = kernel32.GetModuleHandleW(None)
-        name = f"FridayFloatOrb{id(self)}"
-        wc = WNDCLASSEXW(ctypes.sizeof(WNDCLASSEXW), 0, self._proc, 0, 0, instance, None,
-                         user32.LoadCursorW(None, ctypes.c_void_p(32649)), None, None, name, None)  # 手形光标
-        user32.RegisterClassExW(ctypes.byref(wc))
+        hwnd = user32.CreateWindowExW(0x00080000 | 0x00000008 | 0x00000080 | 0x08000000, CLASS_NAME, "星期五",
+                                      0x80000000, int(self.x), int(self.y), SIZE, SIZE, None, None, win["instance"], None)
         # WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW(不出现在工作列)| WS_EX_NOACTIVATE(点它不会抢走焦点)
-        hwnd = user32.CreateWindowExW(0x00080000 | 0x00000008 | 0x00000080 | 0x08000000, name, "星期五",
-                                      0x80000000, int(self.x), int(self.y), SIZE, SIZE, None, None, instance, None)
         if not hwnd:
+            gdi32.SelectObject(mem_dc, old_bitmap)
+            gdi32.DeleteObject(bitmap)
+            gdi32.DeleteDC(mem_dc)
+            user32.ReleaseDC(None, screen_dc)
             ready.set()
             return
+        _HANDLERS[int(hwnd)] = handle
         self.hwnd = hwnd
         draw(hwnd)
         user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
@@ -374,13 +448,18 @@ class FloatOrb:
                 user32.TranslateMessage(ctypes.byref(msg))
                 user32.DispatchMessageW(ctypes.byref(msg))
         finally:
+            _HANDLERS.pop(int(hwnd), None)
             gdi32.SelectObject(mem_dc, old_bitmap)
             gdi32.DeleteObject(bitmap)
             gdi32.DeleteDC(mem_dc)
             user32.ReleaseDC(None, screen_dc)
-            user32.UnregisterClassW(name, instance)
             self.hwnd = None
-            try:
-                self.on_close()
-            except Exception:
-                pass
+            if self.closed_by_menu:
+                _quiet(self.on_close)
+
+
+def _quiet(job) -> None:
+    try:
+        job()
+    except Exception:
+        pass

@@ -1371,7 +1371,6 @@ class WebSession:
     clips = None  # 剪贴板历史(friday_clipboard.ClipHistory)
     folder_backup = None  # 文件夹备份(friday_folderbackup.FolderBackup)
     floatorb = None  # 桌面小光球(friday_floatorb.FloatOrb)
-    floatorb_stopping = False
     env_file = ".env"
     spotify = None  # Spotify(friday_spotify.Spotify)
     alert_state = None  # friday_alerts.json(下雨、每周报告、早安简报共用)
@@ -3378,17 +3377,16 @@ def start_floatorb(session, ctx, data_dir: str) -> None:
             return "speaking"
         return "thinking" if getattr(session, "busy", False) else "idle"
 
-    def closed() -> None:
-        if not getattr(session, "floatorb_stopping", False):  # 右键收起:下次开星期五也不自动出来
-            os.environ["FRIDAY_FLOATORB"] = "off"
-            _quietly(lambda: save_env_value(Path(session.env_file), "FRIDAY_FLOATORB", "off"))
+    def closed() -> None:  # 用右键选单收起:下次开星期五也不自动出来
+        os.environ["FRIDAY_FLOATORB"] = "off"
+        _quietly(lambda: save_env_value(Path(session.env_file), "FRIDAY_FLOATORB", "off"))
         session.hub.broadcast({"type": "floatorb", "on": False})
 
     session.floatorb = friday_floatorb.FloatOrb(
         os.path.join(data_dir, "friday_floatorb.json"), mode=mode,
         color=lambda: ctx.activity.get("accent", "#22d3ee"),
         level=lambda: ctx.activity.get("level") if time.monotonic() - ctx.activity.get("level_at", 0) < 0.6 else None,
-        on_click=lambda: session.hub.broadcast({"type": "listen"}), on_close=closed)
+        on_click=lambda: session.hub.broadcast({"type": "orb_click"}), on_close=closed)
     session.quick.floatorb = lambda on: floatorb_switch(session, on)
     if os.environ.get("FRIDAY_FLOATORB", "off") == "on":
         session.floatorb.start()
@@ -3406,12 +3404,9 @@ def floatorb_switch(session, on: bool) -> str:
         if not orb.start():
             return "小光球没开起来。"
         session.hub.broadcast({"type": "floatorb", "on": True})
-        return "小光球出来了:点一下说话,按住可以拖,右键收起。"
-    session.floatorb_stopping = True
-    try:
-        orb.stop()
-    finally:
-        threading.Timer(1.0, lambda: setattr(session, "floatorb_stopping", False)).start()
+        return "小光球出来了:点一下说话,按住可以拖,右键有选单。"
+    orb.stop()
+    session.hub.broadcast({"type": "floatorb", "on": False})
     return "小光球收起来了。"
 
 
@@ -3826,6 +3821,9 @@ def run_web(args) -> None:
                               lambda: hub.broadcast({"type": "listen"}),
                               lambda: friday_web.open_window(url + "&listen=1", profile_dir))
 
+    if getattr(session, "floatorb", None) is not None:  # 小光球右键“打开星期五窗口”
+        session.floatorb.on_open = lambda: (hub.connected and friday_web.focus_window()) or friday_web.open_window(
+            url, profile_dir)
     session.hotkey = friday_desktop.GlobalHotkey(summon_now)
     if not session.hotkey.start(friday_desktop.hotkey_name()):
         print(f"快捷键没有设置成功:{session.hotkey.error}", flush=True)
