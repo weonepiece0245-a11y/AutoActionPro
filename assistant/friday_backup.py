@@ -22,7 +22,7 @@ from typing import Callable
 BACKUP_FILES = [
     "friday_memory.json", "friday_reminders.json", "friday_todos.json", "friday_archive.jsonl",
     "friday_conversation.json", "friday_chat.json", "friday_router.json", "friday_usage.json",
-    "friday_discord.json", "friday_ledger.json",
+    "friday_discord.json", "friday_ledger.json", "friday_watch.json",
 ]
 FOLDER_NAME = "星期五备份"
 FOLDER_MIME = "application/vnd.google-apps.folder"

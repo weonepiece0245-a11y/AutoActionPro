@@ -38,6 +38,7 @@ from friday_daily import (  # noqa: E402
 from friday_discord import DiscordBridge, read_token, set_discord_enabled  # noqa: E402
 from friday_google import GoogleAccount, GoogleTools  # noqa: E402
 from friday_ledger import Ledger  # noqa: E402
+from friday_watch import Watchlist  # noqa: E402
 from friday_pc import Computer, ScreenControl, drain_console_input  # noqa: E402
 from friday_budget import Budget, BudgetExceeded  # noqa: E402
 from friday_router import SONNET, UPGRADE_TOOL, Router  # noqa: E402
@@ -140,7 +141,8 @@ FRIDAY_PROMPT = """你是“星期五”,{call_me}的私人 AI 助手。
 - {call_me}让你看屏幕时用 screen;必须在界面上点来点去才能办的事,用 control 控制鼠标键盘,
   并严格遵守 control 工具说明里的规则。
 - 用 reminder 设提醒和定时任务(比如“半小时后提醒我喝水”“每天早上 9 点给我做个早报”),
-  用 {todo_tool} 管理待办清单。{call_me}说花了多少钱(“午饭 15 块”“Grab 12 块”)就用 expense 记账(马币),记完简短说一句。{reminder_note}
+  用 {todo_tool} 管理待办清单。{call_me}说花了多少钱(“午饭 15 块”“Grab 12 块”)就用 expense 记账(马币),记完简短说一句。
+  {call_me}想等某个游戏降价、等网页有货或有变化,用 watch 追踪,星期五会在后台定时去看。{reminder_note}
 - 消息以“[定时任务]”开头时,是之前设好的任务到点了,{call_me}可能不在电脑前:
   直接把事情做完,结果说得简短清楚;需要确认的操作不能做,留到{call_me}回来再说。
 - 能直接办到的事就直接办,办完简要汇报结果;做不到的事坦白说,并给出替代方案。
@@ -2252,6 +2254,26 @@ def start_daily_checks(session, toolbox: Toolbox, data_dir: str, interval: float
 
     threading.Thread(target=loop, daemon=True, name="friday-daily-checks").start()
     start_event_reminders(session, toolbox, state)
+    start_watch(session, toolbox)
+
+
+def start_watch(session, toolbox: Toolbox, interval: float = 30 * 60) -> None:
+    """特价和网页追踪:每半小时看一次清单,到时间的项目去查,有降价或变化就说。"""
+    watchlist = getattr(toolbox, "watchlist", None)
+    if watchlist is None:
+        return
+
+    def check() -> None:
+        for text in watchlist.check():
+            announce(session, text, "🏷", text)
+
+    def loop() -> None:
+        time.sleep(120)
+        while True:
+            _quietly(check)
+            time.sleep(interval)
+
+    threading.Thread(target=loop, daemon=True, name="friday-watch").start()
 
 
 def start_event_reminders(session, toolbox: Toolbox, state, interval: float = 60) -> None:
@@ -2406,7 +2428,8 @@ def run_web(args) -> None:
         Memory(memory_file), approver, workdir=os.path.expanduser(args.workdir) if args.workdir else None,
         web=not args.no_web, reminders=Reminders(os.path.join(data_dir, "friday_reminders.json")),
         todos=Todos(os.path.join(data_dir, "friday_todos.json")),
-        ledger=Ledger(os.path.join(data_dir, "friday_ledger.json")), computer=computer, screen=ScreenControl(),
+        ledger=Ledger(os.path.join(data_dir, "friday_ledger.json")),
+        watchlist=Watchlist(os.path.join(data_dir, "friday_watch.json")), computer=computer, screen=ScreenControl(),
         google=google, confirm=approver.confirm,
     )
     persona = friday_persona(call_me, toolbox, voice=False)
@@ -2637,6 +2660,7 @@ def run_server(args) -> None:
         reminders=Reminders(os.path.join(data_dir, "friday_reminders.json")),
         todos=Todos(os.path.join(data_dir, "friday_todos.json")),
         ledger=Ledger(os.path.join(data_dir, "friday_ledger.json")),
+        watchlist=Watchlist(os.path.join(data_dir, "friday_watch.json")),
         google=google,
         confirm=approver.confirm,
         local_tools=False,
@@ -2814,6 +2838,7 @@ def main(argv: list[str] | None = None) -> None:
             reminders=Reminders(os.path.join(data_dir, "friday_reminders.json")),
             todos=Todos(os.path.join(data_dir, "friday_todos.json")),
             ledger=Ledger(os.path.join(data_dir, "friday_ledger.json")),
+            watchlist=Watchlist(os.path.join(data_dir, "friday_watch.json")),
             computer=computer,
             screen=ScreenControl(),
             google=google,

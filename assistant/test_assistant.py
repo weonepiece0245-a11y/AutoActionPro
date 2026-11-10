@@ -87,6 +87,7 @@ import friday_desktop  # noqa: E402
 import friday_locks  # noqa: E402
 import friday_images  # noqa: E402
 import friday_events  # noqa: E402
+import friday_watch  # noqa: E402
 import friday_wake  # noqa: E402
 import friday_cloud  # noqa: E402
 import friday_care  # noqa: E402
@@ -6344,6 +6345,92 @@ class EventReminderTest(TempDirTest):
             self.assertIn("error", app.apply_settings({"event_lead": 7}, session, None, env))
             self.assertTrue(app.apply_settings({"event_lead": 30}, session, None, env)["ok"])
             self.assertEqual(friday_events.lead_minutes(), 30)
+
+
+class WatchTest(TempDirTest):
+    def setUp(self):
+        super().setUp()
+        self.price = {"final": 13900, "initial": 13900, "discount_percent": 0}
+        self.page = "<html><body><h1>RTX 5070</h1><p>Out of stock</p><script>var x=1</script></body></html>" + "x" * 60
+        self.now = [datetime.datetime(2026, 11, 10, 12, 0)]
+
+    def fetch(self, url):
+        if "storesearch" in url:
+            return json.dumps({"items": [{"id": 570940, "name": "DARK SOULS: REMASTERED"}]}).encode()
+        if "appdetails" in url:
+            return json.dumps({"570940": {"success": True, "data": {"name": "DARK SOULS: REMASTERED",
+                                                                   "price_overview": self.price}}}).encode()
+        return self.page.encode()
+
+    def make(self):
+        return friday_watch.Watchlist(os.path.join(self.tmp, "w.json"), fetcher=self.fetch, clock=lambda: self.now[0])
+
+    def later(self, hours=3):
+        self.now[0] += datetime.timedelta(hours=hours)
+
+    def test_steam_price_drop(self):
+        watch = self.make()
+        self.assertIn("现在 RM 139.00", watch.add_steam("dark souls"))
+        self.assertEqual(watch.check(), [])  # 还没到 2 小时
+        self.later()
+        self.assertEqual(watch.check(), [])  # 价钱没变
+        self.price = {"final": 6950, "initial": 13900, "discount_percent": 50}
+        self.later()
+        said = watch.check()
+        self.assertEqual(len(said), 1)
+        self.assertIn("RM 69.50(-50%,原价 RM 139.00),之前 RM 139.00", said[0])
+        self.later()
+        self.assertEqual(watch.check(), [])  # 还是一样的特价:不重复
+        with self.assertRaises(ValueError):
+            watch.add_steam("https://store.steampowered.com/app/570940/DARK_SOULS/")  # 已经在追踪
+
+    def test_steam_target_price(self):
+        watch = self.make()
+        watch.add_steam("dark souls", target=50)
+        self.price = {"final": 6950, "initial": 13900, "discount_percent": 50}
+        self.later()
+        self.assertEqual(watch.check(), [])  # 还没到心理价
+        self.price = {"final": 4170, "initial": 13900, "discount_percent": 70}
+        self.later()
+        self.assertEqual(len(watch.check()), 1)
+
+    def test_page_keyword_and_change(self):
+        watch = self.make()
+        self.assertIn("现在页面上没有“In stock”", watch.add_page("https://shop.example.com/x", "In stock", "显卡"))
+        self.assertIn("网页内容有变化", watch.add_page("https://news.example.com/", name="新闻"))
+        self.page = self.page.replace("Out of stock", "In stock now")
+        self.later()
+        said = watch.check()
+        self.assertEqual(len(said), 2)
+        self.assertIn("出现了“In stock”", said[0])
+        self.assertIn("有变化,新内容像是:In stock now", said[1])
+        self.page = self.page.replace("In stock now", "Back soon")
+        self.later()
+        said = watch.check()
+        self.assertEqual(len(said), 1)  # 关键词消失要说;内容变化今天说过了
+        self.assertIn("没有了“In stock”", said[0])
+        self.assertIn("#1 网页:显卡", watch.describe())
+        self.assertIn("不再追踪:显卡", watch.remove("1"))
+        self.assertEqual(len(self.make().items), 1)
+
+    def test_text_and_safety(self):
+        self.assertEqual(friday_watch.page_text(b"<p>A&amp;B</p><script>evil()</script><div>C</div>"), "A&B\nC")
+        with self.assertRaises(ValueError):
+            friday_watch.fetch("http://127.0.0.1:47800/api/state")  # 不读本机和家里的内部地址
+        with self.assertRaises(ValueError):
+            friday_watch.fetch("file:///C:/Windows/win.ini")
+        self.page = "<html></html>"
+        with self.assertRaises(ValueError):
+            self.make().add_page("https://shopee.com.my/x")  # 读不到内容要直说
+
+    def test_tool(self):
+        toolbox = self.make_toolbox()
+        toolbox.watchlist = self.make()
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+        result = toolbox.run(tool_use("watch", {"action": "add_steam", "game": "dark souls", "target": 60}), lambda s: None)
+        self.assertIn("降到 RM 60.00 以下时告诉你", result["content"])
+        self.assertIn("目标 RM 60.00", toolbox.run(tool_use("watch", {"action": "list"}), lambda s: None)["content"])
+        self.assertTrue(toolbox.run(tool_use("watch", {"action": "remove", "id": "99"}), lambda s: None)["is_error"])
 
 
 if __name__ == "__main__":

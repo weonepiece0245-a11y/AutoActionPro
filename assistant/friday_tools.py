@@ -635,6 +635,29 @@ EXPENSE_TOOL = {
     },
 }
 
+WATCH_TOOL = {
+    "name": "watch",
+    "description": (
+        "特价和网页追踪(后台每 2 小时看一次,降价或有变化时主动告诉用户,不花钱)。"
+        "add_steam:追踪 Steam 游戏价格,target 是心理价(马币,可选);"
+        "add_page:追踪网页,keyword 填了就只看这个词出现或消失(例如“有货”“In stock”),没填就看内容有没有变化;"
+        "list 看清单;remove 删掉(id 或名字)。Shopee、Lazada 这类网站读不到内容,要直说。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["add_steam", "add_page", "list", "remove"]},
+            "game": {"type": "string", "description": "add_steam:游戏名(英文更准)或 Steam 商店网址"},
+            "target": {"type": "number", "description": "add_steam:降到这个价钱(马币)以下才通知,可选"},
+            "url": {"type": "string", "description": "add_page:网址"},
+            "keyword": {"type": "string", "description": "add_page:要盯的词,可选"},
+            "name": {"type": "string", "description": "add_page:给这个网页起个名字,可选"},
+            "id": {"type": "string", "description": "remove:编号或名字"},
+        },
+        "required": ["action"],
+    },
+}
+
 GOOGLE_EXTRA_TOOLS = [GOOGLE_TASKS_TOOL, CONTACTS_TOOL, DRIVE_TOOL, DOCS_TOOL, SHEETS_TOOL, YOUTUBE_TOOL]
 
 # 请求是流式的,让较长的工具参数(例如文件内容)边生成边传输;参数在执行前会自己校验
@@ -671,6 +694,7 @@ class Toolbox:
         confirm: Approver | None = None,
         local_tools: bool = True,
         ledger=None,
+        watchlist=None,
     ) -> None:
         self.memory = memory
         self.approve = approve
@@ -682,6 +706,7 @@ class Toolbox:
         self.screen = screen
         self.google = google
         self.ledger = ledger  # 记账(friday_ledger.Ledger)
+        self.watchlist = watchlist  # 特价和网页追踪(friday_watch.Watchlist)
         if ledger is not None and google is not None:
             from friday_ledger import sheet_sync
 
@@ -716,6 +741,7 @@ class Toolbox:
             "search_history": self._search_history,
             "weather": self._weather,
             "expense": self._expense,
+            "watch": self._watch,
         }
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
 
@@ -733,6 +759,8 @@ class Toolbox:
             tools = tools + [REMINDER_TOOL]
         if self.ledger is not None:
             tools = tools + [EXPENSE_TOOL]
+        if self.watchlist is not None:
+            tools = tools + [WATCH_TOOL]
         if self.todos is not None and self.google is None:  # 接了 Google 就用 Google Tasks 当待办清单
             tools = tools + [TODO_TOOL]
         if self.computer is not None and self.computer.available:
@@ -828,6 +856,27 @@ class Toolbox:
                 return ledger.delete(args.get("id") or "last"), False
         except ValueError as e:
             return str(e), True
+        return f"不支持的 action:{action}", True
+
+    def _watch(self, args, on_status):
+        action = args.get("action")
+        watch = self.watchlist
+        try:
+            if action == "add_steam":
+                on_status(f"查 Steam 价格:{args.get('game', '')}")
+                return watch.add_steam(str(args.get("game") or ""), args.get("target")), False
+            if action == "add_page":
+                on_status(f"读网页:{args.get('url', '')}")
+                return watch.add_page(str(args.get("url") or ""), str(args.get("keyword") or ""),
+                                      str(args.get("name") or "")), False
+            if action == "list":
+                return watch.describe(), False
+            if action == "remove":
+                return watch.remove(str(args.get("id") or "")), False
+        except ValueError as e:
+            return str(e), True
+        except Exception as e:
+            return f"网站暂时打不开:{type(e).__name__}: {e}", True
         return f"不支持的 action:{action}", True
 
     def _weather(self, args, on_status):
