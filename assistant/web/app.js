@@ -118,11 +118,17 @@ async function openMini() {
   if (!miniTimer) miniTimer = setInterval(syncMini, 1000);  // 倒计时每秒更新
 }
 let miniTimer = null;
-$("miniBtn").onclick = openMini;
+// ⧉:Windows 上开关“桌面小光球”(只有光球、背景透明);别的系统用浏览器的小窗口
+$("miniBtn").onclick = () => {
+  const orb = settingsState && settingsState.floatorb;
+  if (orb) saveSetting({ floatorb: !orb.on }, 5000);
+  else openMini();
+};
 let lastActivity = "";
 function refreshMode() {
   // 告诉星期五窗口正在录音/朗读,唤醒功能这时暂停,免得听到自己的声音
-  const activity = JSON.stringify({ listening: !!recorder, speaking: !!speaking });
+  const accent = getComputedStyle(document.body).getPropertyValue("--cyan").trim();  // 桌面小光球跟着主题变色
+  const activity = JSON.stringify({ listening: !!recorder, speaking: !!speaking, accent });
   if (activity !== lastActivity) {
     lastActivity = activity;
     api("/api/activity", JSON.parse(activity)).catch(() => {});
@@ -271,6 +277,13 @@ function handle(ev) {
       readerEvent(ev); break;
     case "sleeptimer":
       showSleepTimer(ev); break;
+    case "listen":  // 点了桌面小光球:开始听(在听就停)
+      ensureAudio();
+      if (orbState.onOrbClick) orbState.onOrbClick();
+      break;
+    case "floatorb":
+      if (settingsState && settingsState.floatorb) settingsState.floatorb.on = ev.on;
+      break;
     case "takeover":
       $("takeoverBar").hidden = !ev.active;
       if (ev.active) $("takeoverText").textContent = ev.text || "";
@@ -703,6 +716,8 @@ function fillSettings() {
     $("diaryRow").hidden = false;
     $("setDiary").value = ap.diary_time || "22:30";
   }
+  $("orbRow").hidden = !s.floatorb;
+  if (s.floatorb) $("setOrb").checked = s.floatorb.on;
   const tg = s.telegram;
   if (tg) {
     $("tgToken").placeholder = tg.set ? (tg.bot ? `已连接 @${tg.bot}(要换才填)` : "已设置(要换才填)") : "123456789:AA…";
@@ -1038,6 +1053,7 @@ $("tapoSave").onclick = () => {
   $("tapoPass").value = "";
   saveSetting(change, 8000);
 };
+$("setOrb").onchange = (e) => saveSetting({ floatorb: e.target.checked }, 5000);
 $("setDiary").onchange = (e) => saveSetting({ diary_time: e.target.value });
 $("tgPair").onclick = () => saveSetting({ telegram_pair: true }, 8000);
 $("spotifySave").onclick = () => saveSetting({ spotify_client_id: $("spotifyClient").value.trim() }, 5000);

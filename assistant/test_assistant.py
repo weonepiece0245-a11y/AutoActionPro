@@ -9206,5 +9206,62 @@ class MiniAndCharsetTest(unittest.TestCase):
         self.assertEqual(friday_bills.NAME_CHARS.sub(" ", "电费，水费：").strip(), "电费 水费")
 
 
+
+class FloatOrbTest(TempDirTest):
+    def test_render_is_transparent_outside_the_ball(self):
+        import friday_floatorb
+
+        image = friday_floatorb.render_frame((251, 191, 36), "idle", 0.25)
+        self.assertEqual(image.size, (friday_floatorb.SIZE, friday_floatorb.SIZE))
+        self.assertEqual(image.getpixel((0, 0))[3], 0)  # 角落完全透明
+        center = image.getpixel((friday_floatorb.SIZE // 2, friday_floatorb.SIZE // 2))
+        self.assertEqual(center[3], 255)  # 球心不透明
+        data = friday_floatorb.premultiplied_bgra(image)
+        self.assertEqual(len(data), friday_floatorb.SIZE ** 2 * 4)
+        self.assertEqual(data[:4], b"\x00\x00\x00\x00")  # 透明的点颜色也是 0(先乘过透明度)
+        frames = friday_floatorb.Frames()
+        self.assertIs(frames.get((1, 2, 3), "listening", 5), frames.get((1, 2, 3), "listening", 5 + friday_floatorb.FRAMES))
+        self.assertEqual(friday_floatorb.parse_color("rgb(251, 191, 36)"), (251, 191, 36))
+        self.assertEqual(friday_floatorb.parse_color("#a78bfa"), (167, 139, 250))
+
+    def test_not_windows_and_switch(self):
+        import friday_floatorb
+        import friday_quick
+
+        orb = friday_floatorb.FloatOrb(os.path.join(self.tmp, "orb.json"))
+        if os.name != "nt":
+            self.assertFalse(orb.start())
+        calls = []
+        fake = SimpleNamespace(start=lambda: calls.append("start") or True, stop=lambda: calls.append("stop"), running=False)
+        session = SimpleNamespace(floatorb=fake, hub=SimpleNamespace(broadcast=lambda e: calls.append(e["type"])),
+                                  env_file=os.path.join(self.tmp, ".env"))
+        with mock.patch.dict(os.environ, {"FRIDAY_FLOATORB": "off"}):
+            self.assertIn("出来了", app.floatorb_switch(session, True))
+            self.assertEqual(os.environ["FRIDAY_FLOATORB"], "on")
+            self.assertIn("收起", app.floatorb_switch(session, False))
+        self.assertEqual([c for c in calls if c in ("start", "stop")], ["start", "stop"])
+        self.assertIn("FRIDAY_FLOATORB=off", Path(self.tmp, ".env").read_text())
+        quick = friday_quick.QuickCommands(SimpleNamespace())
+        quick.floatorb = lambda on: f"orb {on}"
+        self.assertEqual(quick.handle("显示小光球"), "orb True")
+        self.assertEqual(quick.handle("收起小光球"), "orb False")
+
+    def test_window_reports_theme_colour(self):
+        ctx = friday_web.WebContext(friday_web.Hub(), queue.Queue(), friday_web.WebApprover(friday_web.Hub()),
+                                    "tok", 0, state=lambda: {})
+        server = friday_web.start_server(ctx)
+        try:
+            ctx.port = server.server_address[1]
+            conn = http.client.HTTPConnection("127.0.0.1", ctx.port, timeout=5)
+            conn.request("POST", "/api/activity", json.dumps({"listening": True, "accent": "rgb(251, 191, 36)"}),
+                         {"X-Friday-Token": "tok", "Content-Type": "application/json"})
+            self.assertEqual(conn.getresponse().status, 200)
+            self.assertEqual(ctx.activity["accent"], "rgb(251, 191, 36)")
+            self.assertTrue(ctx.activity["listening"])
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
 if __name__ == "__main__":
     unittest.main()

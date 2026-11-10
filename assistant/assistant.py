@@ -1370,6 +1370,9 @@ class WebSession:
     brief = None  # 早安简报(friday_brief.MorningBrief)
     clips = None  # 剪贴板历史(friday_clipboard.ClipHistory)
     folder_backup = None  # 文件夹备份(friday_folderbackup.FolderBackup)
+    floatorb = None  # 桌面小光球(friday_floatorb.FloatOrb)
+    floatorb_stopping = False
+    env_file = ".env"
     spotify = None  # Spotify(friday_spotify.Spotify)
     alert_state = None  # friday_alerts.json(下雨、每周报告、早安简报共用)
     discord = None  # Discord 机器人(提醒推到手机)
@@ -1924,6 +1927,7 @@ def settings_state(session, meter=None) -> dict:
         "health": health_state(session),
         "defender": defender_state(session),
         "apps": apps_state(session),
+        "floatorb": {"on": session.floatorb.running} if getattr(session, "floatorb", None) is not None else None,
         "telegram": telegram_state(session) if getattr(session, "quick", None) is not None else None,
         "sleep_timer": session.quick.sleep_timer.state() if getattr(getattr(session, "quick", None), "sleep_timer", None) else None,
         "folder_backup": session.folder_backup.state() if getattr(session, "folder_backup", None) is not None else None,
@@ -2181,6 +2185,8 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         else:
             toolbox.apex = session.quick.apex = None
             done.append("Apex 设定已保存(要填钥匙才会连)")
+    if "floatorb" in payload:
+        done.append(floatorb_switch(session, bool(payload["floatorb"])))
     if "tapo_user" in payload or "tapo_password" in payload:
         user = str(payload.get("tapo_user", os.environ.get("FRIDAY_TAPO_USER", "")) or "").strip()
         password = payload.get("tapo_password")
@@ -3358,6 +3364,56 @@ def start_tapo(session, toolbox, install: bool = False) -> str | None:
     return "第一次用 Tapo,要先在后台安装控制组件(一两分钟),装好会在窗口里说找到了哪些设备。"
 
 
+def start_floatorb(session, ctx, data_dir: str) -> None:
+    """桌面小光球(只有 Windows):齿轮设定或说“显示小光球”打开,右键收起。"""
+    if os.name != "nt":
+        return
+    import friday_floatorb
+    from friday_discord import save_env_value
+
+    def mode() -> str:
+        if ctx.activity.get("listening"):
+            return "listening"
+        if ctx.activity.get("speaking"):
+            return "speaking"
+        return "thinking" if getattr(session, "busy", False) else "idle"
+
+    def closed() -> None:
+        if not getattr(session, "floatorb_stopping", False):  # 右键收起:下次开星期五也不自动出来
+            os.environ["FRIDAY_FLOATORB"] = "off"
+            _quietly(lambda: save_env_value(Path(session.env_file), "FRIDAY_FLOATORB", "off"))
+        session.hub.broadcast({"type": "floatorb", "on": False})
+
+    session.floatorb = friday_floatorb.FloatOrb(
+        os.path.join(data_dir, "friday_floatorb.json"), mode=mode,
+        color=lambda: ctx.activity.get("accent", "#22d3ee"),
+        on_click=lambda: session.hub.broadcast({"type": "listen"}), on_close=closed)
+    session.quick.floatorb = lambda on: floatorb_switch(session, on)
+    if os.environ.get("FRIDAY_FLOATORB", "off") == "on":
+        session.floatorb.start()
+
+
+def floatorb_switch(session, on: bool) -> str:
+    from friday_discord import save_env_value
+
+    orb = getattr(session, "floatorb", None)
+    if orb is None:
+        return "桌面小光球只有 Windows 上有。"
+    os.environ["FRIDAY_FLOATORB"] = "on" if on else "off"
+    _quietly(lambda: save_env_value(Path(session.env_file), "FRIDAY_FLOATORB", "on" if on else "off"))
+    if on:
+        if not orb.start():
+            return "小光球没开起来。"
+        session.hub.broadcast({"type": "floatorb", "on": True})
+        return "小光球出来了:点一下说话,按住可以拖,右键收起。"
+    session.floatorb_stopping = True
+    try:
+        orb.stop()
+    finally:
+        threading.Timer(1.0, lambda: setattr(session, "floatorb_stopping", False)).start()
+    return "小光球收起来了。"
+
+
 def start_heartbeat(events: queue.Queue, data_dir: str, interval: float = 30) -> None:
     """每 30 秒往主循环送一个心跳;主循环处理到了就写心跳文件(主循环卡住,心跳就停,守护会发现)。"""
     def loop() -> None:
@@ -3889,6 +3945,8 @@ def run_web(args) -> None:
     start_reader(session, ctx)
     start_folder_backup(session, toolbox, data_dir)
     start_connected_apps(session, toolbox, ctx, data_dir, ctx.port)
+    session.env_file = args.env_file
+    start_floatorb(session, ctx, data_dir)
     if getattr(toolbox, "screen", None) is not None:
         toolbox.screen.on_change = lambda active, text: takeover_notice(session, active, text)
     if toolbox.google is not None:  # 登录了 Google:笔记同时抄到 Google 文档(在后台抄,不拖慢)

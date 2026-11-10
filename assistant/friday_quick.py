@@ -79,6 +79,7 @@ class QuickCommands:
         self.diary = None  # friday_diary.Diary
         self.shopping = None  # friday_shopping.Shopping
         self.home = None  # friday_tapo.TapoHome
+        self.floatorb = None  # (要不要显示) -> 话:桌面小光球
         self.on_say = None  # 场景里“说”的那一步:马上读出来
         self.silent = False  # 这次的回答已经读过了(场景模式),不用再读
         self.clock = clock
@@ -568,7 +569,15 @@ class QuickCommands:
     SPOTIFY_PLAY = re.compile(r"^(播放|放|来一首|放一首|我想听|想听|帮我放|放首)(一下)?(?P<q>.{1,30})$")
     NOT_SONGS = ("音乐", "歌", "一下", "大", "小", "假", "心", "学", "弃", "松", "屁", "下", "进", "到", "着", "开", "在", "过")
 
+    ORB_ON = re.compile(r"^(显示|打开|开|叫出|拿出)(桌面)?(的)?(小光球|悬浮球|小球|光球)$")
+    ORB_OFF = re.compile(r"^(收起|关掉|关闭|隐藏|藏起|拿掉)(桌面)?(的)?(小光球|悬浮球|小球|光球)$")
+
     def _apps(self, sentence: str) -> str | None:
+        if self.floatorb is not None:
+            if self.ORB_ON.match(sentence):
+                return self.floatorb(True)
+            if self.ORB_OFF.match(sentence):
+                return self.floatorb(False)
         if self.news is not None:
             found = self.NEWS_RE.match(sentence)
             if found:

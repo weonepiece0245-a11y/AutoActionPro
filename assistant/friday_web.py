@@ -539,6 +539,8 @@ def make_handler(ctx: WebContext):
                     for key in ("listening", "speaking"):
                         if key in data:
                             ctx.activity[key] = bool(data[key])
+                    if isinstance(data.get("accent"), str) and len(data["accent"]) <= 40:
+                        ctx.activity["accent"] = data["accent"]  # 主题颜色(桌面小光球跟着变)
                 return self._json(200, {"ok": True})
             if url.path == "/api/settings":
                 if ctx.settings is None or not isinstance(data, dict):
