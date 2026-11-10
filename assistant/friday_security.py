@@ -23,7 +23,7 @@ MAX_LOG_BYTES = 512 * 1024
 # 星期五自己的钥匙和登录文件(文件名)
 SECRET_FILES = {
     ".env", "credentials.json", "google_token.json", "google_login.json", "friday_discord.json",
-    "cloud_key.pem", "cloud_cert.pem", "friday_cloud_state.json", "friday_web.json", "friday.lock",
+    "cloud_key.pem", "cloud_cert.pem", "friday_cloud_state.json", "friday_web.json", "friday.lock", "friday_spotify.json",
 }
 # 各种常见的密码、钥匙、登录资料(文件名或路径里出现就算)
 SECRET_PATTERNS = [

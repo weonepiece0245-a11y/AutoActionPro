@@ -577,8 +577,8 @@ def decode_audio(data: bytes, rate: int = SAMPLE_RATE) -> bytes:
     return proc.stdout
 
 
-def transcribe_audio(data: bytes, engine: str | None = None) -> str | None:
-    """把一整段音频转成文字;没听清时返回 None。engine:google(默认)或 vosk。"""
+def transcribe_audio(data: bytes, engine: str | None = None, language: str = "zh-CN") -> str | None:
+    """把一整段音频转成文字;没听清时返回 None。engine:google(默认)或 vosk(只认中文)。language:口译时听别的语言。"""
     engine = engine or os.environ.get("FRIDAY_STT") or "google"
     pcm = decode_audio(data)
     if engine == "vosk":
@@ -598,7 +598,7 @@ def transcribe_audio(data: bytes, engine: str | None = None) -> str | None:
     except ImportError as e:
         raise VoiceUnavailable(FFMPEG_HINT) from e
     try:
-        return sr.Recognizer().recognize_google(sr.AudioData(pcm, SAMPLE_RATE, 2), language="zh-CN") or None
+        return sr.Recognizer().recognize_google(sr.AudioData(pcm, SAMPLE_RATE, 2), language=language) or None
     except sr.UnknownValueError:
         return None
     except sr.RequestError as e:

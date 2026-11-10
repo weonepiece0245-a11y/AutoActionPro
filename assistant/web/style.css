@@ -269,6 +269,7 @@ body.focus .console { width: min(960px, 100%); justify-self: center; }
 .set-ctl { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
 .set-ctl.bright { margin: 0; width: 220px; }
 .mini-input { font: inherit; font-size: 13px; color: var(--text); background: rgba(0,0,0,.35); border: 1px solid var(--cyan-line); border-radius: 6px; padding: 5px 8px; width: 120px; }
+.mini-input.fb-sources { width: 100%; resize: vertical; margin: 4px 0 8px; font-family: var(--mono); font-size: 12px; }
 .mini-input.short { width: 52px; text-align: center; }
 .mini-input.date { width: 130px; color-scheme: dark; }
 .set-note { font-size: 12px; color: var(--muted); margin: -2px 0 6px; line-height: 1.5; }

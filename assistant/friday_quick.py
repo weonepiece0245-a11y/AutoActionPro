@@ -66,6 +66,13 @@ class QuickCommands:
         self.speed = None  # () -> 开始测网速,马上返回
         self.netwatch = None  # 断网记录(friday_net.NetWatch)
         self.fx = None  # (friday_fx.Rates, friday_fx.FxAlerts)
+        self.news = None  # 新闻(friday_news.News)
+        self.steam = None  # Steam(friday_steam.Steam)
+        self.nvidia = False  # 有没有 NVIDIA 显卡
+        self.folder_backup = None  # (friday_folderbackup.FolderBackup, 马上备份() -> 话)
+        self.interpret_start = None  # (语言代码) -> 话
+        self.reader = None  # (friday_reader.Reader, 开始读(标题, 段落) -> 话)
+        self.spotify = None  # friday_spotify.Spotify
         self.on_say = None  # 场景里“说”的那一步:马上读出来
         self.silent = False  # 这次的回答已经读过了(场景模式),不用再读
         self.clock = clock
@@ -145,6 +152,13 @@ class QuickCommands:
                 reply = str(e)
             if reply:
                 return reply
+        if self.reader is not None:
+            try:
+                reply = self._reader_url(text)
+            except ValueError as e:
+                reply = str(e)
+            if reply:
+                return reply
         if len(text) > 30:
             return None
         sentence = clean(text)
@@ -161,7 +175,8 @@ class QuickCommands:
                 reply = None
             if reply:
                 return reply
-        for check in (self._clipboard, self._habits, self._network, self._money):
+        for check in (self._reader_control, self._interpret, self._clipboard, self._habits, self._network, self._money,
+                      self._apps):
             try:
                 reply = check(sentence)
             except ValueError as e:
@@ -267,6 +282,175 @@ class QuickCommands:
         if "账单" in sentence and len(sentence) <= 14 and not re.search(r"\d|删|记|加|每|改|设", sentence):
             return self.bills.describe()
         return None
+
+    # ---------- 读给我听 ----------
+    URL_RE = re.compile(r"https?://[^\s<>\"'，。]+")
+    READ_WORDS = re.compile(r"(读|念|朗读)")
+
+    def _reader_url(self, text: str) -> str | None:
+        found = self.URL_RE.search(text)
+        if not found or not self.READ_WORDS.search(text.replace(found.group(0), "")):
+            return None
+        import friday_reader
+
+        reader, start = self.reader
+        title, paras = friday_reader.load_url(found.group(0).rstrip(").,;"))
+        return start(title, paras)
+
+    READ_CLIP = re.compile(r"^(把)?(我)?(刚才|刚刚)?(复制的|剪贴板里?的|选中的|拷贝的)(文字|内容|东西|那段)?(读|念|朗读)(给我听|一下|出来|一遍)?$"
+                           r"|^(读|念|朗读)(一下)?(我)?(刚才)?(复制的|剪贴板里?的|选中的)(文字|内容|东西|那段)?(给我听)?$")
+    READ_FOUND = re.compile(r"^(读|念|朗读)(一下)?第(?P<n>\d{1,2}|[一二三四五六七八九十]{1,3})个文件(给我听)?$")
+    READ_PAUSE = re.compile(r"^(暂停|停一下|等一下|先停|暂停朗读|暂停一下)$")
+    READ_RESUME = re.compile(r"^(继续|继续读|接着读|继续念|接着念|继续朗读)$")
+    READ_STOP = re.compile(r"^(停止朗读|别读了|不要读了|不用读了|停止读|不读了|别念了|关掉朗读|停止)$")
+    READ_NEXT = re.compile(r"^(跳过|跳过这段|下一段|跳到下一段)$")
+    READ_BACK = re.compile(r"^(上一段|回到上一段|重读这段|再读一遍这段|这段再读一遍)$")
+    READ_RESTART = re.compile(r"^(从头再读|从头读|重新读|从头开始读)$")
+    READ_SPEED = re.compile(r"^(读|念)?(快|慢)(一点|点|些)$")
+    READ_STATUS = re.compile(r"^(读到哪里了|读到哪了|还有多少|还剩多少)$")
+
+    def _reader_control(self, sentence: str) -> str | None:
+        if self.reader is None:
+            return None
+        reader, start = self.reader
+        found = self.READ_FOUND.match(sentence)
+        if found and getattr(self.toolbox, "found_files", None):
+            import friday_focus
+            import friday_reader
+
+            n = found.group("n")
+            number = int(n) if n.isdigit() else (friday_focus.cn_number(n) or 0)
+            if not 1 <= number <= len(self.toolbox.found_files):
+                return "没有这个编号的文件。"
+            title, paras = friday_reader.load_file(self.toolbox.found_files[number - 1]["path"])
+            return start(title, paras)
+        if self.READ_CLIP.match(sentence):
+            import friday_desktop
+            import friday_reader
+
+            text = friday_desktop.read_clipboard()
+            if not text or not text.strip():
+                return "剪贴板里没有文字。先选中文字按 Ctrl+C,再叫我读。"
+            return start("复制的文字", friday_reader.paragraphs(text))
+        if not reader.active and not (reader.parts and self.READ_RESTART.match(sentence)):
+            return None
+        if self.READ_PAUSE.match(sentence):
+            return reader.pause()
+        if self.READ_RESUME.match(sentence):
+            return reader.resume()
+        if self.READ_STOP.match(sentence):
+            return reader.stop()
+        if self.READ_NEXT.match(sentence):
+            return reader.move(1)
+        if self.READ_BACK.match(sentence):
+            return reader.move(-1 if sentence.startswith(("上一段", "回到")) else 0)
+        if self.READ_RESTART.match(sentence):
+            return reader.restart()
+        found = self.READ_SPEED.match(sentence)
+        if found:
+            return reader.speed(found.group(2) == "快")
+        if self.READ_STATUS.match(sentence):
+            return reader.status()
+        return None
+
+    # ---------- 口译 ----------
+    def _interpret(self, sentence: str) -> str | None:
+        if self.interpret_start is None:
+            return None
+        import friday_interpret
+
+        found = friday_interpret.START_RE.match(sentence)
+        if not found:
+            return None
+        word = found.group("lang") or found.group("lang2")
+        return self.interpret_start(friday_interpret.language_of(word))
+
+    # ---------- 连接的应用 ----------
+    NEWS_RE = re.compile(r"^(今天|最新|最近|现在)?(有)?(什么|啥|哪些)?(?P<topic>马来西亚|大马|本地|国内|国际|世界|国外|科技|财经|经济|股市|体育|娱乐)?"
+                         r"(的)?(新闻|头条|时事)(吗|呢)?$")
+    NEWS_ABOUT = re.compile(r"^(关于|有关)(?P<q>.{1,15}?)的新闻$|^(?P<q2>.{1,15}?)(有什么|的)?最新新闻$")
+    STEAM_RECENT = re.compile(r"^(我)?(最近|这两周|最近两周)(在)?(steam|Steam|STEAM)?(上)?(玩了|玩)(什么|哪些)(游戏)?$"
+                              r"|^(steam|Steam)(最近)?(玩了什么|记录|游戏时间)$")
+    STEAM_FRIENDS = re.compile(r"^(steam|Steam)?(上)?(有)?(哪些|哪个|谁)?(好友|朋友)(在线|在玩什么|在玩)(吗)?$|^(谁|哪些朋友)在(线|玩游戏)$")
+    STEAM_TOP = re.compile(r"^(我)?(玩得?最久|玩最多)的(游戏|是什么游戏)$|^(steam|Steam)(游戏)?(统计|总时间)$")
+    GAME_TIME = re.compile(r"^(我)?(?P<g>[A-Za-z0-9一-鿿 ]{2,24}?)(一共|总共|总的)?(玩了|打了)(多久|多少小时|多少时间|几个小时|几小时)$")
+    GPU_RE = re.compile(r"^(显卡|GPU|gpu|N卡|n卡|英伟达|NVIDIA|nvidia)(的)?(温度|状态|怎么样|多少度|使用率|情况|热不热)(多少)?$")
+    REPLAY_RE = re.compile(r"^(把)?(刚才|刚刚)(那段|那个|那波|的)?(存|保存|录)(下来|起来)$|^(存|保存|录)(一下)?(精彩片段|回放|高光|刚才那段)$"
+                           r"|^(精彩片段|即时回放|即时重放)$")
+    RECORD_RE = re.compile(r"^(开始|停止|结束)(游戏)?(录像|录屏|录制)$")
+    GAME_SHOT_RE = re.compile(r"^(游戏截图|N卡截图|n卡截图|NVIDIA截图|nvidia截图)$")
+    WECHAT_RE = re.compile(r"^(打开|开|切到|切换到|去|回到)(微信|wechat|WeChat|weixin)$")
+    BACKUP_RE = re.compile(r"^(马上|立刻|现在)?(备份|备份一下)(文件夹|重要文件夹|我的文件)$|^(文件夹)?备份(状态|情况|好了没)$|^(马上|立刻|现在)备份$")
+    SPOTIFY_NOW = re.compile(r"^(现在|这首)?(放的是|在放|播放的是|是)?(什么歌|哪首歌|谁的歌)$|^这首歌叫什么$")
+    SPOTIFY_PLAY = re.compile(r"^(播放|放|来一首|放一首|我想听|想听|帮我放|放首)(一下)?(?P<q>.{1,30})$")
+    NOT_SONGS = ("音乐", "歌", "一下", "大", "小", "假", "心", "学", "弃", "松", "屁", "下", "进", "到", "着", "开", "在", "过")
+
+    def _apps(self, sentence: str) -> str | None:
+        if self.news is not None:
+            found = self.NEWS_RE.match(sentence)
+            if found:
+                import friday_news
+
+                topic = friday_news.topic_of(found.group("topic") or "")
+                return self.news.topic(topic) if topic else self.news.today()
+            found = self.NEWS_ABOUT.match(sentence)
+            if found:
+                return self.news.about(found.group("q") or found.group("q2"))
+        if self.steam is not None:
+            if self.STEAM_RECENT.match(sentence):
+                return self.steam.recent()
+            if self.STEAM_FRIENDS.match(sentence):
+                return self.steam.friends()
+            if self.STEAM_TOP.match(sentence):
+                return self.steam.top()
+            found = self.GAME_TIME.match(sentence)
+            if found and found.group("g").strip() not in ("今天", "昨天", "这周", "本周", "游戏", "电脑", "这个星期"):
+                return self.steam.game_time(found.group("g"))
+        if self.nvidia:
+            import friday_nvidia
+
+            if self.GPU_RE.match(sentence):
+                return friday_nvidia.describe(friday_nvidia.status())
+            if self.REPLAY_RE.match(sentence):
+                return friday_nvidia.hotkey("replay")
+            if self.RECORD_RE.match(sentence):
+                return friday_nvidia.hotkey("record")
+            if self.GAME_SHOT_RE.match(sentence):
+                return friday_nvidia.hotkey("screenshot")
+        if self.WECHAT_RE.match(sentence):
+            return self._wechat(sentence.startswith(("切", "回")))
+        if self.folder_backup is not None and self.BACKUP_RE.match(sentence):
+            backup, run_now = self.folder_backup
+            if "状态" in sentence or "情况" in sentence or "好了没" in sentence:
+                return backup.status()
+            return run_now()
+        if self.spotify is not None and self.spotify.connected:
+            if self.SPOTIFY_NOW.match(sentence):
+                return self.spotify.now_playing()
+            found = self.SPOTIFY_PLAY.match(sentence)
+            if found and found.group("q") not in self.NOT_SONGS and not found.group("q").startswith(("音乐", "一首歌")):
+                return self.spotify.play(found.group("q"))
+        return None
+
+    def _wechat(self, switch_first: bool) -> str | None:
+        computer = getattr(self.toolbox, "computer", None)
+        if computer is None or not getattr(computer, "available", False):
+            return None
+        for name in ("微信", "WeChat", "Weixin"):
+            try:
+                result = computer.do("focus_window", name)
+            except Exception:
+                result = ""
+            if result and result.startswith("已切到"):
+                return "已切到微信。"
+        for name in ("微信", "WeChat", "Weixin"):
+            try:
+                result = computer.do("open_app", name)
+            except Exception:
+                continue
+            if result.startswith("已打开"):
+                return "已打开微信。"
+        return None  # 没找到:交给 Claude(它会再想办法)
 
     # ---------- 剪贴板历史 ----------
     CLIP_LIST = re.compile(r"^(看看?|打开)?(我的)?(剪贴板|剪切板)(历史|记录)?$|^(我)?(最近|刚才|之前)?(复制|拷贝)(过|了)?(什么|哪些)(东西)?$"

@@ -7910,5 +7910,416 @@ class AuditRound3Test(TempDirTest):
         self.assertEqual(friday_fx.mentions("100 usd 换 rm"), ["USD", "MYR"])
 
 
+class NvidiaTest(unittest.TestCase):
+    def test_status_and_hotkeys(self):
+        import friday_nvidia
+
+        out = "NVIDIA GeForce RTX 4070, 88, 97, 9830, 12282, 566.36, 195.40, 71\n"
+        gpus = friday_nvidia.status(lambda args: out)
+        self.assertEqual(gpus[0]["temp"], 88.0)
+        text = friday_nvidia.describe(gpus)
+        self.assertIn("RTX 4070", text)
+        self.assertIn("88°C(很热", text)
+        self.assertIn("显存 9.6/12.0 GB", text)
+        pressed = []
+        self.assertIn("精彩片段", friday_nvidia.hotkey("replay", lambda vk, flags: pressed.append((vk, flags))))
+        self.assertEqual(pressed, [(0x12, 0), (0x79, 0), (0x79, 2), (0x12, 2)])
+        clock = [0.0]
+        watch = friday_nvidia.GpuWatch(read=lambda: gpus, clock=lambda: clock[0] + 10_000)
+        self.assertIn("太热", watch.check("老板"))
+        self.assertIsNone(watch.check("老板"))  # 30 分钟内不重复
+        with self.assertRaises(RuntimeError):
+            friday_nvidia.status(lambda args: "")
+
+
+class NewsTest(unittest.TestCase):
+    RSS = """<?xml version="1.0"?><rss><channel>
+      <item><title>大马今天下大雨 - 星洲日报</title><link>https://n/1</link><pubDate>Tue, 10 Nov 2026 02:00:00 GMT</pubDate><source url="x">星洲日报</source></item>
+      <item><title>新的首相讲话 - 东方日报</title><link>https://n/2</link><pubDate>Tue, 10 Nov 2026 03:00:00 GMT</pubDate><source url="x">东方日报</source></item>
+      <item><title>新的首相讲话 - 光华日报</title><link>https://n/3</link><pubDate>Tue, 10 Nov 2026 01:00:00 GMT</pubDate><source url="x">光华日报</source></item>
+    </channel></rss>"""
+
+    def test_headlines_numbering_and_fallback(self):
+        import friday_news
+
+        calls = []
+
+        def fetch(url):
+            calls.append(url)
+            if "CN:zh-Hans" in url and "WORLD" in url:
+                raise OSError("blocked")
+            return self.RSS
+        news = friday_news.News(fetch=fetch)
+        text = news.today()
+        self.assertIn("1. 新的首相讲话(东方日报)", text)
+        self.assertIn("2. 大马今天下大雨(星洲日报)", text)
+        self.assertNotIn("光华日报", text)  # 一样的新闻只留一条
+        self.assertIn("国际新闻", text)  # 中文版连不上,用英文版
+        self.assertEqual(news.item(2)["link"], "https://n/1")
+        self.assertIn("大马今天下大雨", news.brief_line())
+        with self.assertRaises(ValueError):
+            news.item(99)
+
+    def test_quick(self):
+        import friday_news
+        import friday_quick
+
+        quick = friday_quick.QuickCommands(SimpleNamespace())
+        quick.news = friday_news.News(fetch=lambda url: self.RSS)
+        self.assertIn("马来西亚新闻", quick.handle("今天有什么新闻"))
+        self.assertIn("科技新闻", quick.handle("科技新闻"))
+        self.assertIn("关于“股市”的新闻", quick.handle("关于股市的新闻"))
+
+
+class SteamTest(unittest.TestCase):
+    def make(self, responses):
+        import friday_steam
+
+        self.urls = []
+
+        def fetch(url):
+            self.urls.append(url)
+            for key, value in responses.items():
+                if key in url:
+                    return value
+            return {}
+        return friday_steam.Steam(fetch=fetch)
+
+    def test_recent_games_friends(self):
+        steam = self.make({
+            "ResolveVanityURL": {"response": {"success": 1, "steamid": "76561198000000001"}},
+            "GetRecentlyPlayedGames": {"response": {"games": [{"name": "Dota 2", "playtime_2weeks": 600},
+                                                                {"name": "Apex Legends", "playtime_2weeks": 90}]}},
+            "GetOwnedGames": {"response": {"games": [{"name": "Apex Legends", "playtime_forever": 30000, "playtime_2weeks": 90},
+                                                      {"name": "Dota 2", "playtime_forever": 90000}]}},
+            "GetFriendList": {"friendslist": {"friends": [{"steamid": "1"}, {"steamid": "2"}, {"steamid": "3"}]}},
+            "GetPlayerSummaries": {"response": {"players": [
+                {"personaname": "阿明", "personastate": 1, "gameextrainfo": "Dota 2"},
+                {"personaname": "Ali", "personastate": 3}, {"personaname": "睡觉的", "personastate": 0}]}},
+        })
+        with mock.patch.dict(os.environ, {"FRIDAY_STEAM_KEY": "A" * 32, "FRIDAY_STEAM_ID": "boss_vanity"}):
+            self.assertIn("Dota 2 10 小时", steam.recent())
+            self.assertIn("Apex Legends 你一共玩了 500 小时", steam.game_time("apex"))
+            self.assertIsNone(steam.game_time("不存在的游戏"))
+            friends = steam.friends()
+        self.assertIn("阿明(Dota 2)", friends)
+        self.assertIn("Ali(离开)", friends)
+        self.assertNotIn("睡觉的", friends)
+        self.assertEqual(sum("ResolveVanityURL" in u for u in self.urls), 1)  # 只解析一次
+
+    def test_bad_key_does_not_leak(self):
+        import urllib.error
+        import friday_steam
+
+        def boom(*a, **k):
+            raise urllib.error.HTTPError("https://api.steampowered.com/x?key=SECRETKEY", 403, "Forbidden", {}, None)
+        with mock.patch("urllib.request.urlopen", boom):
+            with self.assertRaises(ValueError) as caught:
+                friday_steam.fetch_json("https://api.steampowered.com/x?key=SECRETKEY")
+        self.assertNotIn("SECRETKEY", str(caught.exception))
+        self.assertIsNone(caught.exception.__cause__)
+
+
+class FolderBackupTest(TempDirTest):
+    def setUp(self):
+        super().setUp()
+        self.src = Path(self.tmp, "文档")
+        (self.src / "子").mkdir(parents=True)
+        (self.src / "a.txt").write_text("一")
+        (self.src / "子" / "b.txt").write_text("二")
+        self.dest = Path(self.tmp, "备份盘")
+        self.dest.mkdir()
+        self.now = [1_800_000_000.0]
+
+    def make(self):
+        import friday_folderbackup
+
+        return friday_folderbackup.FolderBackup(os.path.join(self.tmp, "fb.json"), clock=lambda: self.now[0])
+
+    def test_copy_versions_and_never_delete(self):
+        backup = self.make()
+        self.assertIn("设好了", backup.configure([str(self.src)], str(self.dest)))
+        result = backup.run()
+        self.assertEqual((result["copied"], result["updated"]), (2, 0))
+        self.assertEqual((self.dest / "文档" / "子" / "b.txt").read_text(), "二")
+        self.assertEqual(backup.run()["copied"], 0)  # 没改过就不复制
+        (self.src / "a.txt").write_text("一改了")
+        os.utime(self.src / "a.txt", (time.time() + 100,) * 2)
+        (self.src / "子" / "b.txt").unlink()
+        result = backup.run()
+        self.assertEqual(result["updated"], 1)
+        self.assertEqual((self.dest / "文档" / "a.txt").read_text(), "一改了")
+        olds = list((self.dest / "_旧版本").rglob("a.txt"))
+        self.assertEqual(olds[0].read_text(), "一")
+        self.assertTrue((self.dest / "文档" / "子" / "b.txt").exists())  # 原文件删了,备份还在
+
+    def test_ransomware_guard(self):
+        import friday_folderbackup
+
+        for i in range(60):
+            (self.src / f"f{i}.docx").write_text("原来")
+        backup = self.make()
+        backup.configure([str(self.src)], str(self.dest))
+        backup.run()
+        for i in range(60):
+            path = self.src / f"f{i}.docx"
+            path.write_text("加密了!!")
+            os.utime(path, (time.time() + 100,) * 2)
+        result = backup.run()
+        self.assertTrue(result["blocked"])
+        self.assertEqual((self.dest / "文档" / "f1.docx").read_text(), "原来")
+        self.assertFalse(backup.due())  # 停下来等你确认
+        self.assertTrue(backup.run(force=True)["ok"])
+        self.assertFalse(friday_folderbackup.FolderBackup(os.path.join(self.tmp, "fb.json")).blocked)
+
+    def test_bad_settings_and_missing_drive(self):
+        backup = self.make()
+        with self.assertRaises(ValueError):
+            backup.configure([str(self.src)], str(self.src / "里面"))
+        with self.assertRaises(ValueError):
+            backup.configure([str(Path.home())], str(self.dest))
+        with self.assertRaises(ValueError):
+            backup.configure([], str(self.dest))
+        backup.configure([str(self.src)], str(self.dest))
+        with mock.patch("friday_folderbackup.drive_present", lambda dest: False):
+            result = backup.run()
+        self.assertTrue(result["missing"])
+        self.assertFalse(self.dest.joinpath("文档").exists())
+        self.now[0] += 8 * 86400
+        self.assertIn("没备份", backup.overdue_message("老板"))
+        self.assertIsNone(backup.overdue_message("老板"))  # 3 天提醒一次
+
+
+class InterpreterTest(unittest.TestCase):
+    def test_turns_and_languages(self):
+        import friday_interpret
+
+        calls = []
+
+        def translate(text, src, dst):
+            calls.append((text, src, dst))
+            return f"[{dst}]{text}"
+        interp = friday_interpret.Interpreter(translate)
+        self.assertIn("要翻成什么语言", interp.start(None))
+        self.assertIn("马来文", interp.start(friday_interpret.language_of("马来语")))
+        self.assertEqual(interp.stt_order(), ["zh-CN", "ms-MY"])
+        text, voice, direction = interp.process("你好,多少钱?")
+        self.assertEqual((text, voice, direction), ("[马来文]你好,多少钱?", "ms-MY-YasminNeural", "me"))
+        self.assertEqual(interp.stt_order(), ["ms-MY", "zh-CN"])
+        interp.heard = "ms-MY"
+        text, voice, direction = interp.process("Sepuluh ringgit")
+        self.assertEqual((voice, direction, calls[-1][2]), (None, "them", "中文"))
+        self.assertTrue(friday_interpret.STOP_RE.match("结束口译"))
+        self.assertIn("结束", interp.stop())
+        self.assertFalse(interp.active)
+
+    def test_session_routes_through_interpreter(self):
+        import friday_interpret
+
+        hub = friday_web.Hub()
+        seen = []
+        hub.broadcast = seen.append
+        session = app.WebSession(None, SimpleNamespace(), hub, synthesize=None)
+        session.interpreter = friday_interpret.Interpreter(lambda t, s, d: "Hello")
+        session.interpreter.start("en")
+        self.assertEqual(session._ask("你好", source="web"), "Hello")
+        self.assertTrue(any(e.get("type") == "done" and e.get("text") == "Hello" for e in seen))
+        self.assertIn("口译结束", session._ask("结束口译", source="web"))
+
+    def test_quick_start(self):
+        import friday_quick
+
+        quick = friday_quick.QuickCommands(SimpleNamespace())
+        started = []
+        quick.interpret_start = lambda code: started.append(code) or "ok"
+        self.assertEqual(quick.handle("开始口译英文"), "ok")
+        self.assertEqual(quick.handle("口译模式 马来文"), "ok")
+        self.assertEqual(started, ["en", "ms"])
+
+
+class ReaderTest(unittest.TestCase):
+    def test_extract_and_chunks(self):
+        import friday_reader
+
+        page = ("<html><head><title>好文章</title><script>var x=1</script></head><body><nav>首页 登录</nav>"
+                "<article><h1>标题</h1><p>" + "第一句话很长。" * 30 + "</p><p>第二段也有内容,是正文的一部分。</p></article>"
+                "<footer>版权所有</footer></body></html>")
+        title, paras = friday_reader.extract_html(page)
+        self.assertEqual(title, "好文章")
+        self.assertNotIn("版权所有", "".join(paras))
+        self.assertNotIn("var x", "".join(paras))
+        parts = friday_reader.chunks(paras)
+        self.assertTrue(all(len(p) <= friday_reader.CHUNK_CHARS * 2 for p in parts))
+        self.assertGreater(len(parts), 1)
+
+    def test_controls_and_serve(self):
+        import friday_reader
+
+        reader = friday_reader.Reader()
+        events = []
+        reader.on_change = events.append
+        self.assertIn("一共 3 段", reader.start("测试", ["一。", "二。", "三。"]))
+        store = friday_web.AudioStore()
+        first = reader.serve({"action": "chunk", "id": reader.id, "index": 0, "playing": 0}, lambda t: b"mp3", store)
+        self.assertTrue(first["url"].startswith("/audio/"))
+        self.assertEqual(reader.serve({"id": reader.id, "index": 3, "playing": 2}, lambda t: b"x", store), {"done": True, "total": 3})
+        self.assertEqual(reader.pos, 2)
+        self.assertIn("暂停", reader.pause())
+        self.assertEqual(reader.serve({"id": reader.id, "index": 0}, lambda t: b"x", store), {"stop": True})
+        self.assertIn("第 3 段", reader.resume())
+        self.assertIn("第 2 段", reader.move(-1))
+        self.assertIn("1.15", reader.speed(True))
+        self.assertEqual(events[-1]["kind"], "rate")
+        reader.serve({"action": "finished", "id": reader.id}, None, store)
+        self.assertEqual(reader.state, "done")
+        self.assertIn("不读了", reader.restart() and reader.stop())
+
+    def test_files_and_quick(self):
+        import friday_quick
+        import friday_reader
+
+        folder = Path(tempfile.mkdtemp())
+        (folder / "说明.txt").write_text("第一段。\n\n第二段。", encoding="utf-8")
+        title, paras = friday_reader.load_file(folder / "说明.txt")
+        self.assertEqual((title, paras), ("说明", ["第一段。", "第二段。"]))
+        with self.assertRaises(ValueError):
+            friday_reader.load_file(folder / ".env")
+        reader = friday_reader.Reader()
+        quick = friday_quick.QuickCommands(SimpleNamespace(found_files=[{"path": str(folder / "说明.txt")}]))
+        quick.reader = (reader, reader.start)
+        self.assertIn("开始读《说明》", quick.handle("读第1个文件"))
+        self.assertIn("暂停", quick.handle("暂停"))
+        self.assertIn("接着读", quick.handle("继续"))
+        self.assertIn("倍", quick.handle("读快一点"))
+        self.assertIn("不读了", quick.handle("别读了"))
+        with mock.patch("friday_desktop.read_clipboard", lambda: "复制来的一段话。"):
+            self.assertIn("复制的文字", quick.handle("把复制的文字读给我听"))
+        with mock.patch("friday_reader.load_url", lambda url: ("网页", ["内容。"])):
+            self.assertIn("开始读《网页》", quick.handle("帮我读一下这篇 https://example.com/a?b=1"))
+
+    def test_pdf(self):
+        import friday_reader
+
+        try:
+            import pypdf
+        except ImportError:
+            self.skipTest("没有 pypdf")
+        writer = pypdf.PdfWriter()
+        writer.add_blank_page(100, 100)
+        data = io.BytesIO()
+        writer.write(data)
+        with self.assertRaises(ValueError):  # 空白 PDF:没有文字
+            friday_reader.pdf_text(data.getvalue(), "空白.pdf")
+
+
+class SpotifyTest(TempDirTest):
+    def make(self, routes):
+        import friday_spotify
+
+        self.calls = []
+        self.opened = []
+
+        def request(method, url, headers, body=None):
+            self.calls.append((method, url, body))
+            for (m, part), reply in routes.items():
+                if m == method and part in url:
+                    return reply(body) if callable(reply) else reply
+            return 404, {}
+        return friday_spotify.Spotify(self.tmp, 47999, request=request, open_uri=self.opened.append,
+                                      clock=lambda: 1000.0)
+
+    def login(self, spotify):
+        import urllib.parse
+
+        url = spotify.login_url()
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        self.assertEqual(query["code_challenge_method"], ["S256"])
+        self.assertEqual(query["redirect_uri"], ["http://127.0.0.1:47999/spotify/callback"])
+        return spotify.callback({"state": query["state"], "code": ["abc"]})
+
+    def test_login_and_play(self):
+        routes = {
+            ("POST", "/api/token"): (200, {"access_token": "AT", "refresh_token": "RT", "expires_in": 3600}),
+            ("GET", "/search"): (200, {"tracks": {"items": [{"uri": "spotify:track:1", "name": "晴天",
+                                                            "artists": [{"name": "周杰伦"}]}]}}),
+            ("PUT", "/me/player/play"): (204, {}),
+            ("GET", "/currently-playing"): (200, {"is_playing": True, "item": {"name": "晴天", "artists": [{"name": "周杰伦"}]}}),
+        }
+        spotify = self.make(routes)
+        with mock.patch.dict(os.environ, {"FRIDAY_SPOTIFY_CLIENT_ID": "c" * 32}):
+            self.assertIn("连好了", self.login(spotify))
+            self.assertTrue(spotify.connected)
+            self.assertIn("周杰伦的《晴天》", spotify.play("周杰伦 晴天"))
+            self.assertIn("正在放:周杰伦《晴天》", spotify.now_playing())
+            self.assertIn("失效", spotify.callback({"state": ["伪造的"], "code": ["x"]}))
+        self.assertTrue(Path(self.tmp, "friday_spotify.json").exists())
+        import friday_security
+
+        self.assertTrue(friday_security.is_secret_path(Path(self.tmp, "friday_spotify.json")))
+
+    def test_free_account_and_no_device(self):
+        plays = []
+
+        def play(body):
+            plays.append(body)
+            return (404, {"error": {"reason": "NO_ACTIVE_DEVICE"}}) if len(plays) == 1 else (403, {"error": {"reason": "PREMIUM_REQUIRED"}})
+        routes = {
+            ("POST", "/api/token"): (200, {"access_token": "AT", "refresh_token": "RT", "expires_in": 3600}),
+            ("GET", "/search"): (200, {"tracks": {"items": [{"uri": "spotify:track:9", "name": "歌", "artists": []}]}}),
+            ("PUT", "/me/player/play"): play,
+            ("GET", "/me/player/devices"): (200, {"devices": [{"id": "PC", "type": "Computer"}]}),
+        }
+        spotify = self.make(routes)
+        with mock.patch.dict(os.environ, {"FRIDAY_SPOTIFY_CLIENT_ID": "c" * 32}):
+            self.login(spotify)
+            text = spotify.play("歌")
+        self.assertIn("点一下播放", text)
+        self.assertEqual(self.opened, ["spotify:track:9"])
+        self.assertTrue(any("device_id=PC" in url for _, url, _ in self.calls))
+
+    def test_callback_route_needs_no_token(self):
+        ctx = friday_web.WebContext(friday_web.Hub(), queue.Queue(), friday_web.WebApprover(friday_web.Hub()),
+                                    "tok", 0, state=lambda: {})
+        ctx.spotify_callback = lambda query: "好了<script>"
+        server = friday_web.start_server(ctx)
+        try:
+            ctx.port = server.server_address[1]
+            conn = http.client.HTTPConnection("127.0.0.1", ctx.port, timeout=5)
+            conn.request("GET", "/spotify/callback?state=x&code=y")
+            response = conn.getresponse()
+            body = response.read().decode()
+            self.assertEqual(response.status, 200)
+            self.assertIn("好了&lt;script&gt;", body)
+            conn.request("GET", "/api/state")
+            self.assertEqual(conn.getresponse().status, 403)  # 别的还是要口令
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+class AppsQuickTest(unittest.TestCase):
+    def test_wechat_and_nvidia_and_backup(self):
+        import friday_quick
+
+        calls = []
+
+        class Computer:
+            available = True
+
+            def do(self, action, value=""):
+                calls.append((action, value))
+                return "已切到:微信" if action == "focus_window" and value == "微信" else "没有找到"
+        quick = friday_quick.QuickCommands(SimpleNamespace(computer=Computer()))
+        self.assertEqual(quick.handle("切到微信"), "已切到微信。")
+        quick.nvidia = True
+        with mock.patch("friday_nvidia.press", lambda keys, send=None: calls.append(keys)):
+            self.assertIn("精彩片段", quick.handle("刚才那段存下来"))
+            self.assertIn("录像", quick.handle("开始录像"))
+        self.assertIn(("alt", "f10"), calls)
+        quick.folder_backup = (SimpleNamespace(status=lambda: "状态"), lambda: "开始备份")
+        self.assertEqual(quick.handle("马上备份文件夹"), "开始备份")
+        self.assertEqual(quick.handle("备份状态"), "状态")
+
+
 if __name__ == "__main__":
     unittest.main()

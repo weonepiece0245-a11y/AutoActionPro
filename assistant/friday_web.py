@@ -312,6 +312,8 @@ class WebContext:
         self.activity = {"listening": False, "speaking": False}  # 窗口正在录音/朗读(唤醒功能要暂停)
         self.lock = None  # 窗口锁(friday_locks.WindowLock);锁着时只能解锁
         self.uploads: dict[str, tuple] = {}  # 贴进来、拖进来的文件:id -> (文件名, 类型, 内容, 时间)
+        self.reader = None  # 读给我听(friday_reader.Reader)
+        self.spotify_callback: Callable[[dict], str] | None = None  # Spotify 登录跳回来
 
     def locked(self) -> bool:
         return self.lock is not None and self.lock.locked
@@ -390,6 +392,14 @@ def make_handler(ctx: WebContext):
                 except OSError:
                     return self._send(404, b"not found", "text/plain")
                 return self._send(200, body, content_type)
+            if url.path == "/spotify/callback":  # Spotify 登录完跳回来(浏览器带不了口令;靠 state 防伪造)
+                import html as html_module
+
+                page = ctx.spotify_callback(query) if ctx.spotify_callback else "星期五现在没有在等 Spotify 登录。"
+                body = ("<!doctype html><meta charset='utf-8'><title>星期五</title>"
+                        f"<p style='font:16px sans-serif;padding:2em'>{html_module.escape(page)}</p>").encode()
+                return self._send(200, body, "text/html; charset=utf-8",
+                                  {"Content-Security-Policy": "default-src 'none'", "Referrer-Policy": "no-referrer"})
             if not self._token_ok(query):
                 return self._send(403, b"forbidden", "text/plain")
             if ctx.locked():  # 锁着:什么内容都不给看
@@ -538,6 +548,10 @@ def make_handler(ctx: WebContext):
                 except Exception as e:
                     return self._json(500, {"error": f"保存失败:{e}"})
                 return self._json(400 if result.get("error") else 200, result)
+            if url.path == "/api/reader":  # 读给我听:窗口要下一段的声音
+                if ctx.reader is None:
+                    return self._json(200, {"stop": True})
+                return self._json(200, ctx.reader.serve(data, ctx.synthesize, ctx.audio))
             if url.path == "/api/speak":
                 text = str(data.get("text") or "").strip()
                 audio = ctx.synthesize(text) if (ctx.synthesize and text) else None

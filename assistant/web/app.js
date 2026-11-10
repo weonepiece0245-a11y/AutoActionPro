@@ -203,6 +203,8 @@ function handle(ev) {
       addLine(ev.text, "reminder"); beep(880, 0.15); loadState(); break;
     case "focus":
       showFocus(ev); break;
+    case "reader":
+      readerEvent(ev); break;
     case "approval":
       showApproval(ev); break;
     case "approval_done":
@@ -589,6 +591,27 @@ function fillSettings() {
     const dl = hl.downloads;
     $("downloadsNote").textContent = dl ? `下载文件夹:${dl.files} 个文件,${dl.gb}GB${dl.messy ? " ⚠ 有点乱" : ""}` : "下载文件夹";
   }
+  const ap = s.apps;
+  $("appsGroup").hidden = !ap;
+  if (ap) {
+    $("steamKey").placeholder = ap.steam_key ? `已设置 ${ap.steam_key}(要换才填)` : "32 位";
+    if (document.activeElement !== $("steamId")) $("steamId").value = ap.steam_id || "";
+    if (document.activeElement !== $("spotifyClient")) $("spotifyClient").value = ap.spotify_client || "";
+    $("spotifyNote").textContent = ap.spotify_connected
+      ? "✓ Spotify 已连好:可以说“放周杰伦的晴天”“放我的歌单 开车”“现在放的是什么歌”。"
+      : `在 developer.spotify.com/dashboard 建一个应用(免费),Redirect URI 填 ${ap.spotify_redirect},勾 Web API,把 Client ID 填在上面,再点“登录 Spotify”。只有 Premium 账号能直接播放。`;
+    $("spotifyLogin").textContent = ap.spotify_connected ? "断开" : "登录 Spotify";
+    $("nvidiaNote").hidden = !ap.nvidia;
+  }
+  const fb = s.folder_backup;
+  $("fbGroup").hidden = !fb;
+  if (fb) {
+    if (document.activeElement !== $("fbSources")) $("fbSources").value = (fb.sources || []).join("\n");
+    if (document.activeElement !== $("fbDest")) $("fbDest").value = fb.dest || "";
+    $("fbStatus").textContent = fb.last || "";
+    $("fbRun").disabled = !!fb.running;
+    $("fbForce").hidden = !fb.blocked;
+  }
   const cb = s.clipboard;
   $("clipRow").hidden = !cb;
   if (cb) { $("setClip").checked = cb.enabled; $("clipClear").textContent = `清空(${cb.count} 段)`; }
@@ -870,6 +893,24 @@ $("photoSort").onclick = () => {
   if (!confirm(`把${folder ? "“" + folder + "”" : "“图片”文件夹"}最上层的照片和视频,按拍摄月份分进“2026-11”这样的子文件夹?整理错了可以撤销。`)) return;
   saveSetting({ sort_photos: folder }, 6000);
 };
+$("steamSave").onclick = () => {
+  const change = { steam_id: $("steamId").value.trim() };
+  if ($("steamKey").value.trim()) change.steam_key = $("steamKey").value.trim();
+  $("steamKey").value = "";
+  saveSetting(change, 6000);
+};
+$("spotifySave").onclick = () => saveSetting({ spotify_client_id: $("spotifyClient").value.trim() }, 5000);
+$("spotifyLogin").onclick = () => {
+  const connected = settingsState && settingsState.apps && settingsState.apps.spotify_connected;
+  if (connected) { if (confirm("断开 Spotify?")) saveSetting({ spotify_logout: true }); }
+  else saveSetting({ spotify_login: true }, 6000);
+};
+$("fbSave").onclick = () => saveSetting({ folder_backup_set: {
+  sources: $("fbSources").value.split("\n").map((x) => x.trim()).filter(Boolean), dest: $("fbDest").value.trim() } }, 6000);
+$("fbRun").onclick = () => saveSetting({ folder_backup_run: true }, 5000);
+$("fbForce").onclick = () => {
+  if (confirm("确定这些文件是你自己改的(不是中了病毒)?照样备份会把改过的文件存进备份,旧的那份移到“_旧版本”里。")) saveSetting({ folder_backup_force: true }, 5000);
+};
 $("setClip").onchange = (e) => saveSetting({ clipboard: e.target.checked });
 $("clipClear").onclick = () => { if (confirm("清空剪贴板历史?")) saveSetting({ clipboard_clear: true }); };
 $("virusQuick").onclick = () => saveSetting({ virus_scan: "quick" }, 5000);
@@ -998,6 +1039,8 @@ $("powerBtn").onclick = async () => {
 let audioCtx = null;
 let analyser = null;
 let speaking = false;
+let reader = null;  // 读给我听:{id, rate, next, total, queue, fetching, started, playing}
+let readerPlaying = false;
 const audioEl = new Audio();
 function ensureAudio() {
   if (audioCtx) { audioCtx.resume(); return audioCtx; }
@@ -1030,12 +1073,14 @@ let ignoreTurn = -1;  // 被打断的那次回答,后面陆续到的语音也不
 let levelLoop = false;
 function enqueueAudio(url, turn) {
   if (!speakOn) return;
+  if (readerPlaying) stopReaderLocal();  // 有新的话要说:先停下朗读(说“继续”接着读)
   if (turn !== undefined && turn <= ignoreTurn) return;
   if (turn !== undefined && turn !== audioTurn) { stopSpeaking(); audioTurn = turn; }
   audioQueue.push(url);
   if (!speaking) playNext();
 }
 function stopSpeaking() {
+  if (reader || readerPlaying) stopReaderLocal();
   stopBargeWatch();
   if (audioTurn !== null) ignoreTurn = Math.max(ignoreTurn, audioTurn);
   audioQueue.length = 0;
@@ -1060,7 +1105,84 @@ function playNext() {
     loop();
   }).catch(() => { audioQueue.length = 0; speaking = false; refreshMode(); toast("点一下页面,才能播放声音"); });
 }
-audioEl.onended = audioEl.onerror = () => { if (speaking) playNext(); };
+audioEl.onended = audioEl.onerror = () => { if (readerPlaying) readerPlayNext(); else if (speaking) playNext(); };
+
+// ---------- 读给我听:一段一段向星期五要声音,播完一段接下一段 ----------
+function readerEvent(ev) {
+  if (ev.kind === "rate") {
+    if (reader && reader.id === ev.id) { reader.rate = ev.rate; if (readerPlaying) audioEl.playbackRate = ev.rate; }
+    return;
+  }
+  if (ev.state === "reading") {
+    stopReaderLocal();
+    reader = { id: ev.id, rate: ev.rate || 1, next: ev.index || 0, total: ev.total || 0, queue: [], fetching: false,
+               started: false, playing: ev.index || 0 };
+    tryStartReader();
+  } else if (reader && reader.id === ev.id) {
+    stopReaderLocal();
+  }
+}
+function stopReaderLocal() {
+  if (readerPlaying) {
+    readerPlaying = false;
+    audioEl.pause();
+    audioEl.playbackRate = 1;
+    speaking = false; orbState.level = 0; stopBargeWatch(); refreshMode();
+  }
+  reader = null;
+}
+function tryStartReader() {
+  const r0 = reader;
+  if (!r0 || r0.started) return;
+  if (busy || speaking || recorder) { setTimeout(tryStartReader, 600); return; }  // 等她先把话说完
+  if (!speakOn) { toast("朗读开关关着,打开下面的喇叭按钮才听得到", 4000); reader = null; return; }
+  r0.started = true;
+  readerFill();
+}
+async function readerFill() {
+  const r0 = reader;
+  if (!r0 || !r0.started || r0.fetching || r0.next >= r0.total || r0.queue.length >= 2) return;
+  r0.fetching = true;
+  const index = r0.next;
+  const r = await api("/api/reader", { action: "chunk", id: r0.id, index, playing: r0.playing }).catch(() => null);
+  r0.fetching = false;
+  if (reader !== r0) return;
+  if (!r || r.stop) { stopReaderLocal(); return; }
+  r0.next = r.done ? r0.total : index + 1;
+  if (r.url) r0.queue.push({ url: r.url, index });
+  if (!readerPlaying) readerPlayNext();
+  readerFill();
+}
+function readerPlayNext() {
+  const r0 = reader;
+  if (!r0) return;
+  const item = r0.queue.shift();
+  if (!item) {
+    readerPlaying = false; speaking = false; orbState.level = 0; stopBargeWatch(); refreshMode();
+    if (r0.next >= r0.total && !r0.fetching) {  // 读完了
+      api("/api/reader", { action: "finished", id: r0.id }).catch(() => {});
+      reader = null;
+    }
+    return;
+  }
+  r0.playing = item.index;
+  ensureAudio();
+  readerPlaying = true; speaking = true; refreshMode();
+  audioEl.src = `${item.url}?t=${encodeURIComponent(token)}`;
+  audioEl.playbackRate = r0.rate;
+  audioEl.play().then(() => {
+    startBargeWatch();  // 读的时候直接开口(“暂停”“跳过”)就会停下来听
+    if (levelLoop) return;
+    levelLoop = true;
+    const loop = () => {
+      if (!speaking) { levelLoop = false; return; }
+      orbState.level = Math.min(1, rms(analyser) * 4.5);
+      requestAnimationFrame(loop);
+    };
+    loop();
+  }).catch(() => { stopReaderLocal(); toast("点一下页面,才能播放声音"); });
+  readerFill();
+}
 function beep(freq, dur) {
   if (!audioCtx) return;
   const o = audioCtx.createOscillator();

@@ -1183,6 +1183,9 @@ class WebSession:
                       + ("" if text else "(没写要做什么:简单说说内容;是收据就记账)"))
         if show_user:
             hub.broadcast({"type": "user", "text": text, "source": source})
+        interpreter = getattr(self, "interpreter", None)
+        if interpreter is not None and interpreter.active and source in ("web", "voice") and not blocks and not prefix:
+            return self._interpret(text, source)
         quick = self._quick_reply(text) if source != "task" and not prefix and not blocks else None
         if quick:
             hub.broadcast({"type": "status", "text": "⚡ 电脑上直接办好了,没有问 Claude(不花钱)"})
@@ -1233,6 +1236,46 @@ class WebSession:
             stream.finish()
         return result
 
+    def _interpret(self, text: str, source: str) -> str | None:
+        """口译模式:不问平常的星期五,直接翻译,用对方的语言(或中文)读出来。"""
+        import friday_interpret
+        import friday_quick
+
+        hub = self.hub
+        if friday_interpret.STOP_RE.match(friday_quick.clean(text)):
+            reply = self.interpreter.stop()
+            hub.broadcast({"type": "delta", "text": reply})
+            stream = self._new_stream()
+            if stream is not None:
+                stream.feed(reply)
+            hub.broadcast({"type": "done", "text": reply, "source": source,
+                           "turn": self._turn if stream is not None else None})
+            if stream is not None:
+                stream.finish()
+            return reply
+        hub.broadcast({"type": "thinking", "source": source})
+        try:
+            translation, voice, direction = self.interpreter.process(text)
+        except Exception as e:  # noqa: BLE001
+            hub.broadcast({"type": "error", "text": f"这句没翻译成:{type(e).__name__}"})
+            return None
+        if not translation:
+            hub.broadcast({"type": "error", "text": "这句没翻译出来,再说一次?"})
+            return None
+        name = friday_interpret.LANGS[self.interpreter.target][0]
+        hub.broadcast({"type": "status", "text": f"🌐 口译:{'中文 → ' + name if direction == 'me' else name + ' → 中文'}"})
+        hub.broadcast({"type": "delta", "text": translation})
+        stream = self._new_stream(voice)
+        if stream is not None:
+            stream.feed(translation)
+        hub.broadcast({"type": "done", "text": translation, "source": source,
+                       "turn": self._turn if stream is not None else None})
+        if stream is not None:
+            stream.finish()
+        return translation
+
+    interpreter = None  # 口译模式(friday_interpret.Interpreter)
+    reader = None  # 读给我听(friday_reader.Reader)
     quick = None  # 简单指令(friday_quick.QuickCommands),run_web 设置
     _alerted: dict = {}
 
@@ -1269,8 +1312,8 @@ class WebSession:
             stream.feed(text)
             stream.finish()
 
-    def _new_stream(self):
-        """每次回答一个新的朗读流;上一次还没读完的就不读了。"""
+    def _new_stream(self, voice: str | None = None):
+        """每次回答一个新的朗读流;上一次还没读完的就不读了。voice:换一个声音读(口译时读外语)。"""
         import friday_web
 
         if self._stream is not None:
@@ -1278,6 +1321,10 @@ class WebSession:
             self._stream = None
         if self.synthesize is None or self.hub_audio is None:
             return None
+        synthesize = self.synthesize
+        if voice:
+            base = self.synthesize
+            synthesize = lambda text: base(text, voice)  # noqa: E731
         self._turn += 1
         turn = self._turn
 
@@ -1285,7 +1332,7 @@ class WebSession:
             self.hub.broadcast({"type": "audio", "url": f"/audio/{self.hub_audio.put(audio)}.mp3", "turn": turn})
 
         self._stream = friday_web.SpeechStream(
-            self.synthesize, publish,
+            synthesize, publish,
             on_end=lambda: self.hub.broadcast({"type": "audio_end", "turn": turn}))
         return self._stream
 
@@ -1311,6 +1358,8 @@ class WebSession:
     focus = None  # 专注模式(friday_focus.Focus)
     brief = None  # 早安简报(friday_brief.MorningBrief)
     clips = None  # 剪贴板历史(friday_clipboard.ClipHistory)
+    folder_backup = None  # 文件夹备份(friday_folderbackup.FolderBackup)
+    spotify = None  # Spotify(friday_spotify.Spotify)
     alert_state = None  # friday_alerts.json(下雨、每周报告、早安简报共用)
     discord = None  # Discord 机器人(提醒推到手机)
     cloud = None  # 云端后备的连接(friday_cloud.CloudClient)
@@ -1823,6 +1872,8 @@ def settings_state(session, meter=None) -> dict:
         "key_expires": os.environ.get("FRIDAY_KEY_EXPIRES", "").strip(),
         "health": health_state(session),
         "defender": defender_state(session),
+        "apps": apps_state(session),
+        "folder_backup": session.folder_backup.state() if getattr(session, "folder_backup", None) is not None else None,
         "focus": session.focus.state() if getattr(session, "focus", None) is not None else None,
         "brief": __import__("friday_brief").enabled() if getattr(session, "brief", None) is not None else None,
         "clipboard": {"enabled": __import__("friday_clipboard").enabled(), "count": len(session.clips.items)}
@@ -1992,6 +2043,53 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         done.append("会记住最近复制的文字(密码不记)" if on else "不再记剪贴板历史")
     if payload.get("clipboard_clear") and getattr(session, "clips", None) is not None:
         done.append(session.clips.clear())
+    if "steam_key" in payload or "steam_id" in payload:
+        import friday_steam
+
+        for field, name in (("steam_key", "FRIDAY_STEAM_KEY"), ("steam_id", "FRIDAY_STEAM_ID")):
+            if field in payload:
+                value = str(payload[field] or "").strip()
+                if any(c in value for c in "\n\r=") or len(value) > 200:
+                    return {"error": "格式不对"}
+                if field == "steam_key" and value and not re.fullmatch(r"[0-9A-Fa-f]{32}", value):
+                    return {"error": "Steam 网页 API 钥匙是 32 个英文字母和数字,再复制一次"}
+                save_env_value(env, name, value)
+                os.environ[name] = value
+        if friday_steam.configured():
+            toolbox.steam = session.quick.steam = friday_steam.Steam()
+            try:
+                done.append("Steam 连好了:" + toolbox.steam.recent())
+            except ValueError as e:
+                done.append(f"Steam 设好了,但现在读不到:{e}")
+        else:
+            toolbox.steam = session.quick.steam = None
+            done.append("Steam 设定已保存(钥匙和个人资料都填了才会连)")
+    if "spotify_client_id" in payload:
+        value = str(payload["spotify_client_id"] or "").strip()
+        if value and not re.fullmatch(r"[0-9a-fA-F]{32}", value):
+            return {"error": "Spotify 的 Client ID 是 32 个英文字母和数字,再复制一次"}
+        save_env_value(env, "FRIDAY_SPOTIFY_CLIENT_ID", value)
+        os.environ["FRIDAY_SPOTIFY_CLIENT_ID"] = value
+        done.append("Spotify Client ID 已保存,接着点“登录 Spotify”")
+    if payload.get("spotify_login") and getattr(session, "spotify", None) is not None:
+        import webbrowser
+
+        try:
+            webbrowser.open(session.spotify.login_url())
+        except Exception as e:  # noqa: BLE001
+            return {"error": str(e)}
+        done.append("已经在浏览器打开 Spotify 登录页,登录后按“同意”就好")
+    if payload.get("spotify_logout") and getattr(session, "spotify", None) is not None:
+        done.append(session.spotify.logout())
+    if "folder_backup_set" in payload and getattr(session, "folder_backup", None) is not None:
+        conf = payload["folder_backup_set"] or {}
+        try:
+            done.append(session.folder_backup.configure([str(x) for x in conf.get("sources") or []],
+                                                        str(conf.get("dest") or "")))
+        except ValueError as e:
+            return {"error": str(e)}
+    if (payload.get("folder_backup_run") or payload.get("folder_backup_force")) and getattr(session, "folder_backup_run", None):
+        done.append(session.folder_backup_run(force=bool(payload.get("folder_backup_force"))))
     if payload.get("virus_scan") in ("quick", "full") and getattr(session, "defender", None) is not None:
         done.append(start_virus_scan(session, payload["virus_scan"]))
     if payload.get("tidy_downloads") or payload.get("undo_tidy"):
@@ -2568,6 +2666,23 @@ def start_virus_scan(session, kind: str) -> str:
     return session.defender.start(kind, done, _call_me(session))
 
 
+def apps_state(session) -> dict | None:
+    """齿轮设定 → 连接的应用(钥匙只显示最后 4 位)。"""
+    if getattr(session, "spotify", None) is None:
+        return None
+    import friday_spotify
+
+    key = os.environ.get("FRIDAY_STEAM_KEY", "").strip()
+    return {
+        "steam_key": ("…" + key[-4:]) if key else "",
+        "steam_id": os.environ.get("FRIDAY_STEAM_ID", "").strip(),
+        "spotify_client": friday_spotify.client_id(),
+        "spotify_connected": session.spotify.connected,
+        "spotify_redirect": session.spotify.redirect,
+        "nvidia": bool(getattr(session.quick, "nvidia", False)),
+    }
+
+
 def defender_state(session) -> dict | None:
     defender = getattr(session, "defender", None)
     return defender.state() if defender is not None and os.name == "nt" else None
@@ -2683,10 +2798,16 @@ def make_brief(session, toolbox, data_dir: str):
             ai = meter.between(day, day)["usd"] * meter.rate
         return friday_brief.spending_line(ledger.entries if ledger is not None else [], ai, now)
 
+    def news(now):
+        source = getattr(toolbox, "news", None)
+        if source is None or os.environ.get("FRIDAY_BRIEF_NEWS", "on") == "off":
+            return None
+        return source.brief_line()
+
     state = getattr(session, "alert_state", None)
     if state is None:
         state = friday_alerts.AlertState(os.path.join(data_dir, "friday_alerts.json"))
-    return friday_brief.MorningBrief(state, [weather, events, reminders, todos, dates, bills, mail, spending])
+    return friday_brief.MorningBrief(state, [weather, events, reminders, todos, dates, bills, mail, spending, news])
 
 
 def brief_now(session) -> str:
@@ -2772,6 +2893,139 @@ def start_fx(session, toolbox, data_dir: str, interval: float = 3600) -> None:
             time.sleep(interval)
 
     threading.Thread(target=loop, daemon=True, name="friday-fx").start()
+
+
+def start_interpreter(session, ctx) -> None:
+    """口译模式:翻译用 Haiku;听声音时先试预计的那个语言。"""
+    import friday_interpret
+    import friday_router
+
+    assistant = session.assistant
+    if assistant is None or getattr(assistant, "client", None) is None:
+        return
+    session.interpreter = friday_interpret.Interpreter(friday_interpret.haiku_translator(
+        assistant.client, friday_router.HAIKU, getattr(assistant, "on_usage", None)))
+    base = ctx.transcribe
+    if base is not None:
+        def transcribe(audio: bytes):
+            interp = session.interpreter
+            if not interp.active:
+                return base(audio)
+            for language in interp.stt_order():
+                try:
+                    heard = base(audio, language=language)
+                except TypeError:  # 旧的识别函数不认 language
+                    heard = base(audio)
+                if heard:
+                    interp.heard = language
+                    return heard
+            return None
+
+        ctx.transcribe = transcribe
+
+    def start(code):
+        return session.interpreter.start(code)
+
+    session.quick.interpret_start = start
+    session.assistant.toolbox.interpret = (start, session.interpreter.stop)
+
+
+def start_reader(session, ctx) -> None:
+    """读给我听:窗口一段一段来拿声音。"""
+    import friday_reader
+
+    reader = friday_reader.Reader()
+    reader.on_change = session.hub.broadcast
+    ctx.reader = session.reader = reader
+
+    def start(title: str, paras: list[str]) -> str:
+        if not session.hub.connected:
+            return "朗读要在电脑上的星期五窗口里听,现在窗口没开。"
+        session.quick.silent = True  # 不用再把“开始读”念一遍,直接开始读
+        return reader.start(title, paras)
+
+    session.quick.reader = (reader, start)
+    session.assistant.toolbox.reader = (reader, start)
+
+
+def start_folder_backup(session, toolbox, data_dir: str, interval: float = 600) -> None:
+    """重要文件夹每天自动备份;太久没备份(硬盘没插)会提醒。"""
+    import friday_folderbackup
+
+    backup = friday_folderbackup.FolderBackup(os.path.join(data_dir, "friday_folderbackup.json"))
+    session.folder_backup = backup
+
+    def run(force: bool = False, quiet: bool = False) -> None:
+        result = backup.run(force=force)
+        if result.get("blocked"):
+            announce(session, result["message"], "🛡", "文件夹备份停下来了,详细在窗口里", urgent=True)
+        elif result.get("ok") and (result.get("copied") or result.get("updated") or not quiet):
+            announce(session, result["message"], "💾", "文件夹备份好了")
+        elif not result.get("ok") and not quiet and not result.get("missing"):
+            announce(session, result["message"], "💾", "文件夹备份没做成")
+        elif result.get("missing") and not quiet:
+            announce(session, result["message"], "💾", result["message"])
+
+    def run_now(force: bool = False) -> str:
+        if not backup.ready():
+            return backup.status()
+        if backup.running:
+            return "正在备份中,等一下。"
+        threading.Thread(target=lambda: _quietly(lambda: run(force)), daemon=True, name="friday-folder-backup").start()
+        return "开始备份重要文件夹了,好了告诉你。"
+
+    session.quick.folder_backup = (backup, run_now)
+    toolbox.folder_backup = (backup, run_now)
+    session.folder_backup_run = run_now
+
+    def loop() -> None:
+        time.sleep(300)
+        while True:
+            def check() -> None:
+                if backup.due():
+                    run(quiet=True)
+                text = backup.overdue_message(_call_me(session))
+                if text:
+                    announce(session, text, "💾", text)
+
+            _quietly(check)
+            time.sleep(interval)
+
+    threading.Thread(target=loop, daemon=True, name="friday-folder-backup-daily").start()
+
+
+def start_connected_apps(session, toolbox, ctx, data_dir: str, port: int) -> None:
+    """连接的应用:新闻、Steam、NVIDIA、Spotify。"""
+    import friday_news
+    import friday_nvidia
+    import friday_spotify
+    import friday_steam
+
+    toolbox.news = session.quick.news = friday_news.News()
+    if friday_steam.configured():
+        toolbox.steam = session.quick.steam = friday_steam.Steam()
+    if os.name == "nt" and friday_nvidia.find_smi() is not None:
+        toolbox.nvidia = session.quick.nvidia = True
+        watch = friday_nvidia.GpuWatch()
+
+        def gpu_loop() -> None:
+            time.sleep(120)
+            while True:
+                _quietly(lambda: [say_here(session, text, "🌡") for text in [watch.check(_call_me(session))] if text])
+                time.sleep(60)
+
+        threading.Thread(target=gpu_loop, daemon=True, name="friday-gpu").start()
+    spotify = friday_spotify.Spotify(data_dir, port)
+    session.spotify = toolbox.spotify = session.quick.spotify = spotify
+
+    def callback(query: dict) -> str:
+        text = spotify.callback(query)
+        if spotify.connected:
+            toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+            session.hub.broadcast({"type": "status", "text": "🎵 Spotify 连好了"})
+        return text
+
+    ctx.spotify_callback = callback
 
 
 def start_heartbeat(events: queue.Queue, data_dir: str, interval: float = 30) -> None:
@@ -3301,6 +3555,10 @@ def run_web(args) -> None:
     toolbox.habits = session.quick.habits = friday_habits.Habits(os.path.join(data_dir, "friday_habits.json"))
     start_network(session, toolbox, data_dir)
     start_fx(session, toolbox, data_dir)
+    start_interpreter(session, ctx)
+    start_reader(session, ctx)
+    start_folder_backup(session, toolbox, data_dir)
+    start_connected_apps(session, toolbox, ctx, data_dir, ctx.port)
     if toolbox.google is not None:  # 登录了 Google:笔记同时抄到 Google 文档(在后台抄,不拖慢)
         append = friday_notes.docs_sync(toolbox.google, toolbox.notes)
         toolbox.notes.sync = lambda line: threading.Thread(target=lambda: _quietly(lambda: append(line)),
