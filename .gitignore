@@ -28,6 +28,7 @@ assistant/friday_todos.json*
 assistant/friday_ledger.json*
 assistant/friday_watch.json*
 assistant/friday_mailwatch.json*
+assistant/friday_memtidy.json
 assistant/friday_alerts.json
 # Google 授权文件(含密钥,绝对不能提交)
 assistant/credentials.json

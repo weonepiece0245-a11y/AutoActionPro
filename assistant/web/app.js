@@ -544,6 +544,27 @@ function fillSettings() {
     const dl = hl.downloads;
     $("downloadsNote").textContent = dl ? `下载文件夹:${dl.files} 个文件,${dl.gb}GB${dl.messy ? " ⚠ 有点乱" : ""}` : "下载文件夹";
   }
+  const mt = s.memtidy;
+  $("memtidyGroup").hidden = !mt;
+  if (mt) {
+    const list = $("memtidyList");
+    list.replaceChildren();
+    for (const p of mt.proposals) {
+      const row = document.createElement("label");
+      row.className = "tidy-item";
+      const box = document.createElement("input");
+      box.type = "checkbox"; box.checked = true; box.value = p.id;
+      const text = document.createElement("span");
+      if (p.kind === "merge") text.textContent = `合并:${p.from.join(" + ")} → “${p.text}”`;
+      else if (p.kind === "outdated") text.textContent = `删掉(可能过时):“${p.text}” —— ${p.reason}`;
+      else text.textContent = `换分类:“${p.text}” → ${p.category}`;
+      row.append(box, text);
+      list.append(row);
+    }
+    $("memtidyActions").hidden = !mt.proposals.length;
+    $("memtidyNote").textContent = mt.proposals.length ? "这些是建议,打勾的才会改:"
+      : `每周用最便宜的 Haiku 帮星期五整理一次记忆(现在 ${mt.facts} 条),只给建议,你勾了才改` + (mt.last_run ? `。上次:${mt.last_run}` : "");
+  }
   const sec = s.security;
   $("securityGroup").hidden = !sec;
   if (sec) {
@@ -726,6 +747,16 @@ $("pinSave").onclick = async () => {
     for (const id of ["pinOld", "pinNew", "pinNew2"]) $(id).value = "";
 };
 $("setLockMinutes").onchange = (e) => saveSetting({ lock_minutes: Number(e.target.value) });
+$("memtidyRun").onclick = async () => {
+  const btn = $("memtidyRun"); btn.disabled = true; btn.textContent = "整理中…";
+  await saveSetting({ memtidy_run: true }, 5000);
+  btn.disabled = false; btn.textContent = "现在整理";
+};
+$("memtidyApply").onclick = () => {
+  const ids = [...document.querySelectorAll("#memtidyList input:checked")].map((b) => Number(b.value));
+  saveSetting({ memtidy_apply: ids }, 5000);
+};
+$("memtidyDismiss").onclick = () => saveSetting({ memtidy_dismiss: true });
 $("discordPair").onclick = () => saveSetting({ discord_pair: true }, 8000);
 $("setRain").onchange = (e) => saveSetting({ rain_alert: e.target.value });
 $("setEventLead").onchange = (e) => saveSetting({ event_lead: Number(e.target.value) });

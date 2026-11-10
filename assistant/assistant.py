@@ -1278,6 +1278,7 @@ class WebSession:
     window_lock = None  # 窗口锁(friday_locks.WindowLock)
     pending_totp = None  # 正在设置的验证器密钥(确认前不保存)
     downloads_dir = None  # 下载文件夹(问过 Windows 就记住)
+    memtidy = None  # 记忆整理(friday_memtidy.MemoryTidy)
     discord = None  # Discord 机器人(提醒推到手机)
     cloud = None  # 云端后备的连接(friday_cloud.CloudClient)
     start_cloud = None  # 用配对码连接云端
@@ -1614,6 +1615,13 @@ def apply_lock_settings(payload: dict, session, env: Path, save_env_value) -> di
     return {"done": done}
 
 
+def memtidy_state(session) -> dict | None:
+    tidy = getattr(session, "memtidy", None)
+    if tidy is None:
+        return None
+    return {"proposals": tidy.proposals, "last_run": tidy.last_run, "facts": len(tidy.memory.facts)}
+
+
 def mail_alert_state(session) -> dict | None:
     watch = getattr(getattr(getattr(session, "assistant", None), "toolbox", None), "mailwatch", None)
     if watch is None:
@@ -1720,6 +1728,7 @@ def settings_state(session, meter=None) -> dict:
         "rain_alert": __import__("friday_alerts").rain_time(),
         "event_lead": __import__("friday_events").lead_minutes() if google_ready(session) else None,
         "mail_alert": mail_alert_state(session),
+        "memtidy": memtidy_state(session),
         "weekly_report": __import__("friday_alerts").weekly_enabled(),
         "quick": __import__("friday_quick").quick_enabled() if getattr(session, "quick", None) is not None else None,
         "wake": wake_state(session),
@@ -1867,6 +1876,28 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         done.extend(lock_result.get("done", []))
         if "secret" in lock_result:
             return {"ok": True, "message": "按下面的步骤加到验证器 App 里", "secret": lock_result["secret"]}
+    if payload.get("memtidy_run") or "memtidy_apply" in payload or payload.get("memtidy_dismiss"):
+        tidy = getattr(session, "memtidy", None)
+        if tidy is None:
+            return {"error": "记忆整理没有开"}
+        if payload.get("memtidy_run"):
+            if len(tidy.memory.facts) < 3:
+                return {"error": "记忆太少了,还不用整理"}
+            try:
+                count = tidy.run()
+            except Exception as e:
+                return {"error": f"整理失败:{type(e).__name__}: {e}"}
+            done.append(f"整理建议:{tidy.summary()}" if count else "看过了,记忆很整齐,不用改")
+        elif payload.get("memtidy_dismiss"):
+            tidy.proposals = []
+            tidy._save()
+            done.append("这次的建议都忽略了")
+        else:
+            try:
+                ids = [int(i) for i in payload["memtidy_apply"]]
+            except (TypeError, ValueError):
+                return {"error": "选的项目不对"}
+            done.append(tidy.apply(ids))
     if "mail_alert" in payload:
         watch = getattr(toolbox, "mailwatch", None)
         if watch is None:
@@ -2304,6 +2335,18 @@ def start_auto_lock(session, interval: float = 15) -> None:
     threading.Thread(target=lambda: _quietly(loop), daemon=True, name="friday-auto-lock").start()
 
 
+def start_memory_tidy(session, toolbox: Toolbox, data_dir: str):
+    """每周用 Haiku 给记忆提整理建议(你同意了才改)。"""
+    import friday_memtidy
+
+    assistant = getattr(session, "assistant", None)
+    if assistant is None or toolbox is None:
+        return None
+    session.memtidy = friday_memtidy.MemoryTidy(os.path.join(data_dir, "friday_memtidy.json"), toolbox.memory,
+                                                client=assistant.client, on_usage=getattr(assistant, "on_usage", None))
+    return session.memtidy
+
+
 def start_daily_checks(session, toolbox: Toolbox, data_dir: str, interval: float = 300) -> None:
     """每 5 分钟看一次:月底记账汇总、下雨提醒、每周花费报告。"""
     import friday_alerts
@@ -2320,6 +2363,21 @@ def start_daily_checks(session, toolbox: Toolbox, data_dir: str, interval: float
         for text in health.check(_call_me(session)):
             announce(session, text, "🖥", "电脑健康提醒在窗口里")
 
+    tidy = start_memory_tidy(session, toolbox, data_dir)
+
+    def check_memory() -> None:
+        if tidy is None or not tidy.due():
+            return
+        budget = getattr(session, "budget", None)
+        if budget is not None:
+            try:
+                budget.before_ask()  # 预算用完了就不整理
+            except BudgetExceeded:
+                return
+        if tidy.run():
+            announce(session, f"{_call_me(session)},我整理了一下记得的事,有{tidy.summary()}的建议。"
+                     "在齿轮设定 → 记忆整理 里看看,同意的打勾就行。", "🧠", "记忆整理建议在齿轮设定里")
+
     def loop() -> None:
         time.sleep(60)  # 刚开机先让别的事做完
         while True:
@@ -2327,6 +2385,7 @@ def start_daily_checks(session, toolbox: Toolbox, data_dir: str, interval: float
             _quietly(lambda: rain_alert(session, state))
             _quietly(lambda: weekly_report(session, toolbox, state))
             _quietly(check_health)
+            _quietly(check_memory)
             time.sleep(interval)
 
     threading.Thread(target=loop, daemon=True, name="friday-daily-checks").start()

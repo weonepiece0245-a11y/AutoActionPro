@@ -325,3 +325,6 @@ body.locked > *:not(#lockScreen) { visibility: hidden !important; }
 #dropZone div { display: flex; flex-direction: column; align-items: center; gap: 6px; font-size: 22px; color: var(--accent); letter-spacing: .1em; }
 #dropZone small { font-size: 13px; color: var(--muted, #8aa); letter-spacing: 0; }
 .mini-input.wide { width: 260px; }
+#memtidyList { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 8px; }
+.tidy-item { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 1.5; padding: 6px 8px; border: 1px solid var(--cyan-line); border-radius: 6px; background: rgba(34,211,238,.03); cursor: pointer; }
+.tidy-item input { margin-top: 3px; accent-color: var(--accent); }
