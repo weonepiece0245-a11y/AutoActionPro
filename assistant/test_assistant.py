@@ -86,6 +86,7 @@ import friday_backup  # noqa: E402
 import friday_desktop  # noqa: E402
 import friday_locks  # noqa: E402
 import friday_images  # noqa: E402
+import friday_events  # noqa: E402
 import friday_wake  # noqa: E402
 import friday_cloud  # noqa: E402
 import friday_care  # noqa: E402
@@ -6293,6 +6294,56 @@ class PhotoTest(TempDirTest):
         self.assertTrue(dmod.is_image_attachment("IMG_1.JPG", None))
         self.assertTrue(dmod.is_image_attachment("x", "image/png"))
         self.assertFalse(dmod.is_image_attachment("a.ogg", "audio/ogg"))
+
+
+class EventReminderTest(TempDirTest):
+    TZ8 = datetime.timezone(datetime.timedelta(hours=8))
+
+    def event(self, eid, hour, minute, summary="开会", **extra):
+        start = datetime.datetime(2026, 11, 10, hour, minute, tzinfo=self.TZ8).isoformat()
+        return {"id": eid, "summary": summary, "start": {"dateTime": start}, "end": {"dateTime": start}, **extra}
+
+    def test_reminds_once_before_each_event(self):
+        now = [datetime.datetime(2026, 11, 10, 13, 40, tzinfo=self.TZ8)]
+        calls = []
+        events = [
+            self.event("a", 14, 0, location="Pavilion KL"),
+            self.event("b", 14, 5, summary="⏰ 喝水", extendedProperties={"private": {"friday_reminder": "3"}}),
+            self.event("c", 14, 10, summary="不去的邀请", attendees=[{"self": True, "responseStatus": "declined"}]),
+            {"id": "d", "summary": "生日", "start": {"date": "2026-11-10"}},
+            self.event("e", 16, 0, summary="看医生"),
+        ]
+
+        def fetch(start, end):
+            calls.append(start)
+            return events
+
+        state = friday_alerts.AlertState(os.path.join(self.tmp, "a.json"))
+        reminder = friday_events.EventReminder(fetch, state, clock=lambda: now[0], rain=lambda when: 80)
+        with mock.patch.dict(os.environ, {"FRIDAY_EVENT_LEAD": "15"}):
+            self.assertEqual(reminder.check("老板"), [])  # 还有 20 分钟
+            now[0] += datetime.timedelta(minutes=6)
+            said = reminder.check("老板")
+            self.assertEqual(len(said), 1)
+            self.assertIn("14 分钟后(14:00)有「开会」,地点:Pavilion KL", said[0])
+            self.assertIn("可能下雨(降雨概率 80%)", said[0])
+            now[0] += datetime.timedelta(minutes=1)
+            self.assertEqual(reminder.check("老板"), [])  # 只提醒一次
+            again = friday_events.EventReminder(fetch, friday_alerts.AlertState(os.path.join(self.tmp, "a.json")),
+                                                clock=lambda: now[0])
+            self.assertEqual(again.check("老板"), [])  # 重开星期五也不重复
+            self.assertEqual(len(calls), 3)  # 13:40、13:46 各问一次,13:47 用刚才的;重开后再问一次
+        with mock.patch.dict(os.environ, {"FRIDAY_EVENT_LEAD": "0"}):
+            now[0] = datetime.datetime(2026, 11, 10, 15, 50, tzinfo=self.TZ8)
+            self.assertEqual(reminder.check("老板"), [])
+
+    def test_settings(self):
+        env = str(Path(self.tmp, ".env"))
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        with mock.patch.dict(os.environ, {"FRIDAY_EVENT_LEAD": "15"}):
+            self.assertIn("error", app.apply_settings({"event_lead": 7}, session, None, env))
+            self.assertTrue(app.apply_settings({"event_lead": 30}, session, None, env)["ok"])
+            self.assertEqual(friday_events.lead_minutes(), 30)
 
 
 if __name__ == "__main__":

@@ -529,6 +529,8 @@ function fillSettings() {
   }
   $("rainRow").hidden = !s.rain_alert;
   if (s.rain_alert) $("setRain").value = s.rain_alert;
+  $("eventRow").hidden = s.event_lead === null || s.event_lead === undefined;
+  if (s.event_lead != null) $("setEventLead").value = String(s.event_lead);
   $("weeklyRow").hidden = s.weekly_report === null || s.weekly_report === undefined;
   $("setWeekly").checked = !!s.weekly_report;
   $("quickRow").hidden = s.quick === null || s.quick === undefined;
@@ -657,6 +659,7 @@ $("pinSave").onclick = async () => {
 $("setLockMinutes").onchange = (e) => saveSetting({ lock_minutes: Number(e.target.value) });
 $("discordPair").onclick = () => saveSetting({ discord_pair: true }, 8000);
 $("setRain").onchange = (e) => saveSetting({ rain_alert: e.target.value });
+$("setEventLead").onchange = (e) => saveSetting({ event_lead: Number(e.target.value) });
 $("setWeekly").onchange = (e) => saveSetting({ weekly_report: e.target.checked });
 $("setQuick").onchange = (e) => saveSetting({ quick: e.target.checked });
 $("setRemindCalendar").onchange = (e) => saveSetting({ remind_calendar: e.target.checked });

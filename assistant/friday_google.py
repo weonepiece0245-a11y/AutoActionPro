@@ -657,6 +657,14 @@ class GoogleTools(_MoreGoogleTools):
             return f"{span} 没有安排"
         return f"{span} 的安排:\n" + "\n".join(describe_event(e) for e in events)
 
+    def raw_events(self, start: datetime.datetime, end: datetime.datetime) -> list[dict]:
+        """这段时间里日历上的活动(原始资料,给事前提醒用)。"""
+        result = self._calendar().events().list(
+            calendarId="primary", timeMin=start.isoformat(), timeMax=end.isoformat(),
+            singleEvents=True, orderBy="startTime", maxResults=50,
+        ).execute()
+        return result.get("items", [])
+
     def _add_event(self, args: dict, confirm: Approver) -> str:
         title = (args.get("title") or "").strip()
         if not title or not args.get("start"):

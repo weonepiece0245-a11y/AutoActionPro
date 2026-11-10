@@ -1553,6 +1553,11 @@ def apply_lock_settings(payload: dict, session, env: Path, save_env_value) -> di
     return {"done": done}
 
 
+def google_ready(session) -> bool:
+    toolbox = getattr(getattr(session, "assistant", None), "toolbox", None)
+    return getattr(toolbox, "google", None) is not None
+
+
 def security_state(session) -> dict | None:
     import friday_vendor
     import friday_web
@@ -1645,6 +1650,7 @@ def settings_state(session, meter=None) -> dict:
         "security": security_state(session),
         "health": health_state(session),
         "rain_alert": __import__("friday_alerts").rain_time(),
+        "event_lead": __import__("friday_events").lead_minutes() if google_ready(session) else None,
         "weekly_report": __import__("friday_alerts").weekly_enabled(),
         "quick": __import__("friday_quick").quick_enabled() if getattr(session, "quick", None) is not None else None,
         "wake": wake_state(session),
@@ -1792,6 +1798,18 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         done.extend(lock_result.get("done", []))
         if "secret" in lock_result:
             return {"ok": True, "message": "按下面的步骤加到验证器 App 里", "secret": lock_result["secret"]}
+    if "event_lead" in payload:
+        import friday_events
+
+        try:
+            lead = int(payload["event_lead"])
+        except (TypeError, ValueError):
+            return {"error": "时间不对"}
+        if lead not in friday_events.LEADS:
+            return {"error": "时间不对"}
+        save_env_value(env, "FRIDAY_EVENT_LEAD", str(lead))
+        os.environ["FRIDAY_EVENT_LEAD"] = str(lead)
+        done.append(f"日历上的活动开始前 {lead} 分钟提醒你" if lead else "不再提前提醒日历上的活动")
     if "rain_alert" in payload:
         import friday_alerts
 
@@ -2233,6 +2251,29 @@ def start_daily_checks(session, toolbox: Toolbox, data_dir: str, interval: float
             time.sleep(interval)
 
     threading.Thread(target=loop, daemon=True, name="friday-daily-checks").start()
+    start_event_reminders(session, toolbox, state)
+
+
+def start_event_reminders(session, toolbox: Toolbox, state, interval: float = 60) -> None:
+    """日历事前提醒:每分钟看一次,活动开始前 15 分钟(可以改)提醒你。"""
+    import friday_events
+
+    google = getattr(toolbox, "google", None)
+    if google is None:
+        return
+    reminder = friday_events.EventReminder(google.raw_events, state, rain=friday_events.rain_at())
+
+    def check() -> None:
+        for text in reminder.check(_call_me(session)):
+            announce(session, text, "📅", text)
+
+    def loop() -> None:
+        time.sleep(30)
+        while True:
+            _quietly(check)
+            time.sleep(interval)
+
+    threading.Thread(target=loop, daemon=True, name="friday-events").start()
 
 
 def start_cloud_client(code: str, folder: Path, on_pull, on_status):
