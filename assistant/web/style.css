@@ -328,3 +328,4 @@ body.locked > *:not(#lockScreen) { visibility: hidden !important; }
 #memtidyList { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 8px; }
 .tidy-item { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 1.5; padding: 6px 8px; border: 1px solid var(--cyan-line); border-radius: 6px; background: rgba(34,211,238,.03); cursor: pointer; }
 .tidy-item input { margin-top: 3px; accent-color: var(--accent); }
+.nowrap { white-space: nowrap; }
