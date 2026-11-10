@@ -816,9 +816,11 @@ READ_ALOUD_TOOL = {
 SPOTIFY_TOOL = {
     "name": "spotify",
     "description": ("用户的 Spotify:play 放歌(query:歌名加歌手,如“周杰伦 晴天”;“歌单 名字”放用户的歌单;“我喜欢的歌”);"
-                    "now 现在在放什么。暂停、下一首用 computer 的 play_pause / next_track。"),
+                    "now 现在在放什么;next / previous / pause / resume 切歌、暂停、继续——Spotify 在放时用这几个,"
+                    "不要用 computer 的媒体键(会被浏览器等别的程序抢走)。"),
     "input_schema": {"type": "object", "properties": {
-        "action": {"type": "string", "enum": ["play", "now"]}, "query": {"type": "string"}}, "required": ["action"]},
+        "action": {"type": "string", "enum": ["play", "now", "next", "previous", "pause", "resume"]},
+        "query": {"type": "string"}}, "required": ["action"]},
 }
 
 INTERPRETER_TOOL = {
@@ -1520,6 +1522,8 @@ class Toolbox:
                 return self.spotify.play(str(args.get("query") or "")), False
             if action == "now":
                 return self.spotify.now_playing(), False
+            if action in ("next", "previous", "pause", "resume"):
+                return self.spotify.control(action), False
         except friday_spotify.SpotifyError as e:
             return str(e), True
         return f"不支持的 action:{action}", True

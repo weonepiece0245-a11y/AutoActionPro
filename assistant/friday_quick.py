@@ -234,6 +234,14 @@ class QuickCommands:
 
     def _media(self, action: str, reply: str):
         def run(found):
+            spotify = self.spotify
+            if spotify is not None:  # Spotify 在放:直接叫 Spotify,不按媒体键(浏览器的 YouTube 抢不走)
+                try:
+                    done = spotify.media(action)
+                except Exception:
+                    done = None
+                if done:
+                    return done
             self._computer().do(action)
             return reply
 

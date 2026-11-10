@@ -8373,5 +8373,61 @@ class AppsQuickTest(unittest.TestCase):
         self.assertEqual(quick.handle("备份状态"), "状态")
 
 
+class SpotifyMediaKeysTest(TempDirTest):
+    """Spotify 在放时,切歌、暂停直接叫 Spotify,不按媒体键(浏览器的 YouTube 抢不走)。"""
+
+    def make(self, player):
+        import friday_spotify
+
+        self.calls = []
+
+        def request(method, url, headers, body=None):
+            self.calls.append((method, url.split("v1")[-1]))
+            if url.endswith("/me/player") and method == "GET":
+                return player()
+            return 204, {}
+        spotify = friday_spotify.Spotify(self.tmp, 47999, request=request, clock=lambda: self.now)
+        spotify.tokens = {"access_token": "AT", "refresh_token": "RT", "expires_at": 10 ** 12}
+        self.now = 1000.0
+        return spotify
+
+    def test_routes_to_spotify_only_when_it_is_playing(self):
+        import friday_quick
+
+        state = {"playing": True}
+        spotify = self.make(lambda: (200, {"is_playing": state["playing"], "device": {"id": "PC"}}))
+        keys = []
+        computer = SimpleNamespace(available=True, do=lambda action, value="": keys.append(action) or "ok")
+        quick = friday_quick.QuickCommands(SimpleNamespace(computer=computer))
+        quick.spotify = spotify
+        with mock.patch.dict(os.environ, {"FRIDAY_SPOTIFY_CLIENT_ID": "c" * 32}):
+            self.assertEqual(quick.handle("下一首"), "Spotify 已切到下一首。")
+            self.assertEqual(quick.handle("上一首"), "Spotify 已切到上一首。")
+            self.assertEqual(quick.handle("暂停"), "Spotify 已暂停。")
+            state["playing"] = False
+            self.assertEqual(quick.handle("继续播放"), "Spotify 继续播放。")  # 刚才是星期五暂停的:叫 Spotify 继续
+            self.assertEqual(keys, [])  # 一次媒体键都没按
+            self.assertEqual(quick.handle("下一首"), "已切到下一首。")  # Spotify 停着:多半在用别的程序,照旧按媒体键
+        self.assertEqual(keys, ["next_track"])
+        self.assertIn(("POST", "/me/player/next"), self.calls)
+        self.assertIn(("PUT", "/me/player/pause"), self.calls)
+
+    def test_no_device_falls_back_to_media_keys(self):
+        spotify = self.make(lambda: (204, {}))
+        with mock.patch.dict(os.environ, {"FRIDAY_SPOTIFY_CLIENT_ID": "c" * 32}):
+            self.assertIsNone(spotify.media("next_track"))
+            self.assertIsNone(self.make(lambda: (200, {"is_playing": False})).media("play_pause"))
+
+    def test_tool_controls(self):
+        import friday_spotify
+
+        spotify = self.make(lambda: (200, {"is_playing": True}))
+        with mock.patch.dict(os.environ, {"FRIDAY_SPOTIFY_CLIENT_ID": "c" * 32}):
+            self.assertEqual(spotify.control("next"), "Spotify 已切到下一首。")
+            spotify.request = lambda method, url, headers, body=None: (404, {"error": {"reason": "NO_ACTIVE_DEVICE"}})
+            with self.assertRaises(friday_spotify.SpotifyError):
+                spotify.control("pause")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -60,6 +60,7 @@ class Spotify:
         self.open_uri = open_uri or (lambda uri: os.startfile(uri))  # noqa: S606
         self.clock = clock
         self.sleep = time.sleep  # 测试时换掉,不真的等
+        self.paused_at = 0.0  # 星期五上次替你暂停 Spotify 的时间(“继续”时知道该叫谁继续)
         self.pending: dict[str, str] = {}  # state -> code_verifier(登录进行中)
         self.lock = threading.Lock()
         try:
@@ -243,6 +244,59 @@ class Spotify:
         body = ({"context_uri": album, "offset": {"uri": track["uri"]}} if album
                 else {"uris": [track["uri"]]})
         return self._start(body, f"{artists}的《{track.get('name', query)}》", track["uri"])
+
+    def media(self, action: str) -> str | None:
+        """切歌、暂停、继续:Spotify 在放(或刚被星期五暂停)时直接叫 Spotify 做,不按媒体键,别的程序抢不走。
+
+        不是 Spotify 在放就返回 None(照旧按媒体键)。action:next_track / previous_track / play_pause。
+        """
+        if not self.connected:
+            return None
+        try:
+            status, data = self.api("GET", "/me/player")
+        except SpotifyError:
+            return None
+        if status != 200 or not data:
+            return None  # Spotify 没有在用的设备
+        playing = bool(data.get("is_playing"))
+        paused_by_me = bool(self.paused_at) and self.clock() - self.paused_at < 2 * 3600
+        if not playing and not paused_by_me:
+            return None  # Spotify 停着,多半是在用别的程序放:交给媒体键
+        if action == "next_track":
+            status, _ = self.api("POST", "/me/player/next")
+            text = "Spotify 已切到下一首。"
+        elif action == "previous_track":
+            status, _ = self.api("POST", "/me/player/previous")
+            text = "Spotify 已切到上一首。"
+        elif action == "play_pause" and playing:
+            status, _ = self.api("PUT", "/me/player/pause")
+            self.paused_at = self.clock()
+            text = "Spotify 已暂停。"
+        elif action == "play_pause":
+            status, _ = self.api("PUT", "/me/player/play")
+            self.paused_at = 0.0
+            text = "Spotify 继续播放。"
+        else:
+            return None
+        return text if status in (200, 202, 204) else None
+
+    def control(self, action: str) -> str:
+        """Claude 叫的切歌、暂停、继续(不管 Spotify 现在在不在放,都直接叫 Spotify)。"""
+        calls = {"next": ("POST", "/me/player/next", "已切到下一首。"),
+                 "previous": ("POST", "/me/player/previous", "已切到上一首。"),
+                 "pause": ("PUT", "/me/player/pause", "已暂停。"),
+                 "resume": ("PUT", "/me/player/play", "继续播放。")}
+        method, path, text = calls[action]
+        status, data = self.api(method, path)
+        if status in (200, 202, 204):
+            if action == "pause":
+                self.paused_at = self.clock()
+            return "Spotify " + text
+        if status == 404 or self._reason(data) == "NO_ACTIVE_DEVICE":
+            raise SpotifyError("Spotify 现在没有在用的播放设备(先放一首歌)")
+        if status == 403:
+            raise SpotifyError("Spotify 不让做这一步(可能已经是暂停/播放状态,或者不是 Premium)")
+        raise SpotifyError("Spotify 没有回应,等一下再试")
 
     def now_playing(self) -> str:
         status, data = self.api("GET", "/me/player/currently-playing")
