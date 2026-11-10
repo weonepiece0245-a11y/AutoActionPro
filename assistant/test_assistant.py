@@ -2362,11 +2362,40 @@ class ScreenControlTest(unittest.TestCase):
         control.act({"action": "key", "keys": "ctrl+v"}, approve)
         self.assertEqual(approve.call_count, 2)
 
+    def test_takeover_notices_start_and_end(self):
+        control = self.make()
+        control.look()
+        notices = []
+        control.on_change = lambda active, text: notices.append((active, text))
+        control.act({"action": "key", "keys": "ctrl+c", "reason": "复制网址"}, lambda a: True)
+        control.act({"action": "key", "keys": "ctrl+v"}, lambda a: True)
+        self.assertEqual(notices, [(True, "复制网址")])  # 同一个问题只提醒一次
+        control.end_turn()
+        self.assertEqual(notices[-1], (False, "做了 2 步"))
+        control.end_turn()
+        self.assertEqual(len(notices), 2)  # 没在接管:不重复说
+
+    def test_takeover_notice_when_user_moves_mouse(self):
+        control = self.make()
+        control.look()
+        notices = []
+        control.on_change = lambda active, text: notices.append((active, text))
+        control.act({"action": "click", "x": 10, "y": 10}, lambda a: True)
+        self.pc.pos = (900, 900)  # 你动了鼠标
+        with self.assertRaises(pcmod.NeedsUser):
+            control.act({"action": "click", "x": 20, "y": 20}, lambda a: True)
+        self.assertEqual(notices[-1], (False, "你动了鼠标,已经停下"))
+        control.end_turn()
+        self.assertEqual(len(notices), 2)
+
     def test_declined(self):
         control = self.make()
         control.look()
+        notices = []
+        control.on_change = lambda active, text: notices.append(active)
         with self.assertRaises(pcmod.NeedsUser):
             control.act({"action": "click", "x": 1, "y": 1}, lambda a: False)
+        self.assertEqual(notices, [])  # 没允许:不接管,也不提醒
         self.assertEqual([c for c in self.pc.calls if c[0] != "grab"], [])
 
     def test_stops_when_user_moves_mouse(self):
@@ -8427,6 +8456,34 @@ class SpotifyMediaKeysTest(TempDirTest):
             spotify.request = lambda method, url, headers, body=None: (404, {"error": {"reason": "NO_ACTIVE_DEVICE"}})
             with self.assertRaises(friday_spotify.SpotifyError):
                 spotify.control("pause")
+
+
+
+class TakeoverNoticeTest(unittest.TestCase):
+    def test_window_bar_tray_and_security_log(self):
+        seen, toasts, records = [], [], []
+        session = SimpleNamespace(hub=SimpleNamespace(broadcast=seen.append),
+                                  tray=SimpleNamespace(notify=toasts.append))
+        with mock.patch("friday_security.record", lambda kind, text, severity="warn": records.append((kind, text))):
+            app.takeover_notice(session, True, "打开 Spotify 点播放")
+            app.takeover_notice(session, False, "做了 3 步")
+        self.assertEqual(seen[0], {"type": "takeover", "active": True, "text": "打开 Spotify 点播放"})
+        self.assertIn("动一下鼠标就会停下", toasts[0])
+        self.assertEqual([k for k, _ in records], ["takeover", "takeover_end"])
+        self.assertEqual(len(toasts), 1)
+
+    def test_answer_end_closes_takeover(self):
+        ended = []
+        toolbox = SimpleNamespace(begin_turn=lambda: None, end_turn=lambda: ended.append(1), archive=None)
+        assistant = app.Assistant.__new__(app.Assistant)
+        assistant.toolbox = toolbox
+        assistant.budget = assistant.router = assistant.context = None
+        assistant.messages = []
+        assistant._slim_if_idle = lambda: None
+        assistant._run = mock.Mock(side_effect=RuntimeError("网络断了"))
+        with self.assertRaises(RuntimeError):
+            assistant.ask("帮我点一下", lambda t: None, lambda s: None)
+        self.assertEqual(ended, [1])  # 出错也会收起红条
 
 
 if __name__ == "__main__":

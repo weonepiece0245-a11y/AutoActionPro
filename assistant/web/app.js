@@ -205,6 +205,11 @@ function handle(ev) {
       showFocus(ev); break;
     case "reader":
       readerEvent(ev); break;
+    case "takeover":
+      $("takeoverBar").hidden = !ev.active;
+      if (ev.active) $("takeoverText").textContent = ev.text || "";
+      else if (ev.text) addLine(`🖱 鼠标键盘交还给你了(${ev.text})`, "status");
+      break;
     case "approval":
       showApproval(ev); break;
     case "approval_done":

@@ -351,3 +351,11 @@ body.locked > *:not(#lockScreen) { visibility: hidden !important; }
 body[data-theme="ironman"] { --speak: #f59e0b; --c-rgb: 251, 191, 36; --b-rgb: 239, 68, 68; --m-rgb: 249, 115, 22; --bg2: #1c0707; --text: #fff4e0; --muted: #c9a27a; --orb-a: #fde68a; --orb-b: #b91c1c; }
 body[data-theme="violet"] { --speak: #c4b5fd; --c-rgb: 167, 139, 250; --b-rgb: 99, 102, 241; --m-rgb: 244, 114, 182; --bg2: #120a27; --text: #f1eaff; --muted: #a99bc9; --orb-a: #ddd6fe; --orb-b: #6d28d9; }
 body[data-theme="matrix"] { --speak: #6ee7b7; --c-rgb: 52, 211, 153; --b-rgb: 16, 185, 129; --m-rgb: 163, 230, 53; --bg2: #04170f; --text: #e3ffef; --muted: #7fb79b; --orb-a: #a7f3d0; --orb-b: #047857; }
+
+/* 星期五接管鼠标键盘时:最上面一条红色提醒 */
+.takeover-bar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 9999; padding: 8px 16px; text-align: center;
+  background: #dc2626; color: #fff; font-weight: 600; font-size: 14px; box-shadow: 0 2px 18px rgba(220, 38, 38, .6);
+  animation: takeover-pulse 1.6s ease-in-out infinite;
+}
+@keyframes takeover-pulse { 50% { background: #991b1b; } }

@@ -921,8 +921,24 @@ class ScreenControl:
             self.backend = WindowsPC()
         return self.backend
 
+    on_change = None  # (正在接管?, 原因或结果) -> None:告诉窗口、右下角通知、记进安全记录
+
+    def _notify(self, active: bool, text: str) -> None:
+        if self.on_change is not None:
+            try:
+                self.on_change(active, text)
+            except Exception:
+                pass
+
+    def end_turn(self) -> None:
+        """回答结束:接管也结束。"""
+        if getattr(self, "granted", False):
+            self.granted = False
+            self._notify(False, f"做了 {self.actions} 步")
+
     def begin_turn(self) -> None:
         """每个新问题开始时调用:重新征求接管同意、重新计数。"""
+        self.end_turn()
         self.granted = False
         self.actions = 0
         self.expected_cursor: tuple[int, int] | None = None
@@ -965,6 +981,7 @@ class ScreenControl:
         if abs(cx - ex) > TAKEOVER_DISTANCE or abs(cy - ey) > TAKEOVER_DISTANCE:
             self.granted = False
             self.expected_cursor = None
+            self._notify(False, "你动了鼠标,已经停下")
             raise NeedsUser("用户动了鼠标,已经停止接管。先问用户要不要继续,不要马上重试")
 
     def act(self, args: dict, approve: Approver) -> str:
@@ -979,6 +996,7 @@ class ScreenControl:
             if not approve(f"接管鼠标和键盘:{reason}\n  (过程中你动一下鼠标,星期五就会停下)"):
                 raise NeedsUser("用户没有允许接管鼠标和键盘")
             self.granted = True
+            self._notify(True, reason)
         self._check_takeover(pc)
         self.actions += 1
         if self.actions > self.MAX_ACTIONS:

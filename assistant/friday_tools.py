@@ -1158,6 +1158,11 @@ class Toolbox:
         if self.screen is not None:
             self.screen.begin_turn()
 
+    def end_turn(self) -> None:
+        """回答结束时调用(接管鼠标键盘也跟着结束)。"""
+        if self.screen is not None and hasattr(self.screen, "end_turn"):
+            self.screen.end_turn()
+
     def _approved(self, action: str) -> bool:
         if self.unattended:
             raise NeedsUser(UNATTENDED_REFUSAL)

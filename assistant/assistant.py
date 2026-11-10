@@ -441,6 +441,9 @@ class Assistant:
         except BaseException:
             del self.messages[start:]
             raise
+        finally:
+            if self.toolbox is not None and hasattr(self.toolbox, "end_turn"):
+                self.toolbox.end_turn()  # 回答完了:接管鼠标键盘也结束(窗口的红条收起来)
         if images:  # 看过的照片不再跟着每次提问一起发(很占钱),换成一句说明
             import friday_images
 
@@ -3028,6 +3031,23 @@ def start_connected_apps(session, toolbox, ctx, data_dir: str, port: int) -> Non
     ctx.spotify_callback = callback
 
 
+def takeover_notice(session, active: bool, text: str) -> None:
+    """星期五接管鼠标键盘:窗口显示红条、右下角弹通知、记进安全记录;结束时收起红条。"""
+    import friday_security
+
+    session.hub.broadcast({"type": "takeover", "active": active, "text": text})
+    if active:
+        tray = getattr(session, "tray", None)
+        if tray is not None:
+            try:
+                tray.notify(f"🖱 星期五正在操控鼠标键盘:{text}(动一下鼠标就会停下)")
+            except Exception:
+                pass
+        friday_security.record("takeover", f"星期五接管了鼠标键盘:{text}", "info")
+    else:
+        friday_security.record("takeover_end", f"鼠标键盘交还给你了({text})", "info")
+
+
 def start_heartbeat(events: queue.Queue, data_dir: str, interval: float = 30) -> None:
     """每 30 秒往主循环送一个心跳;主循环处理到了就写心跳文件(主循环卡住,心跳就停,守护会发现)。"""
     def loop() -> None:
@@ -3559,6 +3579,8 @@ def run_web(args) -> None:
     start_reader(session, ctx)
     start_folder_backup(session, toolbox, data_dir)
     start_connected_apps(session, toolbox, ctx, data_dir, ctx.port)
+    if getattr(toolbox, "screen", None) is not None:
+        toolbox.screen.on_change = lambda active, text: takeover_notice(session, active, text)
     if toolbox.google is not None:  # 登录了 Google:笔记同时抄到 Google 文档(在后台抄,不拖慢)
         append = friday_notes.docs_sync(toolbox.google, toolbox.notes)
         toolbox.notes.sync = lambda line: threading.Thread(target=lambda: _quietly(lambda: append(line)),
