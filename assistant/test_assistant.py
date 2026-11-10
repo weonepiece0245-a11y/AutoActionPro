@@ -6265,6 +6265,36 @@ class PhotoTest(TempDirTest):
         self.assertIn("照片", history[0]["text"])
         self.assertIn("附了 1 张照片", bot.exchanges[0]["q"])
 
+    def test_photo_turn_drops_its_now_invalid_thinking(self):
+        thinking = SimpleNamespace(type="thinking", thinking="", signature="sig")
+        client = FakeClient(FakeStream(["已记账"], blocks=[]), FakeStream(["好的"]))
+        bot = app.Assistant(client=client)
+        original = client.streams[0].get_final_message
+
+        def with_thinking():
+            message = original()
+            message.content = [thinking] + message.content
+            return message
+
+        client.streams[0].get_final_message = with_thinking
+        bot.ask("帮我记账", lambda t: None, images=[friday_images.prepare(self.jpeg((50, 50)))])
+        self.assertNotIn("thinking", [getattr(b, "type", None) for b in bot.messages[-1]["content"]])
+
+    def test_retries_without_thinking_when_signature_rejected(self):
+        error = anthropic.APIStatusError("messages.5.content.0: Invalid `signature` in `thinking` block. "
+                                         "The block is bound to a different conversation.", status_code=400)
+        client = FakeClient(FakeStream([], error=error), FakeStream(["好的"]))
+        bot = app.Assistant(client=client)
+        bot.messages = [{"role": "user", "content": "你好"},
+                        {"role": "assistant", "content": [{"type": "thinking", "thinking": "", "signature": "x"},
+                                                          {"type": "text", "text": "你好"}]}]
+        self.assertEqual(bot.ask("再见", lambda t: None), "好的")
+        self.assertEqual([b["type"] for b in client.calls[1]["messages"][1]["content"]], ["text"])
+        other = anthropic.APIStatusError("bad request", status_code=400)
+        bot2 = app.Assistant(client=FakeClient(FakeStream([], error=other)))
+        with self.assertRaises(anthropic.APIStatusError):
+            bot2.ask("x", lambda t: None)  # 其他 400 照常报错
+
     def test_discord_photo_reaches_claude(self):
         asked = []
 

@@ -316,6 +316,10 @@ def _ignore(_: str) -> None:
     pass
 
 
+def _block_type(block) -> str | None:
+    return block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+
+
 class Assistant:
     """保存对话历史,以流式方式向 Claude 提问,并在需要时替模型执行工具。"""
 
@@ -436,6 +440,8 @@ class Assistant:
             message = self.messages[start]
             message["content"] = [b if b.get("type") != "image" else {"type": "text", "text": friday_images.PLACEHOLDER}
                                   for b in message["content"]]
+            # 思考内容绑定在“当时的对话”上:前面改了,这一轮后面的思考就作废,要一起拿掉(拿掉结尾的一段是允许的)
+            self._strip_thinking(start + 1)
             question = f"{question}(附了 {len(images)} 张照片)"
         self.last_ask = self.clock()
         self.exchanges = (self.exchanges + [{"q": question, "a": answer, "t": self.last_ask}])[-KEEP_EXCHANGES:]
@@ -456,6 +462,17 @@ class Assistant:
         self._save_exchanges()
         if self.toolbox is not None and self.toolbox.archive is not None:
             self.toolbox.archive.add(question, answer, self.last_ask)
+
+    def _strip_thinking(self, first: int = 0) -> int:
+        """拿掉 messages[first:] 里的思考内容(thinking / redacted_thinking),文字和工具调用留着。返回拿掉几块。"""
+        removed = 0
+        for message in self.messages[first:]:
+            if message.get("role") != "assistant" or isinstance(message.get("content"), str):
+                continue
+            kept = [b for b in message["content"] if _block_type(b) not in ("thinking", "redacted_thinking")]
+            removed += len(message["content"]) - len(kept)
+            message["content"] = kept or [{"type": "text", "text": "(没有文字回答)"}]
+        return removed
 
     def _run(self, on_text, on_status) -> str:
         texts: list[str] = []
@@ -498,6 +515,17 @@ class Assistant:
         return messages
 
     def _stream_once(self, on_text, on_status):
+        try:
+            return self._stream_request(on_text, on_status)
+        except anthropic.APIStatusError as e:
+            # 对话历史和当时不一样了(例如改过前面的内容),旧的思考内容会被拒绝(400):
+            # 按官方建议拿掉所有思考内容再试一次(文字和工具调用都留着)
+            if getattr(e, "status_code", None) != 400 or "signature" not in str(e) or not self._strip_thinking():
+                raise
+            print("对话历史里的思考内容失效了,已拿掉后重试", flush=True)
+            return self._stream_request(on_text, on_status)
+
+    def _stream_request(self, on_text, on_status):
         params = dict(
             model=self.model,
             max_tokens=MAX_TOKENS,
