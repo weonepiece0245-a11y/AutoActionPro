@@ -93,8 +93,10 @@ class DiscordMessage:
 
     def __init__(self, text: str, reply: Callable[[str], None], ask: Callable[[str], bool],
                  audio: bytes | None = None, reply_voice: Callable[[str], None] | None = None,
-                 private: bool = True, images: list[bytes] | None = None) -> None:
+                 private: bool = True, images: list[bytes] | None = None,
+                 send_files: Callable[[str, list], None] | None = None) -> None:
         self.images = images or []  # 手机发来的照片(原始文件)
+        self.send_files = send_files  # (文字, [(文件名, 内容)]):把截图、文件发回这段对话
         self.private = private  # 私信;False 表示在服务器频道里,别人也看得到回答
         self.text = text
         self.reply = reply
@@ -254,6 +256,7 @@ class DiscordGate:
             reply_voice=(lambda answer: send_voice(channel, answer)) if send_voice else None,
             private=is_dm,
             images=images,
+            send_files=lambda text, files: self.send(channel, text, files=files),
         )))
 
     def _stranger(self, author_id: int, author_name: str, is_dm: bool, text: str, channel) -> None:
@@ -423,8 +426,11 @@ class DiscordBridge:
                 audio = None
         self.send(channel, text, audio=audio)
 
-    def send(self, channel, text: str, audio: bytes | None = None) -> None:
-        """从任何线程发消息。在机器人自己的线程里调用时只安排发送、不等待(等待会把自己卡死)。"""
+    def send(self, channel, text: str, audio: bytes | None = None, files: list | None = None) -> None:
+        """从任何线程发消息。在机器人自己的线程里调用时只安排发送、不等待(等待会把自己卡死)。
+
+        files:[(文件名, 内容), ...],例如截图、要传给手机的文件。
+        """
         if self.loop is None:
             return
         parts = split_message(text)
@@ -436,6 +442,10 @@ class DiscordBridge:
                 import discord
 
                 await channel.send(file=discord.File(io.BytesIO(audio), filename="friday.mp3"))
+            for name, data in files or []:
+                import discord
+
+                await channel.send(file=discord.File(io.BytesIO(data), filename=name))
 
         try:
             running = asyncio.get_running_loop()
@@ -451,7 +461,7 @@ class DiscordBridge:
         except Exception as e:
             self.on_status(f"发送 Discord 消息失败:{type(e).__name__}: {e}")
 
-    def notify_owners(self, text: str, audio: bytes | None = None) -> int:
+    def notify_owners(self, text: str, audio: bytes | None = None, files: list | None = None) -> int:
         """主动私信所有配对过的账号(比如提醒到点了),返回成功发出的个数。在聊天线程里调用。"""
         if self.loop is None or self.client is None:
             self.on_status(f"Discord 还没连上,这条消息没发出去:{text[:50]}")
@@ -469,6 +479,10 @@ class DiscordBridge:
                         import discord
 
                         await user.send(file=discord.File(io.BytesIO(audio), filename="friday.mp3"))
+                    for name, data in files or []:
+                        import discord
+
+                        await user.send(file=discord.File(io.BytesIO(data), filename=name))
                     sent += 1
                 except Exception as e:  # 比如对方关了私信
                     self.on_status(f"私信 {owner_id} 失败:{type(e).__name__}: {e}")

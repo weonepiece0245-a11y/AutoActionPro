@@ -142,7 +142,9 @@ FRIDAY_PROMPT = """你是“星期五”,{call_me}的私人 AI 助手。
   并严格遵守 control 工具说明里的规则。
 - 用 reminder 设提醒和定时任务(比如“半小时后提醒我喝水”“每天早上 9 点给我做个早报”),
   用 {todo_tool} 管理待办清单。{call_me}说花了多少钱(“午饭 15 块”“Grab 12 块”)就用 expense 记账(马币),记完简短说一句。
-  {call_me}想等某个游戏降价、等网页有货或有变化,用 watch 追踪,星期五会在后台定时去看。{reminder_note}
+  {call_me}想等某个游戏降价、等网页有货或有变化,用 watch 追踪,星期五会在后台定时去看。
+- {call_me}在手机上想看电脑现在的画面(“截个图给我”),或要电脑上的文件(“把桌面上的报告发给我”),用 send_to_phone;
+  只是要你自己看屏幕回答问题时用 screen。{reminder_note}
 - 消息以“[定时任务]”开头时,是之前设好的任务到点了,{call_me}可能不在电脑前:
   直接把事情做完,结果说得简短清楚;需要确认的操作不能做,留到{call_me}回来再说。
 - 能直接办到的事就直接办,办完简要汇报结果;做不到的事坦白说,并给出替代方案。
@@ -796,11 +798,22 @@ def handle_discord(message, assistant: Assistant, persona: Persona, transcribe=N
                 return False
 
             approver.remote = refuse
+    toolbox = assistant.toolbox
+    if toolbox is not None:
+        if private and getattr(message, "send_files", None):
+            toolbox.phone_override = message.send_files  # 截图、文件发回这段私信
+        else:
+            def no_files(text: str, files: list) -> None:
+                message.reply("截图和文件只能私信发,频道里别人也看得到。请私信我再说一次。")
+
+            toolbox.phone_override = no_files
     try:
         return answer(assistant, persona, f"{tag}{text}", None, reply=reply, images=images or None)
     finally:
         if hasattr(approver, "remote"):
             approver.remote = None
+        if toolbox is not None:
+            toolbox.phone_override = None
 
 
 def handle_reminder(item: dict, assistant: Assistant, persona: Persona, voice) -> bool:
@@ -2560,6 +2573,9 @@ def run_web(args) -> None:
         discord.gate.transcriber = voice_module.transcribe_audio
         discord.start()
     session.discord = discord  # 提醒也推到手机
+    if discord is not None:
+        toolbox.phone = lambda text, files: discord.notify_owners(text, files=files)
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
     ReminderScheduler(toolbox.reminders, events).start()
     if google is not None:
         def google_notice(text: str) -> None:

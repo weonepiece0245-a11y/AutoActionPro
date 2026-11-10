@@ -635,6 +635,26 @@ EXPENSE_TOOL = {
     },
 }
 
+PHONE_FILE_LIMIT = 10 * 1024 * 1024  # Discord 一般账号收得下的附件大小
+
+PHONE_TOOL = {
+    "name": "send_to_phone",
+    "description": (
+        "把东西发到用户手机的 Discord:screenshot 截电脑屏幕发过去(用户说“截个图给我看”“电脑现在什么画面”);"
+        "file 把电脑上的文件发过去(path 是完整路径,先用 computer 的 find_files 找到;最大 10MB,要用户确认)。"
+        "用户在手机上找你时发回那段对话,在电脑上叫你时私信到他的手机。钥匙、密码文件一律不发。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["screenshot", "file"]},
+            "path": {"type": "string", "description": "file:文件的完整路径"},
+            "note": {"type": "string", "description": "附带的一句话(可选)"},
+        },
+        "required": ["action"],
+    },
+}
+
 WATCH_TOOL = {
     "name": "watch",
     "description": (
@@ -707,6 +727,8 @@ class Toolbox:
         self.google = google
         self.ledger = ledger  # 记账(friday_ledger.Ledger)
         self.watchlist = watchlist  # 特价和网页追踪(friday_watch.Watchlist)
+        self.phone = None  # (文字, [(文件名, 内容)]) -> 私信到手机 Discord;没连 Discord 就是 None
+        self.phone_override = None  # 正在回答手机消息时:发回那段对话
         if ledger is not None and google is not None:
             from friday_ledger import sheet_sync
 
@@ -742,6 +764,7 @@ class Toolbox:
             "weather": self._weather,
             "expense": self._expense,
             "watch": self._watch,
+            "send_to_phone": self._send_to_phone,
         }
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
 
@@ -761,6 +784,8 @@ class Toolbox:
             tools = tools + [EXPENSE_TOOL]
         if self.watchlist is not None:
             tools = tools + [WATCH_TOOL]
+        if self.phone is not None and self.local_tools:
+            tools = tools + [PHONE_TOOL]
         if self.todos is not None and self.google is None:  # 接了 Google 就用 Google Tasks 当待办清单
             tools = tools + [TODO_TOOL]
         if self.computer is not None and self.computer.available:
@@ -856,6 +881,48 @@ class Toolbox:
                 return ledger.delete(args.get("id") or "last"), False
         except ValueError as e:
             return str(e), True
+        return f"不支持的 action:{action}", True
+
+    def _send_to_phone(self, args, on_status):
+        send = self.phone_override or self.phone
+        if send is None:
+            return "手机 Discord 没有连上,发不了", True
+        note = str(args.get("note") or "").strip()
+        action = args.get("action")
+        if action == "screenshot":
+            if self.screen is None or not self.screen.available:
+                return "这台电脑不能截图", True
+            import io
+
+            image = self.screen._pc().grab_screen(all_screens=True).convert("RGB")
+            image.thumbnail((3840, 3840))
+            for quality in (85, 70, 55):
+                buffer = io.BytesIO()
+                image.save(buffer, "JPEG", quality=quality)
+                if buffer.tell() <= PHONE_FILE_LIMIT:
+                    break
+            on_status("截了屏幕发到手机")
+            stamp = datetime.datetime.now().strftime("%H%M%S")
+            send(note or "📸 电脑现在的画面", [(f"屏幕_{stamp}.jpg", buffer.getvalue())])
+            return "截图已经发到手机 Discord", False
+        if action == "file":
+            if not args.get("path"):
+                return "要给文件的完整路径(可以先用 computer 的 find_files 找)", True
+            path = self._resolve(str(args["path"]))
+            if friday_security.is_secret_path(path):
+                friday_security.record("secret_send", f"有人想让星期五把钥匙/密码文件发到手机,已拒绝:{path}", "alert")
+                return SECRET_REFUSAL, True
+            if not path.is_file():
+                return f"找不到文件 {path}", True
+            size = path.stat().st_size
+            if size > PHONE_FILE_LIMIT:
+                return (f"{path.name} 有 {size / 1024 ** 2:.1f}MB,超过 Discord 能收的 10MB。"
+                        "可以用 drive 工具上传到 Google 云端硬盘,再把链接发给用户"), True
+            if not self._confirmed(f"把文件发到你的手机 Discord:{path}({size / 1024 ** 2:.1f}MB)"):
+                return "用户没有允许发这个文件", True
+            on_status(f"把 {path.name} 发到手机")
+            send(note or f"📎 {path.name}", [(path.name, path.read_bytes())])
+            return f"{path.name} 已经发到手机 Discord", False
         return f"不支持的 action:{action}", True
 
     def _watch(self, args, on_status):

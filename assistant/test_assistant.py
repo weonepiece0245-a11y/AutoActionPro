@@ -6479,5 +6479,69 @@ class WatchTest(TempDirTest):
         self.assertTrue(toolbox.run(tool_use("watch", {"action": "remove", "id": "99"}), lambda s: None)["is_error"])
 
 
+class SendToPhoneTest(TempDirTest):
+    def make(self, confirm=True):
+        from PIL import Image
+
+        sent = []
+        toolbox = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m.json")), lambda a: True, workdir=self.tmp,
+                                confirm=lambda a: confirm)
+        toolbox.screen = SimpleNamespace(available=True, _pc=lambda: SimpleNamespace(
+            grab_screen=lambda all_screens=False: Image.new("RGB", (1920, 1080), (10, 20, 30))))
+        toolbox.phone = lambda text, files: sent.append((text, files))
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+        return toolbox, sent
+
+    def test_screenshot_and_file(self):
+        toolbox, sent = self.make()
+        result = toolbox.run(tool_use("send_to_phone", {"action": "screenshot"}), lambda s: None)
+        self.assertNotIn("is_error", result)
+        name, data = sent[0][1][0]
+        self.assertTrue(name.endswith(".jpg"))
+        self.assertEqual(data[:3], b"\xff\xd8\xff")
+        Path(self.tmp, "报告.pdf").write_bytes(b"%PDF-1.4 hello")
+        toolbox.run(tool_use("send_to_phone", {"action": "file", "path": "报告.pdf"}), lambda s: None)
+        self.assertEqual(sent[-1][1], [("报告.pdf", b"%PDF-1.4 hello")])
+
+    def test_refusals(self):
+        toolbox, sent = self.make(confirm=False)
+        Path(self.tmp, "a.txt").write_text("x")
+        self.assertTrue(toolbox.run(tool_use("send_to_phone", {"action": "file", "path": "a.txt"}), lambda s: None)["is_error"])
+        Path(self.tmp, ".env").write_text("KEY=secret")
+        result = toolbox.run(tool_use("send_to_phone", {"action": "file", "path": ".env"}), lambda s: None)
+        self.assertTrue(result["is_error"])
+        big = Path(self.tmp, "big.zip")
+        with big.open("wb") as f:
+            f.truncate(tools.PHONE_FILE_LIMIT + 1)
+        self.assertIn("10MB", toolbox.run(tool_use("send_to_phone", {"action": "file", "path": "big.zip"}),
+                                          lambda s: None)["content"])
+        self.assertEqual(sent, [])
+        plain = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m2.json")), lambda a: True)
+        self.assertNotIn("send_to_phone", [t["name"] for t in plain.definitions()])  # 没连 Discord 就没有
+
+    def test_replies_go_back_to_the_private_chat(self):
+        sent_here, replies = [], []
+
+        class FakeAssistant:
+            def __init__(self):
+                self.toolbox = SimpleNamespace(approve=None, phone_override=None)
+
+            def ask(self, question, on_text, on_status):
+                self.toolbox.phone_override("截图", [("a.jpg", b"x")])
+                return "发了"
+
+        bot = FakeAssistant()
+        message = dmod.DiscordMessage("截个图", replies.append, lambda q: True,
+                                      send_files=lambda text, files: sent_here.append(files))
+        app.handle_discord(message, bot, app.default_persona())
+        self.assertEqual(sent_here, [[("a.jpg", b"x")]])
+        self.assertIsNone(bot.toolbox.phone_override)
+        public = dmod.DiscordMessage("截个图", replies.append, lambda q: True, private=False,
+                                     send_files=lambda text, files: sent_here.append(files))
+        app.handle_discord(public, FakeAssistant(), app.default_persona())
+        self.assertEqual(len(sent_here), 1)  # 频道里不发
+        self.assertTrue(any("只能私信" in r for r in replies))
+
+
 if __name__ == "__main__":
     unittest.main()
