@@ -660,6 +660,15 @@ NOTES_TOOL = {
         "id": {"type": "string"}}, "required": ["action"]},
 }
 
+VIRUS_SCAN_TOOL = {
+    "name": "virus_scan",
+    "description": ("病毒扫描(用 Windows 自带的 Microsoft Defender,不花钱):quick 快速扫描(几分钟);full 全面扫描"
+                    "(一两个小时甚至更久,电脑会变慢);status 看扫描进度、上次扫描的结果和 Defender 有没有开。"
+                    "扫描在后台跑,扫完星期五会自己告诉用户,你不用等。用户只说“扫描病毒”没说哪种,就用 quick。"),
+    "input_schema": {"type": "object", "properties": {
+        "action": {"type": "string", "enum": ["quick", "full", "status"]}}, "required": ["action"]},
+}
+
 CLEANUP_TOOL = {
     "name": "cleanup",
     "description": ("找大文件和重复文件(在用户的下载、桌面、文档、视频、图片、音乐文件夹里):scan 扫描(要一两分钟),"
@@ -824,6 +833,7 @@ class Toolbox:
         self.meter = None  # 花费统计(给 ai_spending 用)
         self.scenes = None  # 场景模式(friday_scenes.Scenes)
         self.screentime = None  # 电脑使用时间(friday_screentime.ScreenTime)
+        self.virus = None  # (开始扫描(kind) -> 话, 状态() -> 话),由主程序接上
         self.cleanup = None  # (scan, list, recycle) 三个函数,由主程序接上
         self.notes = None  # 速记本(friday_notes.Notes)
         self.dates = None  # 生日和纪念日(friday_dates.Dates)
@@ -869,6 +879,7 @@ class Toolbox:
             "scene": self._scene,
             "screen_time": self._screen_time,
             "cleanup": self._cleanup,
+            "virus_scan": self._virus_scan,
             "notes": self._notes,
             "dates": self._dates,
         }
@@ -902,6 +913,8 @@ class Toolbox:
             tools = tools + [SCREEN_TIME_TOOL]
         if self.cleanup is not None and self.local_tools:
             tools = tools + [CLEANUP_TOOL]
+        if self.virus is not None and self.local_tools:
+            tools = tools + [VIRUS_SCAN_TOOL]
         if self.notes is not None:
             tools = tools + [NOTES_TOOL]
         if self.dates is not None:
@@ -1030,6 +1043,15 @@ class Toolbox:
                 return notes.delete(str(args.get("id") or "last")), False
         except ValueError as e:
             return str(e), True
+        return f"不支持的 action:{action}", True
+
+    def _virus_scan(self, args, on_status):
+        start, status = self.virus
+        action = args.get("action")
+        if action == "status":
+            return status(), False
+        if action in ("quick", "full"):
+            return start(action), False
         return f"不支持的 action:{action}", True
 
     def _cleanup(self, args, on_status):

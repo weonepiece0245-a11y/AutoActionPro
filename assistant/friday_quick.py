@@ -57,6 +57,7 @@ class QuickCommands:
         self.screentime = None  # 电脑使用时间(friday_screentime.ScreenTime)
         self.notes = None  # 速记本(friday_notes.Notes)
         self.dates = None  # 生日和纪念日(friday_dates.Dates)
+        self.virus = None  # 病毒扫描:(开始(kind), 状态())
         self.on_say = None  # 场景里“说”的那一步:马上读出来
         self.silent = False  # 这次的回答已经读过了(场景模式),不用再读
         self.clock = clock
@@ -83,6 +84,13 @@ class QuickCommands:
                         r"(花在哪里?了?|花了多少钱?|用了多少钱?|花费|用量|明细|花费明细)$"
                         r"|^(这个月|本月|这月)?(的)?(AI|ai|Claude|claude) ?(花费|费用|用量)(明细|报告)?$"
                         r"|^(这个月|本月)?花费(明细|报告)$"), self._spending),
+            (re.compile(r"^(做|来|开始|开|跑)?(个|一个|一次)?(电脑)?(?:"
+                        r"(快速|全面|完整|全盘|深度)(的)?(病毒)?(扫描|扫|查杀|杀毒)(一下|一遍|一次)?(电脑|全盘)?(的)?(病毒|毒)?"
+                        r"|(病毒)?(扫描|扫|查杀|查|杀)(一下|一遍|一次|下)?(电脑|全盘)?(的)?(病毒|毒)"
+                        r"|病毒扫描|杀毒)$"), self._virus),
+            (re.compile(r"^(病毒)?(扫描|扫毒|杀毒)(的)?(结果|进度|状态|情况)(怎么样|如何)?$"
+                        r"|^(病毒扫描|扫描|扫毒|杀毒)(好了没有?|完了没有?|做完了没有?|扫完了没有?|怎么样了?)$"
+                        r"|^(电脑|我的电脑)?(有没有|有)(中)?病毒$|^上次(什么时候)?(扫描|扫毒|杀毒)(是)?(什么时候)?$"), self._virus_status),
         ]
 
     NOTE_ADD = re.compile(r"^\s*(星期五[,,\s]*)?(帮我)?(记一下|记下来|记下|备忘一下|备忘|速记)\s*[::,,]?\s*(?P<text>.+)$", re.S)
@@ -204,6 +212,18 @@ class QuickCommands:
         if self.dates is None or not (found.group(1) or found.group(3)):
             return None  # 只说“生日”太含糊
         return self.dates.describe_upcoming(30)
+
+    # ---------- 病毒扫描 ----------
+    def _virus(self, found):
+        if self.virus is None:
+            return None
+        full = any(w in found.group(0) for w in ("全面", "完整", "全盘", "深度"))
+        return self.virus[0]("full" if full else "quick")
+
+    def _virus_status(self, found):
+        if self.virus is None:
+            return None
+        return self.virus[1]()
 
     # ---------- 使用时间 ----------
     def _screen_time(self, found):

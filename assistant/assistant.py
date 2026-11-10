@@ -1304,6 +1304,7 @@ class WebSession:
     downloads_dir = None  # 下载文件夹(问过 Windows 就记住)
     memtidy = None  # 记忆整理(friday_memtidy.MemoryTidy)
     cleanup_items = None  # 上次找到的大文件和重复文件
+    defender = None  # 病毒扫描(friday_defender.Defender)
     discord = None  # Discord 机器人(提醒推到手机)
     cloud = None  # 云端后备的连接(friday_cloud.CloudClient)
     start_cloud = None  # 用配对码连接云端
@@ -1814,6 +1815,7 @@ def settings_state(session, meter=None) -> dict:
         "api_key_tail": api_key_tail(),
         "key_expires": os.environ.get("FRIDAY_KEY_EXPIRES", "").strip(),
         "health": health_state(session),
+        "defender": defender_state(session),
         "rain_alert": __import__("friday_alerts").rain_time(),
         "event_lead": __import__("friday_events").lead_minutes() if google_ready(session) else None,
         "mail_alert": mail_alert_state(session),
@@ -1967,6 +1969,8 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
                 done.append(friday_photos.describe(friday_photos.sort_photos(Path(folder))))
             except ValueError as e:
                 return {"error": str(e)}
+    if payload.get("virus_scan") in ("quick", "full") and getattr(session, "defender", None) is not None:
+        done.append(start_virus_scan(session, payload["virus_scan"]))
     if payload.get("tidy_downloads") or payload.get("undo_tidy"):
         import friday_health
 
@@ -2364,10 +2368,13 @@ def start_care(session, ctx, hub, toolbox: Toolbox, voice_module):
     return care
 
 
-def announce(session, text: str, icon: str, short: str) -> None:
-    """星期五主动说的事:显示在窗口、推到手机、读出来(打游戏时先记着,打完再说)。"""
+def announce(session, text: str, icon: str, short: str, urgent: bool = False) -> None:
+    """星期五主动说的事:显示在窗口、推到手机、读出来(打游戏时先记着,打完再说)。urgent:不管推送设定一律推到手机。"""
     session.hub.broadcast({"type": "reminder", "text": f"{icon} {text}"})
-    push_to_phone(session, f"{icon} {text}")
+    if urgent:
+        phone_alert(session, f"{icon} {text}")
+    else:
+        push_to_phone(session, f"{icon} {text}")
     care = getattr(session, "care", None)
     if care is not None and care.quiet_now():
         care.hold(text, short=short)
@@ -2511,6 +2518,20 @@ def start_date_reminders(session, toolbox: Toolbox, interval: float = 15 * 60) -
             time.sleep(interval)
 
     threading.Thread(target=loop, daemon=True, name="friday-dates").start()
+
+
+def start_virus_scan(session, kind: str) -> str:
+    """病毒扫描在后台跑;扫完说结果。发现威胁、或者是全面扫描(很久,人多半不在电脑前),一律推到手机。"""
+    def done(text: str, found: bool) -> None:
+        short = "病毒扫描发现了威胁,详细在窗口里" if found else "病毒扫描做完了,详细在窗口里"
+        announce(session, text, "🛡", short, urgent=found or kind == "full")
+
+    return session.defender.start(kind, done, _call_me(session))
+
+
+def defender_state(session) -> dict | None:
+    defender = getattr(session, "defender", None)
+    return defender.state() if defender is not None and os.name == "nt" else None
 
 
 def start_heartbeat(events: queue.Queue, data_dir: str, interval: float = 30) -> None:
@@ -2998,6 +3019,12 @@ def run_web(args) -> None:
 
         session.care.screentime = friday_screentime.ScreenTime(os.path.join(data_dir, "friday_screentime.json"))
         toolbox.screentime = session.quick.screentime = session.care.screentime
+    import friday_defender
+
+    if friday_defender.available():  # 病毒扫描(Windows 自带的 Defender)
+        session.defender = friday_defender.Defender()
+        toolbox.virus = session.quick.virus = (lambda kind: start_virus_scan(session, kind),
+                                               session.defender.describe_status)
     toolbox.cleanup = (lambda: cleanup_scan(session, toolbox), lambda: session.cleanup_items,
                        lambda ids: cleanup_recycle(session, toolbox, ids))
     import friday_notes

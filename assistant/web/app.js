@@ -567,6 +567,16 @@ function fillSettings() {
     const dl = hl.downloads;
     $("downloadsNote").textContent = dl ? `下载文件夹:${dl.files} 个文件,${dl.gb}GB${dl.messy ? " ⚠ 有点乱" : ""}` : "下载文件夹";
   }
+  const df = s.defender;
+  $("virusQuick").parentElement.parentElement.hidden = !df;
+  if (df) {
+    const run = df.running;
+    $("virusNote").textContent = run ? `正在${run.kind === "full" ? "全面" : "快速"}扫描(${run.minutes} 分钟了),扫完会告诉你`
+      : "病毒扫描(Windows 自带的 Defender)";
+    $("virusQuick").disabled = $("virusFull").disabled = !!run;
+    $("virusLast").hidden = !df.last;
+    $("virusLast").textContent = df.last ? "上次结果:" + df.last : "";
+  }
   const sc = s.scenes;
   $("sceneGroup").hidden = !sc;
   if (sc && !$("sceneGroup").contains(document.activeElement)) {
@@ -832,6 +842,11 @@ $("photoSort").onclick = () => {
   const folder = $("photoFolder").value.trim();
   if (!confirm(`把${folder ? "“" + folder + "”" : "“图片”文件夹"}最上层的照片和视频,按拍摄月份分进“2026-11”这样的子文件夹?整理错了可以撤销。`)) return;
   saveSetting({ sort_photos: folder }, 6000);
+};
+$("virusQuick").onclick = () => saveSetting({ virus_scan: "quick" }, 5000);
+$("virusFull").onclick = () => {
+  if (!confirm("全面扫描要一两个小时甚至更久,这段时间电脑会慢一点。扫完会告诉你,也会推到手机。要开始吗?")) return;
+  saveSetting({ virus_scan: "full" }, 6000);
 };
 $("photoUndo").onclick = () => saveSetting({ undo_sort_photos: true }, 5000);
 $("cleanupScan").onclick = async () => {

@@ -7217,5 +7217,139 @@ class PhotoSortTest(TempDirTest):
             friday_photos.check_folder(Path(self.tmp, "nope"))
 
 
+class DefenderTest(unittest.TestCase):
+    def runner(self, replies):
+        self.scripts = []
+
+        def run(script, timeout):
+            self.scripts.append((script, timeout))
+            return replies.pop(0)
+        return run
+
+    def test_clean_quick_scan(self):
+        import friday_defender
+
+        d = friday_defender.Defender(self.runner([(0, '{"threats":[],"details":true}', "")]))
+        result = d.scan("quick")
+        self.assertTrue(result["ok"])
+        self.assertIn("-ScanType QuickScan", self.scripts[0][0])
+        self.assertIn("没有发现", d.describe_result("quick", result, "老板"))
+
+    def test_full_scan_reports_threats(self):
+        import friday_defender
+
+        out = json.dumps({"threats": {"name": "Trojan:Win32/Fake", "files": "file:_C:\\Users\\x\\bad.exe",
+                                      "fixed": False}, "details": True})
+        d = friday_defender.Defender(self.runner([(0, out, "")]))
+        result = d.scan("full")
+        self.assertIn("-ScanType FullScan", self.scripts[0][0])
+        self.assertEqual(self.scripts[0][1], friday_defender.TIMEOUT["full"])
+        self.assertEqual(result["threats"][0]["files"], ["C:\\Users\\x\\bad.exe"])
+        text = d.describe_result("full", result, "老板")
+        self.assertIn("发现 1 个威胁", text)
+        self.assertIn("还没处理", text)
+        self.assertIn("bad.exe", text)
+
+    def test_defender_off_is_explained(self):
+        import friday_defender
+
+        d = friday_defender.Defender(self.runner([(1, "", "Start-MpScan : 0x800106ba service not running")]))
+        result = d.scan("quick")
+        self.assertFalse(result["ok"])
+        self.assertIn("没在运行", d.describe_result("quick", result))
+
+    def test_unreadable_details_do_not_claim_clean(self):
+        import friday_defender
+
+        d = friday_defender.Defender(self.runner([(0, '{"threats":[],"details":false}', "")]))
+        text = d.describe_result("quick", d.scan("quick"))
+        self.assertNotIn("没有发现病毒", text)
+        self.assertIn("保护历史记录", text)
+
+    def test_timeout(self):
+        import friday_defender
+
+        def run(script, timeout):
+            raise subprocess.TimeoutExpired("powershell", timeout)
+        result = friday_defender.Defender(run).scan("quick")
+        self.assertFalse(result["ok"])
+        self.assertIn("太久", result["error"])
+
+    def test_start_runs_in_background_once(self):
+        import friday_defender
+
+        gate = threading.Event()
+
+        def run(script, timeout):
+            gate.wait(5)
+            return 0, '{"threats":[],"details":true}', ""
+        d = friday_defender.Defender(run)
+        done = []
+        finished = threading.Event()
+        with mock.patch.object(friday_defender, "available", return_value=True):
+            first = d.start("quick", lambda text, found: (done.append((text, found)), finished.set()))
+            second = d.start("full", lambda text, found: None)
+        self.assertIn("开始快速扫描", first)
+        self.assertIn("已经在做快速扫描", second)
+        self.assertEqual(d.state()["running"]["kind"], "quick")
+        gate.set()
+        self.assertTrue(finished.wait(5))
+        self.assertFalse(done[0][1])
+        self.assertIsNone(d.state()["running"])
+        self.assertIn("没有发现", d.state()["last"])
+
+    def test_not_windows(self):
+        import friday_defender
+
+        with mock.patch.object(friday_defender, "available", return_value=False):
+            self.assertIn("Windows", friday_defender.Defender(lambda s, t: (0, "", "")).start("quick", print))
+
+    def test_status(self):
+        import friday_defender
+
+        out = json.dumps({"enabled": True, "realtime": False, "signatures": "2026-11-10 08:00",
+                          "quick": "2026-11-09 12:00", "full": ""})
+        text = friday_defender.Defender(self.runner([(0, out, "")])).describe_status()
+        self.assertIn("实时保护没开", text)
+        self.assertIn("2026-11-09 12:00", text)
+        self.assertIn("全面扫描:没有记录", text)
+
+    def test_quick_phrases(self):
+        import friday_quick
+
+        quick = friday_quick.QuickCommands(types.SimpleNamespace())
+        started = []
+        quick.virus = (lambda kind: started.append(kind) or "ok", lambda: "status")
+        for text, kind in (("扫一下病毒", "quick"), ("快速扫描", "quick"), ("全面扫描", "full"),
+                           ("帮我做一次全面的病毒扫描", "full"), ("杀毒", "quick")):
+            self.assertEqual(quick.handle(text), "ok", text)
+            self.assertEqual(started[-1], kind, text)
+        self.assertEqual(quick.handle("病毒扫描好了没"), "status")
+        self.assertEqual(quick.handle("电脑有没有中病毒?"), "status")
+        self.assertIsNone(quick.handle("扫描"))
+        self.assertIsNone(quick.handle("扫描电脑"))
+
+    def test_tool(self):
+        box = tools.Toolbox(tools.Memory(os.path.join(tempfile.mkdtemp(), "m.json")), lambda action: True)
+        self.assertNotIn("virus_scan", [t["name"] for t in box.definitions()])
+        box.virus = (lambda kind: f"start {kind}", lambda: "status")
+        self.assertIn("virus_scan", [t["name"] for t in box.definitions()])
+        self.assertEqual(box._virus_scan({"action": "full"}, print), ("start full", False))
+        self.assertEqual(box._virus_scan({"action": "status"}, print), ("status", False))
+
+    def test_results_reach_phone_when_serious(self):
+        calls = []
+
+        class FakeDefender:
+            def start(self, kind, on_done, name):
+                on_done(f"{kind} done", kind == "quick")
+                return "started"
+        session = SimpleNamespace(defender=FakeDefender(), call_me="老板")
+        with mock.patch.object(app, "announce", lambda s, text, icon, short, urgent=False: calls.append((text, urgent))):
+            self.assertEqual(app.start_virus_scan(session, "quick"), "started")  # 发现威胁
+            app.start_virus_scan(session, "full")  # 全面扫描
+        self.assertEqual(calls, [("quick done", True), ("full done", True)])
+
+
 if __name__ == "__main__":
     unittest.main()
