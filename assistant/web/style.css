@@ -337,3 +337,4 @@ body.locked > *:not(#lockScreen) { visibility: hidden !important; }
 .scene-steps { font: inherit; font-size: 13px; line-height: 1.5; color: var(--text); background: rgba(0,0,0,.35); border: 1px solid var(--cyan-line); border-radius: 6px; padding: 6px 8px; resize: vertical; }
 .scene-steps:focus { outline: none; border-color: var(--accent); }
 .scene-card .set-ctl { justify-content: flex-end; }
+#cleanupList { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 8px; max-height: 320px; overflow-y: auto; }

@@ -635,6 +635,17 @@ EXPENSE_TOOL = {
     },
 }
 
+CLEANUP_TOOL = {
+    "name": "cleanup",
+    "description": ("找大文件和重复文件(在用户的下载、桌面、文档、视频、图片、音乐文件夹里):scan 扫描(要一两分钟),"
+                    "list 看上次找到的(带编号),recycle 把选的编号放进回收站(要用户确认,还能从回收站拿回来)。"
+                    "不要自己决定删哪些,先列给用户看,用户说了要丢哪些才 recycle。"),
+    "input_schema": {"type": "object", "properties": {
+        "action": {"type": "string", "enum": ["scan", "list", "recycle"]},
+        "ids": {"type": "array", "items": {"type": "integer"}, "description": "recycle:要丢的编号"}},
+        "required": ["action"]},
+}
+
 SCREEN_TIME_TOOL = {
     "name": "screen_time",
     "description": "用户用电脑的时间统计(各程序、各游戏用了多久,在电脑上记录的):period 是 today / yesterday / week。",
@@ -788,6 +799,7 @@ class Toolbox:
         self.meter = None  # 花费统计(给 ai_spending 用)
         self.scenes = None  # 场景模式(friday_scenes.Scenes)
         self.screentime = None  # 电脑使用时间(friday_screentime.ScreenTime)
+        self.cleanup = None  # (scan, list, recycle) 三个函数,由主程序接上
         self.budget = None
         if ledger is not None and google is not None:
             from friday_ledger import sheet_sync
@@ -829,6 +841,7 @@ class Toolbox:
             "ai_spending": self._ai_spending,
             "scene": self._scene,
             "screen_time": self._screen_time,
+            "cleanup": self._cleanup,
         }
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
 
@@ -858,6 +871,8 @@ class Toolbox:
             tools = tools + [SCENE_TOOL]
         if self.screentime is not None:
             tools = tools + [SCREEN_TIME_TOOL]
+        if self.cleanup is not None and self.local_tools:
+            tools = tools + [CLEANUP_TOOL]
         if self.todos is not None and self.google is None:  # 接了 Google 就用 Google Tasks 当待办清单
             tools = tools + [TODO_TOOL]
         if self.computer is not None and self.computer.available:
@@ -953,6 +968,36 @@ class Toolbox:
                 return ledger.delete(args.get("id") or "last"), False
         except ValueError as e:
             return str(e), True
+        return f"不支持的 action:{action}", True
+
+    def _cleanup(self, args, on_status):
+        import friday_cleanup
+
+        scan, items, recycle = self.cleanup
+        action = args.get("action")
+        if action == "scan":
+            on_status("在找大文件和重复文件(要一两分钟)")
+            message, found = scan()
+            return message + "\n" + "\n".join(
+                f"#{i['id']} {i['path']}({friday_cleanup.size_text(i['size'])}"
+                + (f",和 {i['keep']} 一样" if i["kind"] == "dup" else "") + ")" for i in found[:40]), False
+        if action == "list":
+            found = items() or []
+            if not found:
+                return "还没扫描过,或者上次找到的都处理完了", False
+            return "\n".join(f"#{i['id']} {i['path']}({friday_cleanup.size_text(i['size'])})" for i in found[:40]), False
+        if action == "recycle":
+            ids = [int(i) for i in args.get("ids") or []]
+            if not ids:
+                return "要给编号", True
+            chosen = [i for i in (items() or []) if i["id"] in ids]
+            listing = "、".join(Path(i["path"]).name for i in chosen[:8]) + ("……" if len(chosen) > 8 else "")
+            if not self._confirmed(f"把 {len(chosen)} 个文件放进回收站:{listing}"):
+                return "用户没有允许", True
+            try:
+                return recycle(ids), False
+            except ValueError as e:
+                return str(e), True
         return f"不支持的 action:{action}", True
 
     def _screen_time(self, args, on_status):

@@ -453,6 +453,18 @@ $rows = foreach ($n in $names) {
 ConvertTo-Json -InputObject @($rows | Sort-Object mem -Descending | Select-Object -First 15) -Compress
 """
 
+RECYCLE_FILES = r"""
+Add-Type -AssemblyName Microsoft.VisualBasic
+foreach ($p in ([Console]::In.ReadToEnd() -split "`n")) {
+  $p = $p.Trim()
+  if (-not $p) { continue }
+  if (Test-Path -LiteralPath $p -PathType Leaf) {
+    [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($p, 'OnlyErrorDialogs', 'SendToRecycleBin')
+    Write-Output $p
+  }
+}
+"""
+
 EMPTY_RECYCLE_BIN = "Clear-RecycleBin -Force -ErrorAction SilentlyContinue"
 
 SLEEP = r"""
@@ -699,6 +711,13 @@ class Computer:
             return []
         _, out = self._pc().powershell(CLOSE_PROCESSES, env={"FRIDAY_APP_NAMES": ",".join(names)})
         return sorted(set((out or "").split()))
+
+    def recycle(self, paths: list[str]) -> list[str]:
+        """把这些文件放进回收站(还能拿回来)。返回放进去了哪些。"""
+        if not paths:
+            return []
+        _, out = self._pc().powershell(RECYCLE_FILES, stdin="\n".join(paths))
+        return [line.strip() for line in (out or "").splitlines() if line.strip()]
 
     def window_programs(self) -> list[dict]:
         """开着窗口的程序,按占用内存从多到少:[{name, mb}]。"""

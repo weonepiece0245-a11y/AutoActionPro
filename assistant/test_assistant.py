@@ -92,6 +92,7 @@ import friday_mailwatch  # noqa: E402
 import friday_memtidy  # noqa: E402
 import friday_scenes  # noqa: E402
 import friday_screentime  # noqa: E402
+import friday_cleanup  # noqa: E402
 import friday_wake  # noqa: E402
 import friday_cloud  # noqa: E402
 import friday_care  # noqa: E402
@@ -6916,6 +6917,61 @@ class ScreenTimeTest(TempDirTest):
         care.screentime = SimpleNamespace(record=recorded.append)
         care.tick()
         self.assertEqual(recorded[0]["app"], "chrome.exe")
+
+
+class CleanupTest(TempDirTest):
+    def make_files(self):
+        root = Path(self.tmp, "Downloads")
+        (root / "sub").mkdir(parents=True)
+        (root / "AppData").mkdir()
+        data = os.urandom(2 * 1024 * 1024)
+        (root / "movie.mp4").write_bytes(data)
+        (root / "sub" / "movie (1).mp4").write_bytes(data)  # 一模一样
+        (root / "other.mp4").write_bytes(data[:-1] + b"x")  # 一样大但不一样
+        (root / "big.iso").write_bytes(os.urandom(3 * 1024 * 1024))
+        (root / "AppData" / "cache.bin").write_bytes(data)  # 程序资料夹不看
+        (root / "id_rsa").write_bytes(data)  # 钥匙不碰
+        return root
+
+    def test_scan_finds_big_and_duplicates(self):
+        root = self.make_files()
+        with mock.patch.object(friday_cleanup, "BIG_FILE", 2.5 * 1024 * 1024):
+            result = friday_cleanup.scan([root])
+        self.assertEqual([Path(b["path"]).name for b in result["big"]], ["big.iso"])
+        self.assertEqual(len(result["dups"]), 1)
+        self.assertEqual(sorted(Path(p).name for p in result["dups"][0]["paths"]), ["movie (1).mp4", "movie.mp4"])
+        items = friday_cleanup.candidates(result)
+        self.assertEqual([(Path(i["path"]).name, i["kind"]) for i in items], [("movie (1).mp4", "dup"), ("big.iso", "big")])
+        self.assertIn("1 组一模一样的文件", friday_cleanup.describe(result))
+
+    def test_recycle_only_listed_files(self):
+        root = self.make_files()
+        moved = []
+        computer = SimpleNamespace(available=True, folder=lambda name: root,
+                                   recycle=lambda paths: moved.extend(paths) or list(paths))
+        toolbox = SimpleNamespace(computer=computer)
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        with mock.patch.object(friday_cleanup, "BIG_FILE", 2.5 * 1024 * 1024):
+            message, items = app.cleanup_scan(session, toolbox)
+        self.assertIn("看了", message)
+        result = app.cleanup_recycle(session, toolbox, [1, 99])
+        self.assertIn("放进回收站了 1 个文件", result)
+        self.assertEqual([Path(p).name for p in moved], ["movie (1).mp4"])
+        self.assertEqual([i["id"] for i in session.cleanup_items], [2])
+
+    def test_tool_needs_confirmation(self):
+        toolbox = self.make_toolbox()
+        found = [{"id": 1, "path": str(Path(self.tmp, "a.zip")), "size": 5 * 1024 ** 2, "kind": "big"}]
+        recycled = []
+        toolbox.cleanup = (lambda: ("找到了", found), lambda: found, lambda ids: recycled.append(ids) or "放进回收站了")
+        toolbox.confirm = lambda text: False
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+        self.assertIn("#1", toolbox.run(tool_use("cleanup", {"action": "scan"}), lambda s: None)["content"])
+        self.assertTrue(toolbox.run(tool_use("cleanup", {"action": "recycle", "ids": [1]}), lambda s: None)["is_error"])
+        self.assertEqual(recycled, [])
+        toolbox.confirm = lambda text: True
+        toolbox.run(tool_use("cleanup", {"action": "recycle", "ids": [1]}), lambda s: None)
+        self.assertEqual(recycled, [[1]])
 
 
 if __name__ == "__main__":

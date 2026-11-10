@@ -574,6 +574,7 @@ function fillSettings() {
     $("memtidyNote").textContent = mt.proposals.length ? "这些是建议,打勾的才会改:"
       : `每周用最便宜的 Haiku 帮星期五整理一次记忆(现在 ${mt.facts} 条),只给建议,你勾了才改` + (mt.last_run ? `。上次:${mt.last_run}` : "");
   }
+  if (s.cleanup && !$("cleanupList").children.length) showCleanup(s.cleanup);
   const sec = s.security;
   $("securityGroup").hidden = !sec;
   if (sec) {
@@ -779,6 +780,47 @@ function sceneCard(scene) {
   return card;
 }
 $("sceneAdd").onclick = () => { const card = sceneCard({}); $("sceneList").append(card); card.querySelector("input").focus(); };
+function sizeText(n) { return n >= 1073741824 ? (n / 1073741824).toFixed(1) + "GB" : Math.round(n / 1048576) + "MB"; }
+function updatePicked() {
+  const boxes = [...document.querySelectorAll("#cleanupList input:checked")];
+  const total = boxes.reduce((sum, b) => sum + Number(b.dataset.size), 0);
+  $("cleanupPicked").textContent = boxes.length ? `选了 ${boxes.length} 个,共 ${sizeText(total)}` : "勾选要丢掉的文件";
+}
+function showCleanup(items) {
+  const list = $("cleanupList");
+  list.replaceChildren();
+  for (const item of items || []) {
+    const row = document.createElement("label");
+    row.className = "tidy-item";
+    const box = Object.assign(document.createElement("input"), { type: "checkbox", value: item.id });
+    box.dataset.size = item.size;
+    box.onchange = updatePicked;
+    const text = document.createElement("span");
+    const name = item.path.split(/[\\/]/).pop();
+    text.textContent = `${name}(${sizeText(item.size)})` + (item.kind === "dup" ? ` —— 和 ${item.keep} 一模一样` : "") + `\n${item.path}`;
+    text.style.whiteSpace = "pre-wrap";
+    row.append(box, text);
+    list.append(row);
+  }
+  $("cleanupActions").hidden = !(items || []).length;
+  updatePicked();
+}
+$("cleanupScan").onclick = async () => {
+  const btn = $("cleanupScan"); btn.disabled = true; btn.textContent = "找中…(一两分钟)";
+  const r = await api("/api/settings", { cleanup_scan: true }).catch(() => ({ error: "星期五没有响应" }));
+  btn.disabled = false; btn.textContent = "找一找";
+  if (r.error) { toast(r.error, 4000); return; }
+  $("cleanupNote").hidden = false;
+  $("cleanupNote").textContent = r.message;
+  showCleanup(r.items);
+};
+$("cleanupRecycle").onclick = () => {
+  const ids = [...document.querySelectorAll("#cleanupList input:checked")].map((b) => Number(b.value));
+  if (!ids.length) { toast("先勾选要丢掉的文件"); return; }
+  if (!confirm(`把 ${ids.length} 个文件放进回收站?(还能从回收站拿回来)`)) return;
+  $("cleanupList").replaceChildren();
+  saveSetting({ cleanup_recycle: ids }, 5000);
+};
 $("memtidyRun").onclick = async () => {
   const btn = $("memtidyRun"); btn.disabled = true; btn.textContent = "整理中…";
   await saveSetting({ memtidy_run: true }, 5000);

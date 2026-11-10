@@ -1280,6 +1280,7 @@ class WebSession:
     pending_totp = None  # 正在设置的验证器密钥(确认前不保存)
     downloads_dir = None  # 下载文件夹(问过 Windows 就记住)
     memtidy = None  # 记忆整理(friday_memtidy.MemoryTidy)
+    cleanup_items = None  # 上次找到的大文件和重复文件
     discord = None  # Discord 机器人(提醒推到手机)
     cloud = None  # 云端后备的连接(friday_cloud.CloudClient)
     start_cloud = None  # 用配对码连接云端
@@ -1616,6 +1617,48 @@ def apply_lock_settings(payload: dict, session, env: Path, save_env_value) -> di
     return {"done": done}
 
 
+def cleanup_roots(session, toolbox) -> list[Path]:
+    """要找大文件的个人文件夹。"""
+    roots = []
+    computer = getattr(toolbox, "computer", None)
+    for name, fallback in (("downloads", "Downloads"), ("desktop", "Desktop"), ("documents", "Documents"),
+                           ("videos", "Videos"), ("pictures", "Pictures"), ("music", "Music")):
+        folder = Path.home() / fallback
+        if computer is not None and computer.available:
+            try:
+                folder = Path(computer.folder(name))
+            except Exception:
+                pass
+        if folder not in roots:
+            roots.append(folder)
+    return roots
+
+
+def cleanup_scan(session, toolbox) -> tuple[str, list[dict]]:
+    import friday_cleanup
+
+    result = friday_cleanup.scan(cleanup_roots(session, toolbox))
+    session.cleanup_items = friday_cleanup.candidates(result)
+    return friday_cleanup.describe(result), session.cleanup_items
+
+
+def cleanup_recycle(session, toolbox, ids: list[int]) -> str:
+    import friday_cleanup
+
+    items = {i["id"]: i for i in getattr(session, "cleanup_items", []) or []}
+    paths = [items[i]["path"] for i in ids if i in items and Path(items[i]["path"]).is_file()
+             and not friday_cleanup._skip(Path(items[i]["path"]))]
+    computer = getattr(toolbox, "computer", None)
+    if not paths:
+        return "没有要丢的文件(可能已经删掉了)"
+    if computer is None or not computer.available:
+        raise ValueError("这台电脑不能操作文件")
+    moved = computer.recycle(paths)
+    freed = sum(items[i]["size"] for i in ids if i in items and items[i]["path"] in moved)
+    session.cleanup_items = [i for i in session.cleanup_items if i["path"] not in moved]
+    return f"放进回收站了 {len(moved)} 个文件,清空回收站后能省 {friday_cleanup.size_text(freed)}"
+
+
 def scenes_state(session) -> dict | None:
     import friday_scenes
 
@@ -1747,6 +1790,7 @@ def settings_state(session, meter=None) -> dict:
         "mail_alert": mail_alert_state(session),
         "memtidy": memtidy_state(session),
         "scenes": scenes_state(session),
+        "cleanup": getattr(session, "cleanup_items", None) if os.name == "nt" or getattr(session, "cleanup_items", None) else None,
         "weekly_report": __import__("friday_alerts").weekly_enabled(),
         "quick": __import__("friday_quick").quick_enabled() if getattr(session, "quick", None) is not None else None,
         "wake": wake_state(session),
@@ -1894,6 +1938,15 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         done.extend(lock_result.get("done", []))
         if "secret" in lock_result:
             return {"ok": True, "message": "按下面的步骤加到验证器 App 里", "secret": lock_result["secret"]}
+    if payload.get("cleanup_scan"):
+        message, items = cleanup_scan(session, toolbox)
+        return {"ok": True, "message": message, "items": items}
+    if "cleanup_recycle" in payload:
+        try:
+            ids = [int(i) for i in payload["cleanup_recycle"]]
+            done.append(cleanup_recycle(session, toolbox, ids))
+        except (TypeError, ValueError) as e:
+            return {"error": str(e) or "选的项目不对"}
     if "scene_save" in payload or "scene_remove" in payload or "scene_run" in payload:
         import friday_scenes
 
@@ -2832,6 +2885,8 @@ def run_web(args) -> None:
 
         session.care.screentime = friday_screentime.ScreenTime(os.path.join(data_dir, "friday_screentime.json"))
         toolbox.screentime = session.quick.screentime = session.care.screentime
+    toolbox.cleanup = (lambda: cleanup_scan(session, toolbox), lambda: session.cleanup_items,
+                       lambda ids: cleanup_recycle(session, toolbox, ids))
     toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
     try:
         web_loop(session, events, voice_module.transcribe_audio)

@@ -226,7 +226,7 @@ class HealthCheck:
         for disk in self.disks():
             if disk["low"] and self._once(f"disk_{disk['drive']}"):
                 said.append(f"{name},{disk['drive']} 盘只剩 {disk['free_gb']}GB({disk['free_percent']:.0f}%),快满了。"
-                            "可以清一下回收站、下载文件夹,或者让我看看哪些大文件能删。")
+                            "可以清一下回收站,或者在齿轮设定 → 电脑健康 → 大文件和重复文件 点“找一找”,看看哪些能删。")
         percent = self.memory()
         self.memory_streak = self.memory_streak + 1 if percent is not None and percent >= MEMORY_HIGH_PERCENT else 0
         if self.memory_streak >= MEMORY_HIGH_CHECKS and self._once("memory"):
