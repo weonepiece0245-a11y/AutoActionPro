@@ -84,6 +84,7 @@ import friday_router  # noqa: E402
 import friday_budget  # noqa: E402
 import friday_backup  # noqa: E402
 import friday_desktop  # noqa: E402
+import friday_locks  # noqa: E402
 import friday_wake  # noqa: E402
 import friday_cloud  # noqa: E402
 import friday_care  # noqa: E402
@@ -4200,6 +4201,21 @@ class WebServerTest(TempDirTest):
         status, body = self.request("GET", "/api/state?t=secret")
         self.assertEqual(json.loads(body)["greeting"], "早上好")
 
+    def test_locked_window_shows_nothing(self):
+        pin = friday_locks.hash_pin("2468")
+        self.ctx.lock = friday_locks.WindowLock(stored=lambda: pin, clock=lambda: 0.0)
+        status, body = self.request("POST", "/api/lock", "{}", self.auth())
+        self.assertEqual(status, 200)
+        status, body = self.request("GET", "/api/state", headers=self.auth())
+        self.assertEqual(json.loads(body), {"locked": True})  # 记忆、提醒都不给看
+        self.assertEqual(self.request("GET", "/events", headers=self.auth())[0], 423)
+        self.assertEqual(self.request("POST", "/api/ask", json.dumps({"text": "x"}), self.auth())[0], 423)
+        self.assertEqual(self.request("POST", "/api/approve", json.dumps({"id": "x", "answer": "yes"}), self.auth())[0], 423)
+        self.assertEqual(self.request("POST", "/api/unlock", json.dumps({"pin": "1111"}), self.auth())[0], 403)
+        self.assertEqual(self.request("POST", "/api/unlock", json.dumps({"pin": "2468"}))[0], 403)  # 没口令也不行
+        self.assertEqual(self.request("POST", "/api/unlock", json.dumps({"pin": "2468"}), self.auth())[0], 200)
+        self.assertEqual(self.request("POST", "/api/ask", json.dumps({"text": "x"}), self.auth())[0], 202)
+
     def test_ask_and_command_go_to_main_loop(self):
         status, _ = self.request("POST", "/api/ask", json.dumps({"text": " 你好 ", "speak": True}), self.auth())
         self.assertEqual(status, 202)
@@ -6109,6 +6125,111 @@ class AuditFixesTest(TempDirTest):
         self.assertTrue(any("私信" in r for r in replies))
         self.assertIn("没做", replies)
         self.assertIsNone(bot.toolbox.approve.remote)  # 用完就恢复
+
+
+class LocksTest(TempDirTest):
+    SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+
+    def test_totp_matches_rfc_6238(self):
+        self.assertEqual(friday_locks.totp(self.SECRET, 1), "287082")
+        self.assertEqual(friday_locks.totp(self.SECRET, 1111111109 // 30), "081804")
+        self.assertEqual(friday_locks.matching_counter(self.SECRET, "287 082", 59), 1)
+        self.assertEqual(friday_locks.matching_counter(self.SECRET, "287082", 59 + 30), 1)  # 前后 30 秒都认
+        self.assertIsNone(friday_locks.matching_counter(self.SECRET, "287082", 59 + 90))
+        secret = friday_locks.new_secret()
+        self.assertEqual(len(secret), 32)
+        self.assertIn("secret=" + secret, friday_locks.setup_uri(secret))
+
+    def test_remote_lock(self):
+        now = [59.0]
+        alerts = []
+        lock = friday_locks.RemoteLock(secret=lambda: self.SECRET, clock=lambda: now[0], on_alert=alerts.append)
+        self.assertFalse(lock.session_open())
+        self.assertEqual(lock.check("287082"), "ok")
+        self.assertTrue(lock.session_open())
+        self.assertEqual(lock.check("287082"), "wrong")  # 同一个数字不能用两次
+        now[0] += friday_locks.REMOTE_SESSION_SECONDS + 1
+        self.assertFalse(lock.session_open())  # 2 小时没用:要重新输入
+        self.assertEqual(lock.check("000000"), "wrong")
+        self.assertEqual(lock.check("000001"), "paused")  # 加上前面那次,错了 3 次
+        self.assertTrue(lock.paused)
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(lock.check(friday_locks.totp(self.SECRET, int(now[0] // 30))), "paused")  # 暂停后对的也不行
+        lock.resume()
+        self.assertEqual(lock.check(friday_locks.totp(self.SECRET, int(now[0] // 30))), "ok")
+        off = friday_locks.RemoteLock(secret=lambda: "")
+        self.assertTrue(off.session_open())  # 没开锁:照旧
+
+    def test_window_lock(self):
+        now = [0.0]
+        alerts = []
+        stored = friday_locks.hash_pin("2468")
+        self.assertNotIn("2468", stored)
+        lock = friday_locks.WindowLock(stored=lambda: stored, clock=lambda: now[0], on_alert=alerts.append)
+        self.assertTrue(lock.lock())
+        for _ in range(4):
+            self.assertEqual(lock.unlock("0000"), "wrong")
+        self.assertTrue(lock.unlock("0000").startswith("wait:"))
+        self.assertTrue(lock.unlock("2468").startswith("wait:"))  # 冷却中:对的也要等
+        now[0] += friday_locks.LOCAL_COOLDOWN + 1
+        self.assertEqual(lock.unlock("2468"), "ok")
+        self.assertFalse(lock.locked)
+        self.assertEqual(len(alerts), 1)
+        self.assertFalse(friday_locks.WindowLock(stored=lambda: "").lock())  # 没设 PIN 不能锁
+        self.assertFalse(friday_locks.valid_pin("12"))
+        self.assertTrue(friday_locks.valid_pin("123456"))
+
+    def test_discord_needs_code(self):
+        now = [59.0]
+        sent, events = [], queue.Queue()
+        Path(self.tmp, "d.json").write_text(json.dumps({"owners": [{"id": 42, "name": "me"}]}))
+        gate = dmod.DiscordGate(Path(self.tmp, "d.json"), events, lambda ch, text: sent.append(text), lambda t: None)
+        gate.remote_lock = friday_locks.RemoteLock(secret=lambda: self.SECRET, clock=lambda: now[0])
+        gate.handle(42, "me", True, "帮我看看今天的邮件", "dm")
+        self.assertTrue(events.empty())  # 上锁:先不处理
+        self.assertIn("6 位数字", sent[-1])
+        gate.handle(42, "me", True, "111111", "dm")
+        self.assertIn("不对", sent[-1])
+        gate.handle(42, "me", True, "287082", "dm")
+        self.assertIn("已解锁", sent[-1])
+        kind, message = events.get_nowait()
+        self.assertEqual(message.text, "帮我看看今天的邮件")  # 解锁后接着处理刚才那条
+        gate.handle(42, "me", True, "再看看日历", "dm")
+        self.assertEqual(events.get_nowait()[1].text, "再看看日历")  # 2 小时内不用再输入
+
+        def approve_later(answer):
+            time.sleep(0.05)
+            gate.answers.put(answer)
+
+        threading.Thread(target=approve_later, args=("y",)).start()
+        self.assertFalse(gate.ask("dm", "执行命令:dir", 42, timeout=2))  # 上锁后回复 y 不算
+        self.assertIn("6 位数字", sent[-2] if "不对" in sent[-1] else sent[-1])
+        now[0] = 89.0
+        threading.Thread(target=approve_later, args=(friday_locks.totp(self.SECRET, 2),)).start()
+        self.assertTrue(gate.ask("dm", "执行命令:dir", 42, timeout=2))
+
+    def test_settings(self):
+        env = Path(self.tmp, ".env")
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.remote_lock = friday_locks.RemoteLock()
+        session.window_lock = friday_locks.WindowLock()
+        save = __import__("friday_discord").save_env_value
+        with mock.patch.dict(os.environ, {"FRIDAY_REMOTE_TOTP": "", "FRIDAY_LOCK_PIN": "", "FRIDAY_LOCK_MINUTES": "0"}):
+            secret = app.apply_lock_settings({"remote_lock_setup": True}, session, env, save)["secret"].replace(" ", "")
+            self.assertIn("error", app.apply_lock_settings({"remote_lock_confirm": "000000"}, session, env, save))
+            code = friday_locks.totp(secret, int(time.time() // 30))
+            self.assertIn("已开启", app.apply_lock_settings({"remote_lock_confirm": code}, session, env, save)["done"][0])
+            self.assertTrue(session.remote_lock.enabled())
+            self.assertIn(f"FRIDAY_REMOTE_TOTP={secret}", env.read_text(encoding="utf-8"))
+            self.assertIn("error", app.apply_lock_settings({"lock_minutes": 10}, session, env, save))  # 先设 PIN
+            self.assertIn("error", app.apply_lock_settings({"pin_new": "12", "pin_new2": "12"}, session, env, save))
+            self.assertIn("error", app.apply_lock_settings({"pin_new": "2468", "pin_new2": "2469"}, session, env, save))
+            app.apply_lock_settings({"pin_new": "2468", "pin_new2": "2468"}, session, env, save)
+            self.assertNotIn("2468", env.read_text(encoding="utf-8"))  # 只存哈希
+            self.assertIn("error", app.apply_lock_settings({"pin_old": "0000", "pin_new": "1357", "pin_new2": "1357"},
+                                                           session, env, save))
+            app.apply_lock_settings({"lock_minutes": 10}, session, env, save)
+            self.assertTrue(session.window_lock.enabled())
 
 
 if __name__ == "__main__":

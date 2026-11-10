@@ -194,14 +194,18 @@ function handle(ev) {
       break;
     case "listen":
       startListening(); break;
+    case "locked":
+      showLock(); break;
     case "cleared":
       log.innerHTML = ""; current = null; addLine("已开始新话题"); break;
   }
   $("sendBtn").disabled = busy;
 }
 
+let source = null;
 function connect() {
-  const source = new EventSource(`/events?t=${encodeURIComponent(token)}`);
+  if (source) source.close();
+  source = new EventSource(`/events?t=${encodeURIComponent(token)}`);
   // 每次连上都会先收到之前的对话;先清空,断线重连时才不会重复
   source.onopen = () => { log.innerHTML = ""; current = null; };
   source.onmessage = (e) => { try { handle(JSON.parse(e.data)); } catch (err) { console.error(err); } };
@@ -226,6 +230,7 @@ function li(text, meta) {
 async function loadState() {
   const s = await api("/api/state");
   if (!s || s.error) return;
+  if (s.locked) { showLock(); return s; }
   $("versionText").textContent = s.version || "未记录";
   if (s.settings) settingsState = s.settings;
   if (s.model) showModel(s.model.model, s.model.mode);
@@ -506,6 +511,17 @@ function fillSettings() {
       list.append(line);
     }
     if (!(sec.events || []).length) list.textContent = "没有可疑的事 ✓";
+    const rl = sec.remote_lock || {};
+    $("remoteLockState").textContent = rl.paused ? "已暂停" : rl.enabled ? "已开启" : "没开";
+    $("remoteLockState").className = "google-state " + (rl.paused ? "warn" : rl.enabled ? "ok" : "warn");
+    $("remoteLockSetup").hidden = !!rl.enabled || !sec.discord;
+    $("remoteLockOff").hidden = !rl.enabled;
+    $("remoteLockResume").hidden = !rl.paused;
+    $("pinState").textContent = sec.pin_set ? "已设" : "没设";
+    $("pinState").className = "google-state " + (sec.pin_set ? "ok" : "warn");
+    $("pinOld").hidden = !sec.pin_set;
+    $("setLockMinutes").value = String(sec.lock_minutes || 0);
+    $("lockBtn").hidden = !sec.pin_set;
     const notes = ["钥匙和密码文件星期五不读不碰", "网页、邮件里的指令不照做", "Discord 配对码猜错 5 次就拉黑"];
     notes.push(sec.vendor_local ? "光球的程序库已存在本机" : "光球的程序库还在从网站读取(下次打开会存到本机)");
     if (sec.blocked) notes.push(`已拉黑 ${sec.blocked} 个乱猜配对码的账号`);
@@ -619,6 +635,26 @@ $("setCareNight").onchange = (e) => saveSetting({ care_night: e.target.checked }
 $("setHealth").onchange = (e) => saveSetting({ health: e.target.checked });
 $("tidyNow").onclick = () => { if (confirm("把下载文件夹最上层的文件按类型分进子文件夹(图片、文档、安装程序……)?整理错了可以撤销。")) saveSetting({ tidy_downloads: true }, 6000); };
 $("tidyUndo").onclick = () => saveSetting({ undo_tidy: true }, 5000);
+$("remoteLockSetup").onclick = async () => {
+  const r = await api("/api/settings", { remote_lock_setup: true }).catch(() => ({ error: "星期五没有响应" }));
+  if (r.error) { toast(r.error, 4000); return; }
+  $("remoteLockSecret").textContent = r.secret;
+  $("remoteLockBox").hidden = false;
+  $("remoteLockCode").value = "";
+  $("remoteLockCode").focus();
+};
+$("remoteLockConfirm").onclick = async () => {
+  if (await saveSetting({ remote_lock_confirm: $("remoteLockCode").value.trim() }, 6000)) {
+    $("remoteLockBox").hidden = true; $("remoteLockSecret").textContent = "";
+  }
+};
+$("remoteLockOff").onclick = () => { if (confirm("关闭手机遥控锁?以后用 Discord 遥控时只要回复 y 就能允许操作。")) saveSetting({ remote_lock_off: true }); };
+$("remoteLockResume").onclick = () => saveSetting({ remote_lock_resume: true });
+$("pinSave").onclick = async () => {
+  if (await saveSetting({ pin_old: $("pinOld").value, pin_new: $("pinNew").value, pin_new2: $("pinNew2").value }, 4000))
+    for (const id of ["pinOld", "pinNew", "pinNew2"]) $(id).value = "";
+};
+$("setLockMinutes").onchange = (e) => saveSetting({ lock_minutes: Number(e.target.value) });
 $("discordPair").onclick = () => saveSetting({ discord_pair: true }, 8000);
 $("setRain").onchange = (e) => saveSetting({ rain_alert: e.target.value });
 $("setWeekly").onchange = (e) => saveSetting({ weekly_report: e.target.checked });
@@ -923,12 +959,48 @@ $("approveNo").onclick = () => answerApproval("no");
 $("approveAll").onclick = () => answerApproval("all");
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && approvalId) answerApproval("no"); });
 
+// ---------- 窗口锁 ----------
+let isLocked = false;
+function showLock() {
+  if (isLocked) return;
+  isLocked = true;
+  if (source) { source.close(); source = null; }
+  try { if (recorder && recorder.state !== "inactive") recorder.stop(); } catch {}
+  stopSpeaking();
+  closeSettings();
+  log.innerHTML = ""; current = null;
+  for (const id of ["memoryList", "reminderList", "todoList"]) $(id).innerHTML = "";
+  document.body.classList.add("locked");
+  $("lockScreen").hidden = false;
+  $("lockError").textContent = "";
+  $("lockPin").value = "";
+  $("lockPin").focus();
+}
+async function tryUnlock() {
+  const pin = $("lockPin").value.trim();
+  if (!pin) return;
+  const r = await api("/api/unlock", { pin }).catch(() => ({ error: "星期五没有响应" }));
+  $("lockPin").value = "";
+  if (!r.ok) { $("lockError").textContent = r.error || "PIN 不对"; $("lockPin").focus(); return; }
+  isLocked = false;
+  $("lockScreen").hidden = true;
+  document.body.classList.remove("locked");
+  await loadState();
+  connect();
+}
+$("unlockBtn").onclick = tryUnlock;
+$("lockPin").addEventListener("keydown", (e) => { if (e.key === "Enter") tryUnlock(); });
+$("lockBtn").onclick = async () => {
+  const r = await api("/api/lock", {}).catch(() => ({ error: "星期五没有响应" }));
+  if (r.error) toast(r.error, 4000); else showLock();
+};
+
 // ---------- 启动 ----------
 (async () => {
   setMode("idle");
   const s = await loadState();
   greeting = (s && s.greeting) || "";
-  connect();
+  if (!isLocked) connect();
   setInterval(loadState, 30000);
   $("input").focus();
 })();

@@ -1187,6 +1187,9 @@ class WebSession:
     care = None  # 主动关心(friday_care.Care)
     tray = None  # 右下角托盘图标(打游戏时弹小通知用)
     security = None  # 安全记录(friday_security.SecurityLog)
+    remote_lock = None  # 手机遥控锁(friday_locks.RemoteLock)
+    window_lock = None  # 窗口锁(friday_locks.WindowLock)
+    pending_totp = None  # 正在设置的验证器密钥(确认前不保存)
     downloads_dir = None  # 下载文件夹(问过 Windows 就记住)
     discord = None  # Discord 机器人(提醒推到手机)
     cloud = None  # 云端后备的连接(friday_cloud.CloudClient)
@@ -1452,6 +1455,74 @@ def health_state(session) -> dict | None:
         return None
 
 
+def apply_lock_settings(payload: dict, session, env: Path, save_env_value) -> dict | None:
+    """齿轮设定 → 安全 里的两把锁。没有相关设置时返回 None。"""
+    import friday_locks
+    import friday_security
+
+    keys = {"remote_lock_setup", "remote_lock_confirm", "remote_lock_off", "remote_lock_resume",
+            "pin_new", "lock_minutes"}
+    if not keys & set(payload):
+        return None
+    done = []
+    remote = getattr(session, "remote_lock", None)
+    window = getattr(session, "window_lock", None)
+    if payload.get("remote_lock_setup"):
+        if remote is None:
+            return {"error": "Discord 机器人没有开"}
+        session.pending_totp = friday_locks.new_secret()
+        return {"secret": friday_locks.group(session.pending_totp)}
+    if "remote_lock_confirm" in payload:
+        secret = getattr(session, "pending_totp", None)
+        if not secret:
+            return {"error": "先点“开启”"}
+        if friday_locks.matching_counter(secret, str(payload["remote_lock_confirm"]), time.time()) is None:
+            return {"error": "数字对不上:确认密钥输对了、手机时间是自动的,再填一次 App 里现在的数字"}
+        save_env_value(env, "FRIDAY_REMOTE_TOTP", secret)
+        os.environ["FRIDAY_REMOTE_TOTP"] = secret
+        session.pending_totp = None
+        if remote is not None:
+            remote.resume()
+        friday_security.record("remote_lock_on", "开启了手机遥控锁", "info")
+        done.append("手机遥控锁已开启:用 Discord 遥控前要先输入验证器里的 6 位数字")
+    if payload.get("remote_lock_off"):
+        save_env_value(env, "FRIDAY_REMOTE_TOTP", "")
+        os.environ["FRIDAY_REMOTE_TOTP"] = ""
+        friday_security.record("remote_lock_off", "关闭了手机遥控锁", "warn")
+        done.append("手机遥控锁已关闭")
+    if payload.get("remote_lock_resume") and remote is not None:
+        remote.resume()
+        friday_security.record("remote_lock_resume", "在电脑上恢复了手机遥控", "info")
+        done.append("手机遥控已恢复,下次用要先输入验证码")
+    if "pin_new" in payload and (payload.get("pin_new") or payload.get("pin_new2")):
+        new, again = str(payload.get("pin_new") or ""), str(payload.get("pin_new2") or "")
+        stored = os.environ.get("FRIDAY_LOCK_PIN", "").strip()
+        if stored and not friday_locks.check_pin(str(payload.get("pin_old") or ""), stored):
+            return {"error": "旧 PIN 不对"}
+        if not friday_locks.valid_pin(new):
+            return {"error": "PIN 要 4~8 位数字"}
+        if new != again:
+            return {"error": "两次输入的 PIN 不一样"}
+        hashed = friday_locks.hash_pin(new)
+        save_env_value(env, "FRIDAY_LOCK_PIN", hashed)
+        os.environ["FRIDAY_LOCK_PIN"] = hashed
+        friday_security.record("pin_changed", "改了窗口解锁 PIN", "info")
+        done.append("PIN 已保存。可以在“离开多久自动锁窗口”里选时间,也可以点右上角的锁马上上锁")
+    if "lock_minutes" in payload:
+        try:
+            minutes = int(payload["lock_minutes"])
+        except (TypeError, ValueError):
+            return {"error": "时间不对"}
+        if minutes not in friday_locks.LOCK_MINUTES:
+            return {"error": "时间不对"}
+        if minutes and not os.environ.get("FRIDAY_LOCK_PIN", "").strip():
+            return {"error": "先设一个解锁 PIN"}
+        save_env_value(env, "FRIDAY_LOCK_MINUTES", str(minutes))
+        os.environ["FRIDAY_LOCK_MINUTES"] = str(minutes)
+        done.append(f"离开 {minutes} 分钟会自动锁住窗口" if minutes else "不自动锁窗口了")
+    return {"done": done}
+
+
 def security_state(session) -> dict | None:
     import friday_vendor
     import friday_web
@@ -1462,7 +1533,14 @@ def security_state(session) -> dict | None:
     discord = getattr(session, "discord", None)
     gate = getattr(discord, "gate", None)
     code = gate.pair_code if gate is not None and gate.owners and gate._pair_code_valid() else None
+    import friday_locks
+
+    remote = getattr(session, "remote_lock", None)
+    window = getattr(session, "window_lock", None)
     return {
+        "remote_lock": {"enabled": remote.enabled(), "paused": remote.paused} if remote is not None else None,
+        "pin_set": window.has_pin() if window is not None else False,
+        "lock_minutes": friday_locks.lock_minutes(),
         "events": log.recent(6),
         "discord": [{"id": str(i), "name": n} for i, n in gate.owners.items()] if gate is not None else None,
         "pair_code": code,
@@ -1677,6 +1755,13 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         else:
             back = friday_health.undo_tidy()
             done.append(f"已把 {back} 个文件放回原处" if back else "没有可以撤销的整理")
+    lock_result = apply_lock_settings(payload, session, env, save_env_value)
+    if lock_result is not None:
+        if "error" in lock_result:
+            return lock_result
+        done.extend(lock_result.get("done", []))
+        if "secret" in lock_result:
+            return {"ok": True, "message": "按下面的步骤加到验证器 App 里", "secret": lock_result["secret"]}
     if "rain_alert" in payload:
         import friday_alerts
 
@@ -2044,6 +2129,14 @@ def start_security(session, data_dir: str):
     log.on_alert = alert
     friday_security.set_log(log)
     session.security = log
+    import friday_locks
+
+    session.remote_lock = friday_locks.RemoteLock(on_alert=lambda text: log.record("remote_lock", text, "alert"))
+    session.window_lock = friday_locks.WindowLock(on_alert=lambda text: log.record("window_lock", text, "alert"))
+    gate = getattr(getattr(session, "discord", None), "gate", None)
+    if gate is not None:
+        gate.remote_lock = session.remote_lock
+    start_auto_lock(session)
     threading.Thread(target=lambda: _quietly(lambda: friday_vendor.ensure(friday_web.WEB_DIR)),
                      daemon=True, name="friday-vendor").start()
     return log
@@ -2063,6 +2156,25 @@ def downloads_folder(session, toolbox) -> Path:
             pass
     session.downloads_dir = folder
     return folder
+
+
+def start_auto_lock(session, interval: float = 15) -> None:
+    """离开电脑超过设定的时间:锁住星期五的窗口。"""
+    import friday_care
+
+    def loop() -> None:
+        while True:
+            lock = session.window_lock
+            if lock is not None and lock.enabled() and not lock.locked:
+                import friday_locks
+
+                idle = friday_care.idle_seconds()
+                if idle is not None and idle >= friday_locks.lock_minutes() * 60:
+                    lock.lock()
+                    session.hub.broadcast({"type": "locked"})
+            time.sleep(interval)
+
+    threading.Thread(target=lambda: _quietly(loop), daemon=True, name="friday-auto-lock").start()
 
 
 def start_daily_checks(session, toolbox: Toolbox, data_dir: str, interval: float = 300) -> None:
@@ -2353,6 +2465,9 @@ def run_web(args) -> None:
 
     def ask_selection() -> None:
         """选中就问:复制别的程序里选中的文字,叫出窗口,让星期五翻译或解释。"""
+        if session.window_lock is not None and session.window_lock.locked:
+            friday_web.show_window(url, profile_dir)  # 锁着:只把窗口叫出来,要先解锁
+            return
         text = friday_desktop.copy_selection()
         if not text:
             if session.tray is not None:
@@ -2401,6 +2516,7 @@ def run_web(args) -> None:
     start_care(session, ctx, hub, toolbox, voice_module)
     start_daily_checks(session, toolbox, data_dir)
     start_security(session, data_dir)
+    ctx.lock = session.window_lock
     import friday_quick
 
     session.quick = friday_quick.QuickCommands(toolbox)

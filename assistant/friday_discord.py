@@ -122,6 +122,8 @@ class DiscordGate:
         self.wrong: dict[int, int] = {}  # 每个账号猜错配对码几次
         self.wrong_total = 0
         self.blocked: set[int] = self._load_blocked()
+        self.remote_lock = None  # 手机遥控锁(friday_locks.RemoteLock);没有就不用验证码
+        self.held: tuple | None = None  # 上锁时收到的那条消息,解锁后接着处理
         if not self.owners:
             self.pair_code = self._code()  # 第一次:一直有效,直到配对成功
         self.answers: queue.Queue = queue.Queue()
@@ -203,6 +205,34 @@ class DiscordGate:
         if self.waiting_for == author_id:
             self.answers.put(audio if audio and not text else text)
             return
+        lock = self.remote_lock
+        if lock is not None and lock.enabled():
+            if lock.paused:
+                self.send(channel, "🔒 手机遥控已暂停(验证码错太多次)。请在电脑上的齿轮设定 → 安全 里恢复。")
+                return
+            if not lock.session_open():
+                code = "".join(c for c in text if c.isdigit())
+                if is_dm and len(code) == 6 and len(text) <= 12:
+                    result = lock.check(code)
+                    if result == "ok":
+                        self.send(channel, "🔓 已解锁,2 小时内不用再输入。")
+                        if self.held is not None and self.held[0] == author_id:
+                            _, text, audio, held_dm, mentioned = self.held
+                            self.held = None
+                            self._queue(author_id, text, channel, held_dm, audio)
+                        return
+                    if result == "paused":
+                        self.send(channel, "🔒 验证码错太多次,手机遥控已暂停。请在电脑上恢复。")
+                        return
+                    self.send(channel, "验证码不对,再看一下验证器 App 里“星期五”的 6 位数字。")
+                    return
+                self.held = (author_id, text, audio, is_dm, mentioned)
+                self.send(channel, "🔒 手机遥控已上锁。请私信我验证器 App 里“星期五”现在的 6 位数字,解锁后接着处理你刚才的消息。")
+                return
+            lock.touch()
+        self._queue(author_id, text, channel, is_dm, audio)
+
+    def _queue(self, author_id: int, text: str, channel, is_dm: bool, audio: bytes | None) -> None:
         send_voice = self.send_voice
         self.events.put(("discord", DiscordMessage(
             text,
@@ -260,8 +290,13 @@ class DiscordGate:
         while not self.answers.empty():
             self.answers.get_nowait()
         self.waiting_for = author_id
+        lock = self.remote_lock if self.remote_lock is not None and self.remote_lock.enabled() else None
         try:
-            self.send(channel, f"⚠ {question}\n回复 y 允许,回复其他内容就是拒绝({int(timeout)} 秒内不回复也算拒绝)。")
+            if lock is not None:
+                self.send(channel, f"⚠ {question}\n要允许的话,回复验证器 App 里“星期五”现在的 6 位数字;"
+                                   f"回复其他内容就是拒绝({int(timeout)} 秒内不回复也算拒绝)。")
+            else:
+                self.send(channel, f"⚠ {question}\n回复 y 允许,回复其他内容就是拒绝({int(timeout)} 秒内不回复也算拒绝)。")
             try:
                 answer = self.answers.get(timeout=timeout)
             except queue.Empty:
@@ -276,6 +311,13 @@ class DiscordGate:
                 answer = ""
             if answer:
                 self.send(channel, f"🎤 听到:{answer}")
+        if lock is not None:
+            result = lock.check(answer)
+            if result == "paused":
+                self.send(channel, "🔒 验证码错太多次,手机遥控已暂停,这一步不做。请在电脑上恢复。")
+            elif result == "wrong":
+                self.send(channel, "验证码不对,这一步先不做。")
+            return result == "ok"
         return answer.strip().lower().rstrip("。.!!") in YES
 
 

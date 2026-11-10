@@ -303,3 +303,13 @@ body.focus .console { width: min(960px, 100%); justify-self: center; }
 .sec-event.warn { border-left-color: #f59e0b; }
 .sec-event.alert { border-left-color: #ef4444; color: #fecaca; }
 .set-row.sub { padding-left: 12px; font-size: 13px; min-height: 30px; }
+#lockScreen { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; background: #02060b; }
+body.locked > *:not(#lockScreen) { visibility: hidden !important; }
+.lock-card { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 32px 40px; border: 1px solid var(--cyan-line); border-radius: 16px; background: rgba(34,211,238,.04); }
+.lock-icon { font-size: 40px; }
+.lock-title { font-family: Orbitron, sans-serif; letter-spacing: .2em; color: var(--accent); font-size: 18px; }
+.lock-sub { color: var(--muted, #8aa); font-size: 13px; }
+#lockPin { font: inherit; font-size: 22px; letter-spacing: .4em; text-align: center; width: 200px; padding: 8px; color: #fff; background: rgba(0,0,0,.4); border: 1px solid var(--cyan-line); border-radius: 8px; }
+.lock-error { min-height: 18px; color: #fca5a5; font-size: 13px; }
+.mono { font-family: "JetBrains Mono", monospace; letter-spacing: .05em; user-select: all; }
+#remoteLockBox div { margin: 4px 0; }

@@ -309,6 +309,10 @@ class WebContext:
         self.audio = AudioStore()
         self.settings: Callable[[dict], dict] | None = None  # 齿轮设定:保存设置,返回 {"ok"/"error", "message"}
         self.activity = {"listening": False, "speaking": False}  # 窗口正在录音/朗读(唤醒功能要暂停)
+        self.lock = None  # 窗口锁(friday_locks.WindowLock);锁着时只能解锁
+
+    def locked(self) -> bool:
+        return self.lock is not None and self.lock.locked
 
 
 def make_handler(ctx: WebContext):
@@ -386,10 +390,14 @@ def make_handler(ctx: WebContext):
                 return self._send(200, body, content_type)
             if not self._token_ok(query):
                 return self._send(403, b"forbidden", "text/plain")
+            if ctx.locked():  # 锁着:什么内容都不给看
+                if url.path == "/api/state":
+                    return self._json(200, {"locked": True})
+                return self._json(423, {"error": "locked"})
             if url.path == "/events":
                 return self._events()
             if url.path == "/api/state":
-                return self._json(200, {**ctx.state(), "greeting": ctx.greeting})
+                return self._json(200, {**ctx.state(), "greeting": ctx.greeting, "locked": False})
             if url.path.startswith("/audio/"):
                 data = ctx.audio.get(url.path[len("/audio/"):].split(".")[0])
                 if data is None:
@@ -410,8 +418,13 @@ def make_handler(ctx: WebContext):
                 self._sse({"type": "ready", "restored": len(backlog)})  # 之前的对话发完了
                 while True:
                     try:
-                        event = client.get(timeout=15)
+                        event = client.get(timeout=5)
                     except queue.Empty:
+                        event = None
+                    if ctx.locked():  # 上锁了:不再往窗口送任何内容
+                        self._sse({"type": "locked"})
+                        break
+                    if event is None:
                         self.wfile.write(b": ping\n\n")  # 心跳,检测窗口是否已关闭
                         self.wfile.flush()
                         continue
@@ -423,6 +436,25 @@ def make_handler(ctx: WebContext):
                 if ctx.hub.connected == 0:  # 窗口都关了:不会再录音或朗读
                     ctx.activity.update(listening=False, speaking=False)
                 self.close_connection = True
+
+        def _lock_request(self, path: str, body: bytes) -> None:
+            if ctx.lock is None:
+                return self._json(404, {"error": "没有设置窗口锁"})
+            if path == "/api/lock":
+                if not ctx.lock.lock():
+                    return self._json(400, {"error": "还没设 PIN:先在齿轮设定 → 安全 里设一个"})
+                ctx.hub.broadcast({"type": "locked"})
+                return self._json(200, {"ok": True})
+            try:
+                pin = str(json.loads(body or b"{}").get("pin") or "")
+            except (ValueError, AttributeError):
+                return self._json(400, {"error": "请求格式不对"})
+            result = ctx.lock.unlock(pin)
+            if result == "ok":
+                return self._json(200, {"ok": True})
+            if result.startswith("wait:"):
+                return self._json(429, {"error": f"错太多次了,{result[5:]} 秒后再试"})
+            return self._json(403, {"error": "PIN 不对"})
 
         def _sse(self, event: dict) -> None:
             self.wfile.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8"))
@@ -442,6 +474,10 @@ def make_handler(ctx: WebContext):
                 body = self._body()
             except ValueError as e:
                 return self._json(413, {"error": str(e)})
+            if url.path in ("/api/unlock", "/api/lock"):
+                return self._lock_request(url.path, body)
+            if ctx.locked():
+                return self._json(423, {"error": "星期五已上锁,先输入 PIN 解锁"})
             try:
                 if url.path == "/api/voice":
                     return self._voice(body)

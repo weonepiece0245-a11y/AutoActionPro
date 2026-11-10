@@ -22,6 +22,16 @@
 <div class="grid-floor" aria-hidden="true"></div>
 <div class="scanlines" aria-hidden="true"></div>
 
+<div id="lockScreen" hidden>
+  <div class="lock-card">
+    <div class="lock-icon">🔒</div>
+    <div class="lock-title">星期五已上锁</div>
+    <div class="lock-sub">输入 PIN 解锁</div>
+    <input id="lockPin" type="password" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="PIN">
+    <button type="button" class="mini-btn" id="unlockBtn">解锁</button>
+    <div class="lock-error" id="lockError"></div>
+  </div>
+</div>
 <header class="topbar">
   <div class="brand">
     <span class="brand-mark">五</span>
@@ -32,6 +42,9 @@
   </div>
   <div class="status-pill" id="modePill"><span class="dot"></span><span id="modeText">待机 STANDBY</span><span class="model-chip" id="modelChip" hidden></span></div>
   <div class="top-right">
+    <button type="button" class="icon-btn small" id="lockBtn" title="马上上锁" aria-label="马上上锁" hidden>
+      <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+    </button>
     <button type="button" class="icon-btn small" id="settingsBtn" title="设定" aria-label="设定">
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
     </button>
@@ -175,6 +188,17 @@
       <div class="set-row"><span>能用手机 Discord 控制星期五的账号</span><button type="button" class="mini-btn" id="discordPair">添加新账号</button></div>
       <div id="discordOwners"></div>
       <div class="set-note" id="pairNote" hidden></div>
+      <div class="set-row"><span>手机遥控锁(验证器 App 的 6 位数字)<b class="google-state" id="remoteLockState">—</b></span>
+        <span class="set-ctl"><button type="button" class="mini-btn" id="remoteLockSetup">开启</button><button type="button" class="mini-btn" id="remoteLockResume" hidden>恢复手机遥控</button><button type="button" class="mini-btn" id="remoteLockOff" hidden>关闭</button></span></div>
+      <div class="set-note" id="remoteLockBox" hidden>
+        <div>1. 手机打开验证器 App(Google Authenticator 或 Microsoft Authenticator)→ 加号 → <b>输入设置密钥</b>。</div>
+        <div>2. 名称填“星期五”,密钥填:<b class="mono" id="remoteLockSecret"></b>,类型选“基于时间”。</div>
+        <div>3. 把 App 里显示的 6 位数字填到这里确认:<input class="mini-input" id="remoteLockCode" inputmode="numeric" maxlength="6" placeholder="123456"><button type="button" class="mini-btn" id="remoteLockConfirm">确认开启</button></div>
+      </div>
+      <div class="set-row"><label for="setLockMinutes">离开多久自动锁窗口</label>
+        <span class="set-ctl"><select class="mini-select" id="setLockMinutes"><option value="0">不锁</option><option value="5">5 分钟</option><option value="10">10 分钟</option><option value="30">30 分钟</option></select></span></div>
+      <div class="set-row"><span>解锁 PIN(4~8 位数字)<b class="google-state" id="pinState">—</b></span>
+        <span class="set-ctl"><input class="mini-input" id="pinOld" type="password" inputmode="numeric" maxlength="8" placeholder="旧 PIN" hidden><input class="mini-input" id="pinNew" type="password" inputmode="numeric" maxlength="8" placeholder="新 PIN"><input class="mini-input" id="pinNew2" type="password" inputmode="numeric" maxlength="8" placeholder="再输一次"><button type="button" class="mini-btn" id="pinSave">保存</button></span></div>
       <div class="set-row"><span>最近的安全记录</span></div>
       <div id="securityEvents" class="sec-events"></div>
       <div class="set-note" id="securityNote"></div>
