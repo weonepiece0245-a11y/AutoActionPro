@@ -8948,5 +8948,89 @@ class GamesQuickTest(unittest.TestCase):
         self.assertIsNone(quick.handle("我的段位"))  # 不知道是哪个游戏
 
 
+
+class AuditRound4Test(TempDirTest):
+    def test_redirect_to_private_address_is_blocked(self):
+        import http.server
+        import friday_watch
+
+        class Redirect(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", "http://192.168.1.1/admin")
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            url = f"http://127.0.0.1:{server.server_address[1]}/"
+            with mock.patch.object(friday_watch, "_public_host", lambda u: "192.168." not in u):
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    friday_watch.open_public(url)
+            self.assertIn("已拦下", str(caught.exception.msg))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_reader_uses_safe_opener(self):
+        import friday_reader
+
+        with mock.patch("friday_watch._public_host", lambda u: False):
+            with self.assertRaises(ValueError):
+                friday_reader.load_url("http://router.local/")
+
+    def test_folder_backup_refuses_dangerous_destinations(self):
+        import friday_folderbackup
+
+        src = Path(self.tmp, "docs")
+        src.mkdir()
+        backup = friday_folderbackup.FolderBackup(os.path.join(self.tmp, "fb.json"))
+        startup = Path(self.tmp, "AppData", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
+        with self.assertRaises(ValueError):
+            backup.configure([str(src)], str(startup))
+        with self.assertRaises(ValueError):
+            backup.configure([str(src)], Path(self.tmp).anchor)
+
+    def test_start_menu_search_only_types_program_names(self):
+        pc = OpenAppReliablyTest.PC(appear_on="search")
+        asked = []
+        pcmod.Computer(backend=pc).do("open_app", "cmd /c del C:\\*", approve=lambda q: asked.append(q) or True)
+        self.assertEqual(asked, [])
+        self.assertFalse(any(c[0] == "type" for c in pc.calls))
+
+    def test_interpreter_respects_budget(self):
+        import friday_interpret
+
+        hub = friday_web.Hub()
+        seen = []
+        hub.broadcast = seen.append
+        session = app.WebSession(None, SimpleNamespace(), hub, synthesize=None)
+        translated = []
+        session.interpreter = friday_interpret.Interpreter(lambda t, s, d: translated.append(t) or "Hi")
+        session.interpreter.start("en")
+
+        def over():
+            raise app.BudgetExceeded("这个月的预算用完了")
+        session.budget = SimpleNamespace(before_ask=over)
+        self.assertIsNone(session._ask("你好", source="web"))
+        self.assertEqual(translated, [])
+        self.assertIn("预算", seen[-1]["text"])
+
+    def test_telegram_ignores_music_files(self):
+        import friday_telegram
+
+        events = queue.Queue()
+        bridge = friday_telegram.TelegramBridge("123456:" + "A" * 35, events, os.path.join(self.tmp, "tg.json"),
+                                                on_status=lambda t: None,
+                                                http=lambda *a: {"ok": True, "result": {"file_path": "x", "file_size": 1}},
+                                                download=lambda url: b"MUSIC")
+        bridge.gate.owners = {5: "me"}
+        bridge.handle_update({"update_id": 1, "message": {"chat": {"id": 5, "type": "private"}, "from": {"id": 5},
+                                                          "audio": {"file_id": "song"}}})
+        self.assertTrue(events.empty())
+
+
 if __name__ == "__main__":
     unittest.main()

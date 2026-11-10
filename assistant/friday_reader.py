@@ -111,10 +111,8 @@ def load_url(url: str) -> tuple[str, list[str]]:
 
     if not url.lower().startswith(("http://", "https://")) or not friday_watch._public_host(url):
         raise ValueError("只能读公开网站的网页")
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (friday-assistant)",
-                                                  "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"})
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310
+        with friday_watch.open_public(url) as response:  # 跳转也检查,不会被带去内部地址
             data = response.read(MAX_DOWNLOAD)
             charset = response.headers.get_content_charset() or ""
             kind = response.headers.get_content_type()

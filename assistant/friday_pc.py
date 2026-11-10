@@ -708,7 +708,8 @@ class Computer:
                 result = self._wait_open(pc, name, hints, before)
                 if result:
                     return result
-        if check and approve is not _allow and hasattr(pc, "foreground_exe"):
+        safe_name = re.fullmatch(r"[0-9A-Za-z一-鿿 ._+&-]{1,40}", value) is not None  # 只打程序名,不打命令、路径、网址
+        if check and safe_name and approve is not _allow and hasattr(pc, "foreground_exe"):
             if approve(f"用开始菜单搜索打开“{value}”(会按 Win 键、打字“{value}”、按回车;过程中别动键盘)"):
                 if self._start_search(pc, value):
                     result = self._wait_open(pc, value, hints or [_token(value)], before)

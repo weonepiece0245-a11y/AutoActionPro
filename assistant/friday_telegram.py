@@ -42,7 +42,7 @@ def _multipart(fields: dict, files: dict) -> tuple[bytes, str]:
         parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
     for name, (filename, data) in files.items():
         kind = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-        safe = filename.replace('"', "")
+        safe = re.sub(r'["\r\n]', "", filename)
         parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; filename="{safe}"\r\n'
                      f"Content-Type: {kind}\r\n\r\n".encode() + data + b"\r\n")
     parts.append(f"--{boundary}--\r\n".encode())
@@ -166,7 +166,7 @@ class TelegramBridge:
         audio, images = None, []
         if author_id in self.gate.owners:  # 陌生人发的语音、照片不下载
             try:
-                voice = message.get("voice") or message.get("audio")
+                voice = message.get("voice")  # 只听语音消息(音乐文件不拿来识别)
                 if voice:
                     audio = self._file(voice["file_id"])
                 photos = message.get("photo") or []

@@ -1257,6 +1257,13 @@ class WebSession:
             if stream is not None:
                 stream.finish()
             return reply
+        budget = getattr(self, "budget", None)
+        if budget is not None:
+            try:
+                budget.before_ask()  # 预算用完了:口译也停
+            except BudgetExceeded as e:
+                hub.broadcast({"type": "error", "text": str(e)})
+                return None
         hub.broadcast({"type": "thinking", "source": source})
         try:
             translation, voice, direction = self.interpreter.process(text)

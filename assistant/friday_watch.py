@@ -15,6 +15,7 @@ import os
 import re
 import socket
 import urllib.parse
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Callable
@@ -45,12 +46,31 @@ def _public_host(url: str) -> bool:
     return True
 
 
+class _PublicRedirects(urllib.request.HTTPRedirectHandler):
+    """网站跳转时也检查:不让公开网站把请求跳到家里的路由器、电脑本机这些内部地址。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not newurl.lower().startswith(("http://", "https://")) or not _public_host(newurl):
+            raise urllib.error.HTTPError(newurl, code, "跳转到了不是公开网站的地址,已拦下", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+SAFE_OPENER = urllib.request.build_opener(_PublicRedirects)
+
+
+def open_public(url: str, timeout: float = 20, headers: dict | None = None):
+    """打开公开网站(跳转也检查);不是公开网站抛 ValueError。"""
+    if not url.lower().startswith(("http://", "https://")) or not _public_host(url):
+        raise ValueError("只能打开公开网站(http / https)")
+    request = urllib.request.Request(url, headers=headers or {"User-Agent": "Mozilla/5.0 (friday-assistant)",
+                                                              "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"})
+    return SAFE_OPENER.open(request, timeout=timeout)
+
+
 def fetch(url: str) -> bytes:
     if not url.lower().startswith(("http://", "https://")) or not _public_host(url):
         raise ValueError("只能追踪公开网站(http / https)")
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (friday-assistant)",
-                                                  "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"})
-    with urllib.request.urlopen(request, timeout=20) as response:
+    with open_public(url) as response:
         return response.read(MAX_PAGE)
 
 

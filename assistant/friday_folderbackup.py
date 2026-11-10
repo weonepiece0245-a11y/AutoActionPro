@@ -102,6 +102,12 @@ class FolderBackup:
                 raise ValueError("备份的地方不能在要备份的文件夹里面(或反过来)")
         if _inside(target, ASSISTANT_DIR.parent):
             raise ValueError("不能备份到星期五自己的文件夹里")
+        import friday_security
+
+        lowered = str(target).lower()
+        if (friday_security.is_protected_write(target) or target == Path(target.anchor)
+                or any(part in lowered for part in ("\\windows", "\\program files", "\\programdata", "\\appdata"))):
+            raise ValueError("不能备份到这里(系统、程序、开机启动的文件夹,或整个硬盘的最上层);在里面建一个文件夹,例如 E:\\星期五备份")
         self.sources, self.dest = clean, str(target)
         self.blocked = False
         self.configured_at = self.configured_at or self.clock()
