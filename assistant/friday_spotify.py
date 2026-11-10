@@ -238,7 +238,11 @@ class Spotify:
         if track is None:
             return f"Spotify 上没找到“{query}”。"
         artists = "、".join(a.get("name", "") for a in track.get("artists") or [])
-        return self._start({"uris": [track["uri"]]}, f"{artists}的《{track.get('name', query)}》", track["uri"])
+        album = (track.get("album") or {}).get("uri")
+        # 连同整张专辑一起放、从这首开始:只给一首歌的话,说“下一首”时队列是空的,Spotify 会卡住(按钮全变灰)
+        body = ({"context_uri": album, "offset": {"uri": track["uri"]}} if album
+                else {"uris": [track["uri"]]})
+        return self._start(body, f"{artists}的《{track.get('name', query)}》", track["uri"])
 
     def now_playing(self) -> str:
         status, data = self.api("GET", "/me/player/currently-playing")

@@ -8241,7 +8241,8 @@ class SpotifyTest(TempDirTest):
         routes = {
             ("POST", "/api/token"): (200, {"access_token": "AT", "refresh_token": "RT", "expires_in": 3600}),
             ("GET", "/search"): (200, {"tracks": {"items": [{"uri": "spotify:track:1", "name": "晴天",
-                                                            "artists": [{"name": "周杰伦"}]}]}}),
+                                                            "artists": [{"name": "周杰伦"}],
+                                                            "album": {"uri": "spotify:album:yehuimei"}}]}}),
             ("PUT", "/me/player/play"): (204, {}),
             ("GET", "/currently-playing"): (200, {"is_playing": True, "item": {"name": "晴天", "artists": [{"name": "周杰伦"}]}}),
         }
@@ -8250,6 +8251,9 @@ class SpotifyTest(TempDirTest):
             self.assertIn("连好了", self.login(spotify))
             self.assertTrue(spotify.connected)
             self.assertIn("周杰伦的《晴天》", spotify.play("周杰伦 晴天"))
+            sent = json.loads([body for m, url, body in self.calls if url.endswith("/me/player/play")][-1])
+            # 整张专辑从这首开始放:说“下一首”时才有下一首
+            self.assertEqual(sent, {"context_uri": "spotify:album:yehuimei", "offset": {"uri": "spotify:track:1"}})
             self.assertIn("正在放:周杰伦《晴天》", spotify.now_playing())
             self.assertIn("失效", spotify.callback({"state": ["伪造的"], "code": ["x"]}))
         self.assertTrue(Path(self.tmp, "friday_spotify.json").exists())
