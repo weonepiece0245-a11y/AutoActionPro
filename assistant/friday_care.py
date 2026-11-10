@@ -269,6 +269,7 @@ class Care:
         self.game_seen = 0.0
         self.held: list[str] = []  # 打游戏时先记着的提醒
         self.screentime = None  # 电脑使用时间统计(friday_screentime.ScreenTime)
+        self.focus = None  # 专注模式(friday_focus.Focus):专注时不提醒休息、不打招呼
 
     def _line(self, options: list[str], **values) -> str:
         return self.rng.choice(options).format(name=self.name(), **values)
@@ -351,7 +352,10 @@ class Care:
         if self.active_since is None:
             self.active_since = now - idle
 
+        focusing = self.focus is not None and self.focus.active()
         # 1. 离开一阵子后回来
+        if self.away and focusing:
+            self.away = False
         if self.away:
             if not settings["welcome"] or self.quiet_now():  # 回来就直接开游戏:不打扰
                 self.away = False
@@ -377,7 +381,7 @@ class Care:
 
         # 3. 用太久(之后每过同样久再提醒一次)
         minutes = settings["break_minutes"]
-        if minutes:
+        if minutes and not focusing:
             used = now - self.active_since
             since_nudge = now - (self.last_break_nudge or self.active_since)
             if used >= minutes * 60 and since_nudge >= minutes * 60:

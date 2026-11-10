@@ -41,7 +41,7 @@
       <div class="brand-sub">星期五 · 私人 AI 助手</div>
     </div>
   </div>
-  <div class="status-pill" id="modePill"><span class="dot"></span><span id="modeText">待机 STANDBY</span><span class="model-chip" id="modelChip" hidden></span></div>
+  <div class="status-pill" id="modePill"><span class="dot"></span><span id="modeText">待机 STANDBY</span><span class="model-chip" id="modelChip" hidden></span><span class="model-chip focus-chip" id="focusChip" hidden></span></div>
   <div class="top-right">
     <button type="button" class="icon-btn small" id="lockBtn" title="马上上锁" aria-label="马上上锁" hidden>
       <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
@@ -254,6 +254,7 @@
       <h3>其他</h3>
       <div class="set-row" id="googleRow" hidden><span>Google 账号 <b class="google-state" id="googleState">—</b></span>
         <button type="button" class="mini-btn" id="googleLogin" title="打开浏览器重新登录 Google(测试模式大约每 7 天要登录一次)">重新登录 Google</button></div>
+      <div class="set-row" id="briefRow" hidden><label for="setBrief">早上第一次坐到电脑前,说今天的早安简报(天气、日历、待办、账单……不花钱)</label><input type="checkbox" class="switch" id="setBrief"></div>
       <div class="set-row" id="rainRow" hidden><label for="setRain">会下雨就提醒带伞(每天看一次天气,不花钱)</label>
         <select class="mini-select" id="setRain"><option value="07:00">早上 7:00</option><option value="07:30">早上 7:30</option><option value="08:00">早上 8:00</option><option value="08:30">早上 8:30</option><option value="09:00">早上 9:00</option><option value="off">不提醒</option></select></div>
       <div class="set-row" id="eventRow" hidden><label for="setEventLead">Google 日历上的活动,提前提醒我(不花钱)</label>

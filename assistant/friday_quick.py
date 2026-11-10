@@ -58,6 +58,9 @@ class QuickCommands:
         self.notes = None  # 速记本(friday_notes.Notes)
         self.dates = None  # 生日和纪念日(friday_dates.Dates)
         self.virus = None  # 病毒扫描:(开始(kind), 状态())
+        self.bills = None  # 账单(friday_bills.Bills)
+        self.focus = None  # 专注模式(friday_focus.Focus)
+        self.brief = None  # () -> 早安简报
         self.on_say = None  # 场景里“说”的那一步:马上读出来
         self.silent = False  # 这次的回答已经读过了(场景模式),不用再读
         self.clock = clock
@@ -76,6 +79,16 @@ class QuickCommands:
             (re.compile(r"^(删掉|删除|撤销|取消)(刚才|刚刚|上一|最后一)(那|一)?(笔|条)(账|记账)?$"), self._undo_expense),
             (re.compile(r"^(记账|记一笔|记)?(?P<item>[一-鿿A-Za-z][一-鿿A-Za-z ]{0,14}?)(花了|用了)?"
                         r"(rm|RM|Rm)?(?P<amount>\d{1,6}(\.\d{1,2})?)(块钱|块|元|令吉|马币|rm|ringgit)$"), self._expense),
+            (re.compile(r"^打开第(?P<n>\d{1,2}|[一二三四五六七八九十]{1,3})个(文件)?$"), self._open_found),
+            (re.compile(r"^(找|搜|搜索|查找|帮我找)(一下)?(文件|档案)(?P<q>[^\s]{1,20})$"), self._find_file),
+            (re.compile(r"(?i)^(早安|早上好|早啊|早晨|goodmorning|good morning|今日简报|今天的?简报|简报|"
+                        r"今天有什么安排|今天有什么事|今天要做什么|今天的安排)$"), self._brief),
+            (re.compile(r"^(我要|我想|开始|开|开启|进入|来个?|来一个)?(专注|番茄钟|番茄|专心)(模式)?"
+                        r"(?P<m>\d{1,3}|[零一二两三四五六七八九十半]{1,4}个?)?(?P<u>分钟|分|个?小时|个?钟头)?$"), self._focus_start),
+            (re.compile(r"^(停止|结束|取消|退出|关掉|关闭|停)(专注|番茄钟|番茄)(模式)?$"), self._focus_stop),
+            (re.compile(r"^(专注|番茄钟|番茄)?(还剩|还有)(多久|多少时间|多少分钟|几分钟)$"), self._focus_status),
+            (re.compile(r"^(?P<when>今天|这周|本周|这个星期)?(专注了?(多久|多少时间|统计)|(完成了?|做了)几个番茄钟?|番茄钟?统计)$"),
+             self._focus_report),
             (re.compile(r"^打开(?P<app>[一-鿿A-Za-z0-9 ]{1,20})$"), self._open_app),
             (re.compile(r"^(最近|接下来|这个月|下个月)?(有)?(谁|什么人)?(过)?(生日|的生日|纪念日|重要的日子)(吗|呢)?$"), self._dates),
             (re.compile(r"^(我)?(?P<when>今天|昨天|这周|这个星期|本周)?(用了?多久电脑|电脑用了?多久|玩了多久(游戏)?|打了多久游戏|"
@@ -136,6 +149,13 @@ class QuickCommands:
             scene = self.scenes.find(text) or self.scenes.find(sentence)
             if scene is not None:
                 return self._scene(scene)
+        if self.bills is not None:
+            try:
+                reply = self._bills(sentence)
+            except ValueError:
+                reply = None
+            if reply:
+                return reply
         for pattern, action in self.rules:
             found = pattern.match(sentence)
             if found:
@@ -212,6 +232,78 @@ class QuickCommands:
         if self.dates is None or not (found.group(1) or found.group(3)):
             return None  # 只说“生日”太含糊
         return self.dates.describe_upcoming(30)
+
+    # ---------- 账单 ----------
+    BILL_PAID = re.compile(r"^(?P<a>[一-鿿A-Za-z ]{1,10}?)(已经)?(付|交|缴|还|转)(了|好了|完了|掉了)(钱)?(rm|RM)?"
+                           r"(?P<x>\d{1,6}(\.\d{1,2})?)?(块钱|块|元|令吉|马币)?$"
+                           r"|^(已经)?(付|交|缴)(了|好了)(?P<b>[一-鿿A-Za-z ]{1,10}?)(rm|RM)?(?P<y>\d{1,6}(\.\d{1,2})?)?(块钱|块|元|令吉|马币)?$")
+
+    def _bills(self, sentence: str) -> str | None:
+        found = self.BILL_PAID.match(sentence)
+        if found:
+            name = (found.group("a") or found.group("b") or "").strip()
+            bill = self.bills.find(name) if name else None
+            if bill is None:
+                return None  # 不是记着的账单:照常处理(可能是普通记账)
+            text, bill, amount = self.bills.mark_paid(bill["name"], found.group("x") or found.group("y"))
+            ledger = getattr(self.toolbox, "ledger", None)
+            if amount and ledger is not None:
+                ledger.add(bill["name"], amount, "账单")
+            return text
+        if "账单" in sentence and len(sentence) <= 14 and not re.search(r"\d|删|记|加|每|改|设", sentence):
+            return self.bills.describe()
+        return None
+
+    # ---------- 专注 ----------
+    def _focus_start(self, found):
+        if self.focus is None:
+            return None
+        minutes = None
+        if found.group("m"):
+            import friday_focus
+
+            minutes = friday_focus.cn_number(found.group("m") + (found.group("u") or "分钟"))
+            if minutes is None:
+                return None
+        try:
+            return self.focus.start(minutes)
+        except ValueError as e:
+            return str(e)
+
+    def _focus_stop(self, found):
+        return self.focus.stop() if self.focus is not None else None
+
+    def _focus_status(self, found):
+        if self.focus is None or not (self.focus.active() or self.focus.break_until):
+            return None
+        return self.focus.status()
+
+    def _focus_report(self, found):
+        if self.focus is None:
+            return None
+        week = (found.group("when") or "") in ("这周", "本周", "这个星期")
+        return self.focus.report("week" if week else "today")
+
+    # ---------- 简报 ----------
+    def _brief(self, found):
+        return self.brief() if self.brief is not None else None
+
+    # ---------- 找文件 ----------
+    def _find_file(self, found):
+        if getattr(self.toolbox, "file_roots", None) is None:
+            return None
+        text, error = self.toolbox._find_files({"action": "find", "words": [found.group("q")]}, lambda s: None)
+        return None if error else text
+
+    def _open_found(self, found):
+        if not getattr(self.toolbox, "found_files", None):
+            return None
+        import friday_focus
+
+        n = found.group("n")
+        number = int(n) if n.isdigit() else friday_focus.cn_number(n)
+        text, error = self.toolbox._find_files({"action": "open", "id": number}, lambda s: None)
+        return text
 
     # ---------- 病毒扫描 ----------
     def _virus(self, found):

@@ -201,6 +201,8 @@ function handle(ev) {
       enqueueAudio(ev.url, ev.turn); break;
     case "reminder":
       addLine(ev.text, "reminder"); beep(880, 0.15); loadState(); break;
+    case "focus":
+      showFocus(ev); break;
     case "approval":
       showApproval(ev); break;
     case "approval_done":
@@ -250,12 +252,32 @@ function li(text, meta) {
   if (meta) { const m = document.createElement("span"); m.className = "meta"; m.textContent = meta; el.append(m); }
   return el;
 }
+// 专注模式的倒计时(状态栏上的小标签)
+let focusState = null, focusTimer = null;
+function showFocus(f) {
+  focusState = f && (f.until || f.break_until) ? f : null;
+  clearInterval(focusTimer); focusTimer = null;
+  renderFocus();
+  if (focusState) focusTimer = setInterval(renderFocus, 1000);
+}
+function renderFocus() {
+  const chip = $("focusChip");
+  const end = focusState ? (focusState.until || focusState.break_until) : 0;
+  const left = Math.max(0, Math.round(end - Date.now() / 1000));
+  if (!focusState || !left) { chip.hidden = true; return; }
+  const mm = String(Math.floor(left / 60)).padStart(2, "0"), ss = String(left % 60).padStart(2, "0");
+  chip.hidden = false;
+  chip.textContent = (focusState.until ? "🍅 专注 " : "☕ 休息 ") + `${mm}:${ss}`;
+  chip.title = focusState.until ? (focusState.task || "专注中") + ",说“停止专注”可以提前结束" : "休息中";
+}
+
 async function loadState() {
   const s = await api("/api/state");
   if (!s || s.error) return;
   if (s.locked) { showLock(); return s; }
   $("versionText").textContent = s.version || "未记录";
   if (s.settings) settingsState = s.settings;
+  if (s.settings && "focus" in s.settings) showFocus(s.settings.focus);
   if (s.model) showModel(s.model.model, s.model.mode);
   if (s.startup_error) { $("banner").hidden = false; $("banner").textContent = s.startup_error; }
   fillList("memoryList", s.memories, "还没有记忆,多跟我聊聊你自己", (m) => li(m.text, `${m.category || "其他"} · ${m.added}`));
@@ -654,6 +676,8 @@ function fillSettings() {
   }
   $("rainRow").hidden = !s.rain_alert;
   if (s.rain_alert) $("setRain").value = s.rain_alert;
+  $("briefRow").hidden = s.brief == null;
+  if (s.brief != null) $("setBrief").checked = s.brief;
   $("eventRow").hidden = s.event_lead === null || s.event_lead === undefined;
   if (s.event_lead != null) $("setEventLead").value = String(s.event_lead);
   const ml = s.mail_alert;
@@ -878,6 +902,7 @@ $("memtidyDismiss").onclick = () => saveSetting({ memtidy_dismiss: true });
 $("discordPair").onclick = () => saveSetting({ discord_pair: true }, 8000);
 $("saveKeyExpires").onclick = () => saveSetting({ key_expires: $("setKeyExpires").value });
 $("setRain").onchange = (e) => saveSetting({ rain_alert: e.target.value });
+$("setBrief").onchange = (e) => saveSetting({ brief: e.target.checked });
 $("setEventLead").onchange = (e) => saveSetting({ event_lead: Number(e.target.value) });
 $("mailSave").onclick = () => saveSetting({ mail_alert: { senders: $("mailSenders").value, words: $("mailWords").value,
                                                            important: $("mailImportant").checked } }, 5000);

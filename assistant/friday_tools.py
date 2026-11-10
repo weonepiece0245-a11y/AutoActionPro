@@ -669,6 +669,51 @@ VIRUS_SCAN_TOOL = {
         "action": {"type": "string", "enum": ["quick", "full", "status"]}}, "required": ["action"]},
 }
 
+BILLS_TOOL = {
+    "name": "bills",
+    "description": ("固定要付的账单(房租、电费、水费、网费、手机费、订阅、每年的路税保险):到期前 3 天、当天、过期 2 天没付"
+                    "星期五会主动提醒。add 记账单(name 名字,day 每月几号到期,month 只有每年一次的才填几月,amount 一般多少马币,可空);"
+                    "list 看接下来要付的;all 看记着的全部账单;paid 记为已付(name,amount 这次付了多少,可空;会顺便记一笔账,"
+                    "不用再 expense);remove 删掉。用户说“XX 付了/交了”且 XX 是记着的账单时用 paid,不要用 expense。"),
+    "input_schema": {"type": "object", "properties": {
+        "action": {"type": "string", "enum": ["add", "list", "all", "paid", "remove"]},
+        "name": {"type": "string"}, "day": {"type": "integer"}, "month": {"type": "integer"},
+        "amount": {"type": "number"}}, "required": ["action"]},
+}
+
+FOCUS_TOOL = {
+    "name": "focus",
+    "description": ("专注模式 / 番茄钟:start 开始(minutes 默认 25,task 在做什么,可空),时间到星期五会叫用户休息 5 分钟;"
+                    "专注时星期五自己主动要说的事先压着。stop 提前结束;status 还剩多久;report 专注统计(period today / week)。"),
+    "input_schema": {"type": "object", "properties": {
+        "action": {"type": "string", "enum": ["start", "stop", "status", "report"]},
+        "minutes": {"type": "integer"}, "task": {"type": "string"},
+        "period": {"type": "string", "enum": ["today", "week"]}}, "required": ["action"]},
+}
+
+FIND_FILES_TOOL = {
+    "name": "find_files",
+    "description": ("在用户电脑里找文件(下载、桌面、文档、图片、视频、音乐、OneDrive,还有 C 盘以外的硬盘;只看文件名,不看内容):"
+                    "find 找(words 文件名里有的字,可以几个,例如 [\"报价\"];kind 文件类型;days 最近几天改过或下载的,"
+                    "例如“昨天下载的”用 2;folder 只找某个文件夹),结果带编号;open 用默认程序打开第几个(id);"
+                    "show 在文件夹里显示第几个(id)。想发到手机就用 send_to_phone 加文件路径。"
+                    "找不到时换个说法、少给几个字、或去掉 kind/days 再找一次。"),
+    "input_schema": {"type": "object", "properties": {
+        "action": {"type": "string", "enum": ["find", "open", "show"]},
+        "words": {"type": "array", "items": {"type": "string"}},
+        "kind": {"type": "string", "enum": ["pdf", "word", "excel", "ppt", "image", "video", "music", "zip", "text",
+                                            "installer"]},
+        "days": {"type": "number"},
+        "folder": {"type": "string", "enum": ["downloads", "desktop", "documents", "pictures", "videos", "music"]},
+        "id": {"type": "integer"}}, "required": ["action"]},
+}
+
+MORNING_BRIEF_TOOL = {
+    "name": "morning_brief",
+    "description": "今天的简报:天气、日历、提醒、待办、生日、账单、新邮件、昨天花了多少(用户问“今天有什么安排/今天怎么样”时用)。",
+    "input_schema": {"type": "object", "properties": {}, "required": []},
+}
+
 CLEANUP_TOOL = {
     "name": "cleanup",
     "description": ("找大文件和重复文件(在用户的下载、桌面、文档、视频、图片、音乐文件夹里):scan 扫描(要一两分钟),"
@@ -833,6 +878,11 @@ class Toolbox:
         self.meter = None  # 花费统计(给 ai_spending 用)
         self.scenes = None  # 场景模式(friday_scenes.Scenes)
         self.screentime = None  # 电脑使用时间(friday_screentime.ScreenTime)
+        self.bills = None  # 账单(friday_bills.Bills)
+        self.focus = None  # 专注模式(friday_focus.Focus)
+        self.file_roots = None  # (folder 或 None) -> 要找文件的地方
+        self.found_files: list[dict] = []  # 上次找到的文件(open / show 用编号)
+        self.brief = None  # () -> 早安简报的话
         self.virus = None  # (开始扫描(kind) -> 话, 状态() -> 话),由主程序接上
         self.cleanup = None  # (scan, list, recycle) 三个函数,由主程序接上
         self.notes = None  # 速记本(friday_notes.Notes)
@@ -880,6 +930,10 @@ class Toolbox:
             "screen_time": self._screen_time,
             "cleanup": self._cleanup,
             "virus_scan": self._virus_scan,
+            "bills": self._bills,
+            "focus": self._focus,
+            "find_files": self._find_files,
+            "morning_brief": self._morning_brief,
             "notes": self._notes,
             "dates": self._dates,
         }
@@ -915,6 +969,14 @@ class Toolbox:
             tools = tools + [CLEANUP_TOOL]
         if self.virus is not None and self.local_tools:
             tools = tools + [VIRUS_SCAN_TOOL]
+        if self.bills is not None:
+            tools = tools + [BILLS_TOOL]
+        if self.focus is not None:
+            tools = tools + [FOCUS_TOOL]
+        if self.file_roots is not None and self.local_tools:
+            tools = tools + [FIND_FILES_TOOL]
+        if self.brief is not None:
+            tools = tools + [MORNING_BRIEF_TOOL]
         if self.notes is not None:
             tools = tools + [NOTES_TOOL]
         if self.dates is not None:
@@ -1044,6 +1106,89 @@ class Toolbox:
         except ValueError as e:
             return str(e), True
         return f"不支持的 action:{action}", True
+
+    def _bills(self, args, on_status):
+        bills = self.bills
+        action = args.get("action")
+        try:
+            if action == "add":
+                return bills.add(args.get("name", ""), args.get("day"), args.get("amount"), args.get("month")), False
+            if action == "list":
+                return bills.describe(), False
+            if action == "all":
+                return bills.describe_all(), False
+            if action == "paid":
+                text, bill, amount = bills.mark_paid(str(args.get("name") or ""), args.get("amount"))
+                if amount and self.ledger is not None:
+                    self.ledger.add(bill["name"], amount, "账单")
+                return text, False
+            if action == "remove":
+                return bills.remove(str(args.get("name") or "")), False
+        except ValueError as e:
+            return str(e), True
+        return f"不支持的 action:{action}", True
+
+    def _focus(self, args, on_status):
+        focus = self.focus
+        action = args.get("action")
+        try:
+            if action == "start":
+                return focus.start(args.get("minutes"), str(args.get("task") or "")), False
+            if action == "stop":
+                return focus.stop(), False
+            if action == "status":
+                return focus.status(), False
+            if action == "report":
+                return focus.report(args.get("period") or "today"), False
+        except ValueError as e:
+            return str(e), True
+        return f"不支持的 action:{action}", True
+
+    def _find_files(self, args, on_status):
+        import friday_cleanup
+        import friday_files
+
+        action = args.get("action")
+        if action == "find":
+            words = [str(w) for w in args.get("words") or [] if str(w).strip()][:5]
+            on_status("在电脑里找文件" + (f":{' '.join(words)}" if words else ""))
+            days = args.get("days")
+            result = friday_files.search(self.file_roots(args.get("folder")), words, args.get("kind"),
+                                         float(days) if days else None, skip=friday_cleanup._skip)
+            self.found_files = result["files"]
+            return friday_files.describe(result), False
+        if action in ("open", "show"):
+            try:
+                item = self.found_files[int(args.get("id")) - 1]
+            except (TypeError, ValueError, IndexError):
+                return "要先 find,再用结果里的编号", True
+            path = Path(item["path"])
+            if friday_security.is_secret_path(path):
+                return SECRET_REFUSAL, True
+            if not path.exists():
+                return "这个文件已经不在了", True
+            if os.name != "nt":
+                return "只能在 Windows 电脑上打开", True
+            if action == "show":
+                subprocess.Popen(["explorer", "/select,", str(path)])
+                return f"已在文件夹里显示 {path.name}", False
+            if not friday_files.can_open(path):
+                return f"{path.name} 是程序或脚本,为了安全星期五不替你打开,已经帮你在文件夹里显示出来。", self._show(path)
+            os.startfile(str(path))  # noqa: S606
+            return f"已打开 {path.name}", False
+        return f"不支持的 action:{action}", True
+
+    @staticmethod
+    def _show(path: Path) -> bool:
+        try:
+            subprocess.Popen(["explorer", "/select,", str(path)])
+        except OSError:
+            pass
+        return False
+
+    def _morning_brief(self, args, on_status):
+        on_status("在准备今天的简报")
+        return self.brief(), False
 
     def _virus_scan(self, args, on_status):
         start, status = self.virus

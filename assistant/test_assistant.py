@@ -7351,5 +7351,247 @@ class DefenderTest(unittest.TestCase):
         self.assertEqual(calls, [("quick done", True), ("full done", True)])
 
 
+
+class BillsTest(TempDirTest):
+    def make(self, when):
+        import friday_bills
+
+        self.now = when
+        return friday_bills.Bills(os.path.join(self.tmp, "b.json"), clock=lambda: self.now)
+
+    def test_reminds_before_on_day_and_overdue(self):
+        bills = self.make(datetime.datetime(2026, 11, 12, 9))
+        bills.add("电费", 15, 120)
+        said = bills.due("老板")
+        self.assertEqual(len(said), 1)
+        self.assertIn("3 天后(11/15)", said[0])
+        self.assertEqual(bills.due("老板"), [])  # 同一次不重复
+        self.now = datetime.datetime(2026, 11, 15, 7)
+        self.assertEqual(bills.due("老板"), [])  # 8 点前不说
+        self.now = datetime.datetime(2026, 11, 15, 9)
+        self.assertIn("今天到期", bills.due("老板")[0])
+        self.now = datetime.datetime(2026, 11, 17, 9)
+        self.assertIn("过期 2 天", bills.due("老板")[0])
+
+    def test_paid_stops_reminders_and_survives_restart(self):
+        bills = self.make(datetime.datetime(2026, 11, 13, 9))
+        bills.add("房租", 15, 800)
+        text, bill, amount = bills.mark_paid("房租")
+        self.assertIn("11/15", text)
+        self.assertEqual(amount, 800)
+        self.now = datetime.datetime(2026, 11, 15, 9)
+        again = self.make(self.now)
+        self.assertEqual(again.due("老板"), [])
+        self.assertIn("已付", again.describe())
+
+    def test_end_of_month_and_yearly(self):
+        bills = self.make(datetime.datetime(2026, 2, 25, 9))
+        bills.add("网费", 31)
+        bills.add("路税", 28, 90, month=2)
+        said = bills.due("老板")
+        self.assertTrue(any("网费" in t and "2/28" in t for t in said), said)
+        self.assertTrue(any("路税" in t and "2/28" in t for t in said), said)
+
+    def test_bad_input(self):
+        bills = self.make(datetime.datetime(2026, 11, 1, 9))
+        with self.assertRaises(ValueError):
+            bills.add("", 3)
+        with self.assertRaises(ValueError):
+            bills.add("水费", 32)
+        with self.assertRaises(ValueError):
+            bills.mark_paid("不存在")
+
+    def test_quick_paid_records_expense(self):
+        import friday_quick
+
+        bills = self.make(datetime.datetime(2026, 11, 12, 9))
+        bills.add("电费", 15, 120)
+        added = []
+        toolbox = SimpleNamespace(ledger=SimpleNamespace(add=lambda *a: added.append(a)))
+        quick = friday_quick.QuickCommands(toolbox)
+        quick.bills = bills
+        self.assertIn("记为已付", quick.handle("电费付了 135 块"))
+        self.assertEqual(added, [("电费", 135.0, "账单")])
+        self.assertIn("电费", quick.handle("这个月还有什么账单没付"))
+        self.assertIsNone(quick.handle("水费付了"))  # 不是记着的账单:交给别的规则或 Claude
+
+    def test_tool(self):
+        box = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m.json")), lambda a: True)
+        box.bills = self.make(datetime.datetime(2026, 11, 12, 9))
+        added = []
+        box.ledger = SimpleNamespace(add=lambda *a: added.append(a))
+        self.assertIn("bills", [t["name"] for t in box.definitions()])
+        text, error = box._bills({"action": "add", "name": "Unifi", "day": 20, "amount": 129}, print)
+        self.assertFalse(error)
+        box._bills({"action": "paid", "name": "unifi"}, print)
+        self.assertEqual(added, [("Unifi", 129.0, "账单")])
+
+
+class FocusTest(TempDirTest):
+    def make(self):
+        import friday_focus
+
+        self.t = 1_000_000.0
+        return friday_focus.Focus(os.path.join(self.tmp, "f.json"), clock=lambda: self.t,
+                                  today=lambda: datetime.date(2026, 11, 10))
+
+    def test_cycle_with_break_and_stats(self):
+        focus = self.make()
+        changes = []
+        focus.on_change = changes.append
+        self.assertIn("25 分钟", focus.start())
+        self.assertTrue(focus.active())
+        focus.hold("下雨提醒", "今天会下雨")
+        self.t += 24 * 60
+        self.assertEqual(focus.tick(), [])
+        self.t += 61
+        said = focus.tick("老板")
+        self.assertIn("休息 5 分钟", said[0])
+        self.assertIn("今天会下雨", said[0])
+        self.assertFalse(focus.active())
+        self.t += 5 * 60
+        self.assertIn("休息时间到了", focus.tick()[0])
+        self.assertIn("25 分钟,完成 1 个番茄", focus.report())
+        self.assertEqual(changes[0]["minutes"], 25)
+
+    def test_stop_and_restart_keeps_state(self):
+        import friday_focus
+
+        focus = self.make()
+        focus.start(50, "写报告")
+        again = friday_focus.Focus(os.path.join(self.tmp, "f.json"), clock=lambda: self.t)
+        self.assertTrue(again.active())
+        self.assertIn("写报告", again.status())
+        self.t += 10 * 60
+        self.assertIn("10 分钟", focus.stop())
+        self.assertIn("现在没有在专注", focus.status())
+        with self.assertRaises(ValueError):
+            focus.start(500)
+
+    def test_numbers_and_quick(self):
+        import friday_focus
+        import friday_quick
+
+        self.assertEqual(friday_focus.cn_number("二十五分钟"), 25)
+        self.assertEqual(friday_focus.cn_number("一个半小时"), 90)
+        self.assertEqual(friday_focus.cn_number("半小时"), 30)
+        quick = friday_quick.QuickCommands(SimpleNamespace())
+        quick.focus = self.make()
+        self.assertIn("40 分钟", quick.handle("专注四十分钟"))
+        self.assertIn("还剩", quick.handle("还剩多久"))
+        self.assertIn("取消", quick.handle("停止专注"))
+        self.assertIn("1 小时", quick.handle("我要专注一个小时"))
+
+    def test_announce_holds_while_focusing(self):
+        focus = self.make()
+        focus.start()
+        spoken = []
+        session = SimpleNamespace(hub=SimpleNamespace(broadcast=lambda e: None, connected=True), focus=focus,
+                                  speak_enabled=True, busy=False, speak=spoken.append, discord=None)
+        app.announce(session, "今天会下雨", "☔", "会下雨")
+        self.assertEqual(spoken, [])
+        self.assertEqual(focus.held, ["会下雨"])
+        app.announce(session, "10 分钟后开会", "📅", "开会", timely=True)
+        self.assertEqual(spoken, ["10 分钟后开会"])
+
+
+class FindFilesTest(TempDirTest):
+    def test_search_filters_and_order(self):
+        import friday_files
+
+        root = Path(self.tmp)
+        (root / "Downloads").mkdir()
+        (root / "AppData").mkdir()
+        old = root / "Downloads" / "报价单_旧.pdf"
+        new = root / "Downloads" / "报价单_新.PDF"
+        for path in (old, new, root / "Downloads" / "报价单.xlsx", root / "AppData" / "报价单.pdf", root / ".env"):
+            path.write_text("x")
+        os.utime(old, (time.time() - 10 * 86400,) * 2)
+        result = friday_files.search([root], ["报价"], "pdf")
+        self.assertEqual([Path(f["path"]).name for f in result["files"]], ["报价单_新.PDF", "报价单_旧.pdf"])
+        recent = friday_files.search([root], ["报价"], "pdf", days=2)
+        self.assertEqual(len(recent["files"]), 1)
+        text = friday_files.describe(recent)
+        self.assertIn("#1 报价单_新.PDF", text)
+        self.assertFalse(friday_files.can_open("setup.exe"))
+        self.assertTrue(friday_files.can_open("a.pdf"))
+
+    def test_tool_and_quick(self):
+        import friday_quick
+
+        root = Path(self.tmp)
+        (root / "合同2026.docx").write_text("x")
+        (root / "credentials.json").write_text("x")
+        box = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m.json")), lambda a: True)
+        box.file_roots = lambda folder=None: [root]
+        self.assertIn("find_files", [t["name"] for t in box.definitions()])
+        text, error = box._find_files({"action": "find", "words": ["合同"]}, print)
+        self.assertIn("合同2026.docx", text)
+        self.assertEqual(len(box.found_files), 1)
+        text, error = box._find_files({"action": "find", "words": ["credentials"]}, print)
+        self.assertIn("没找到", text)  # 钥匙文件不列出来
+        quick = friday_quick.QuickCommands(box)
+        self.assertIn("合同2026.docx", quick.handle("找文件 合同"))
+        text, error = box._find_files({"action": "open", "id": 9}, print)
+        self.assertTrue(error)
+
+
+class BriefTest(unittest.TestCase):
+    def test_lines(self):
+        import friday_brief
+
+        now = datetime.datetime(2026, 11, 10, 8, 30)
+        data = {"daily": {"time": ["2026-11-10"], "weather_code": [95], "temperature_2m_min": [24.6],
+                          "temperature_2m_max": [32.8], "uv_index_max": [9]},
+                "hourly": {"time": [f"2026-11-10T{h:02d}:00" for h in range(24)],
+                           "precipitation_probability": [80 if 15 <= h <= 17 else 10 for h in range(24)],
+                           "weather_code": [95] * 24}}
+        line = friday_brief.weather_line("吉隆坡", data, now)
+        self.assertIn("25~33°C", line)
+        self.assertIn("15点到18点可能下雨", line)
+        events = [{"summary": "开会", "start": {"dateTime": "2026-11-10T10:00:00"}},
+                  {"summary": "公假", "start": {"date": "2026-11-10"}},
+                  {"summary": "取消了", "status": "cancelled", "start": {"dateTime": "2026-11-10T11:00:00"}}]
+        self.assertEqual(friday_brief.events_line(events, now), "日历上今天有 2 个活动:10:00 开会、全天:公假。")
+        self.assertIn("今天要完成:交报告", friday_brief.todos_line(
+            [{"text": "交报告", "due": "2026-11-10"}, {"text": "旧事", "due": "2026-11-01"}], now))
+        self.assertIn("RM 15.50(2 笔)", friday_brief.spending_line(
+            [{"date": "2026-11-09", "amount": 10.5}, {"date": "2026-11-09", "amount": 5}], 0.8, now))
+        self.assertIn("重要的:Ali“合约”", friday_brief.mail_line(
+            [{"from": "Ali", "subject": "合约", "important": True}, {"from": "", "subject": "", "important": False}]))
+
+    def test_compose_skips_broken_parts_and_auto_once(self):
+        import friday_alerts
+        import friday_brief
+
+        state = friday_alerts.AlertState(os.path.join(tempfile.mkdtemp(), "a.json"))
+        now = [datetime.datetime(2026, 11, 10, 8, 0)]
+
+        def broken(when):
+            raise RuntimeError("网络断了")
+        brief = friday_brief.MorningBrief(state, [lambda when: "天气好。", broken, lambda when: None],
+                                          clock=lambda: now[0])
+        text = brief.compose("老板")
+        self.assertEqual(text, "早安,老板。今天是 11 月 10 日 星期二。\n天气好。")
+        self.assertTrue(brief.due(30))
+        self.assertFalse(brief.due(None))  # 不知道人在不在:不自动说
+        self.assertFalse(brief.due(600))  # 人不在电脑前
+        brief.mark()
+        self.assertFalse(brief.due(30))
+        now[0] = datetime.datetime(2026, 11, 11, 13, 0)
+        self.assertFalse(brief.due(30))  # 过了中午不自动说
+        with mock.patch.dict(os.environ, {"FRIDAY_BRIEF": "off"}):
+            now[0] = datetime.datetime(2026, 11, 11, 7, 0)
+            self.assertFalse(brief.due(30))
+
+    def test_quick(self):
+        import friday_quick
+
+        quick = friday_quick.QuickCommands(SimpleNamespace())
+        quick.brief = lambda: "简报"
+        for text in ("早安", "早上好", "Good morning", "今天有什么安排"):
+            self.assertEqual(quick.handle(text), "简报", text)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1305,6 +1305,9 @@ class WebSession:
     memtidy = None  # 记忆整理(friday_memtidy.MemoryTidy)
     cleanup_items = None  # 上次找到的大文件和重复文件
     defender = None  # 病毒扫描(friday_defender.Defender)
+    focus = None  # 专注模式(friday_focus.Focus)
+    brief = None  # 早安简报(friday_brief.MorningBrief)
+    alert_state = None  # friday_alerts.json(下雨、每周报告、早安简报共用)
     discord = None  # Discord 机器人(提醒推到手机)
     cloud = None  # 云端后备的连接(friday_cloud.CloudClient)
     start_cloud = None  # 用配对码连接云端
@@ -1816,6 +1819,8 @@ def settings_state(session, meter=None) -> dict:
         "key_expires": os.environ.get("FRIDAY_KEY_EXPIRES", "").strip(),
         "health": health_state(session),
         "defender": defender_state(session),
+        "focus": session.focus.state() if getattr(session, "focus", None) is not None else None,
+        "brief": __import__("friday_brief").enabled() if getattr(session, "brief", None) is not None else None,
         "rain_alert": __import__("friday_alerts").rain_time(),
         "event_lead": __import__("friday_events").lead_minutes() if google_ready(session) else None,
         "mail_alert": mail_alert_state(session),
@@ -1969,6 +1974,11 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
                 done.append(friday_photos.describe(friday_photos.sort_photos(Path(folder))))
             except ValueError as e:
                 return {"error": str(e)}
+    if "brief" in payload:
+        on = bool(payload["brief"])
+        save_env_value(env, "FRIDAY_BRIEF", "on" if on else "off")
+        os.environ["FRIDAY_BRIEF"] = "on" if on else "off"
+        done.append("每天早上第一次坐到电脑前会说早安简报" if on else "不再自动说早安简报(说“早安”还是会说)")
     if payload.get("virus_scan") in ("quick", "full") and getattr(session, "defender", None) is not None:
         done.append(start_virus_scan(session, payload["virus_scan"]))
     if payload.get("tidy_downloads") or payload.get("undo_tidy"):
@@ -2368,13 +2378,20 @@ def start_care(session, ctx, hub, toolbox: Toolbox, voice_module):
     return care
 
 
-def announce(session, text: str, icon: str, short: str, urgent: bool = False) -> None:
-    """星期五主动说的事:显示在窗口、推到手机、读出来(打游戏时先记着,打完再说)。urgent:不管推送设定一律推到手机。"""
+def announce(session, text: str, icon: str, short: str, urgent: bool = False, timely: bool = False) -> None:
+    """星期五主动说的事:显示在窗口、推到手机、读出来(打游戏时先记着,打完再说)。
+
+    urgent:不管推送设定一律推到手机。timely:到点就要说的(日历活动),专注时也照常说;其他的专注时先压着。
+    """
     session.hub.broadcast({"type": "reminder", "text": f"{icon} {text}"})
     if urgent:
         phone_alert(session, f"{icon} {text}")
     else:
         push_to_phone(session, f"{icon} {text}")
+    focus = getattr(session, "focus", None)
+    if focus is not None and focus.active() and not (urgent or timely):
+        focus.hold(text, short)
+        return
     care = getattr(session, "care", None)
     if care is not None and care.quiet_now():
         care.hold(text, short=short)
@@ -2506,13 +2523,16 @@ def start_memory_tidy(session, toolbox: Toolbox, data_dir: str):
 
 
 def start_date_reminders(session, toolbox: Toolbox, interval: float = 15 * 60) -> None:
-    """生日和纪念日:每 15 分钟看一次,提前 3 天和当天提醒(早上 8 点后)。"""
+    """生日、纪念日和账单:每 15 分钟看一次,提前 3 天和当天提醒(早上 8 点后)。"""
     def loop() -> None:
         time.sleep(120)
         while True:
             def check() -> None:
                 for text in toolbox.dates.due(_call_me(session)):
                     announce(session, text, "🎂", text)
+                if getattr(toolbox, "bills", None) is not None:
+                    for text in toolbox.bills.due(_call_me(session)):
+                        announce(session, text, "🧾", text)
 
             _quietly(check)
             time.sleep(interval)
@@ -2532,6 +2552,149 @@ def start_virus_scan(session, kind: str) -> str:
 def defender_state(session) -> dict | None:
     defender = getattr(session, "defender", None)
     return defender.state() if defender is not None and os.name == "nt" else None
+
+
+def start_focus_loop(session, interval: float = 5) -> None:
+    """专注模式:时间到叫你休息、休息完叫你回来;开始和结束时告诉窗口(倒计时)。"""
+    focus = session.focus
+    focus.on_change = lambda state: session.hub.broadcast({"type": "focus", **state})
+
+    def tell(text: str) -> None:
+        session.hub.broadcast({"type": "reminder", "text": f"🍅 {text}"})
+        push_to_phone(session, f"🍅 {text}")
+        care = getattr(session, "care", None)
+        if care is not None and care.quiet_now():
+            care.hold(text, short="专注时间到了")
+        elif session.speak_enabled and session.hub.connected and not session.busy:
+            session.speak(text)
+
+    def loop() -> None:
+        while True:
+            _quietly(lambda: [tell(text) for text in focus.tick(_call_me(session))])
+            time.sleep(interval)
+
+    threading.Thread(target=loop, daemon=True, name="friday-focus").start()
+
+
+def file_roots(session, toolbox, folder: str | None = None) -> list[Path]:
+    """找文件的地方:个人文件夹、OneDrive、C 盘以外的硬盘;说了哪个文件夹就只找那里。"""
+    import friday_files
+
+    personal = cleanup_roots(session, toolbox)
+    if folder:
+        names = ["downloads", "desktop", "documents", "videos", "pictures", "music"]
+        if folder in names:
+            return [personal[names.index(folder)]]
+    roots = list(personal)
+    try:
+        roots += sorted(p for p in Path.home().glob("OneDrive*") if p.is_dir())
+    except OSError:
+        pass
+    return roots + friday_files.other_drives()
+
+
+def make_brief(session, toolbox, data_dir: str):
+    """早安简报:各项拿不到就跳过。"""
+    import friday_alerts
+    import friday_brief
+
+    def weather(now):
+        import friday_weather
+
+        place = friday_weather.find_place(friday_alerts.rain_place())
+        return friday_brief.weather_line(place["name"], friday_weather.forecast(place, 1), now)
+
+    def events(now):
+        google = getattr(toolbox, "google", None)
+        if google is None:
+            return None
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        local = start.astimezone()
+        return friday_brief.events_line(google.raw_events(local, local + datetime.timedelta(days=1)), now)
+
+    def reminders(now):
+        return friday_brief.reminders_line(toolbox.reminders.upcoming(), now) if toolbox.reminders else None
+
+    def todos(now):
+        google = getattr(toolbox, "google", None)
+        if google is not None:
+            return friday_brief.todos_line(google.task_items(), now)
+        if toolbox.todos is None:
+            return None
+        return friday_brief.todos_line([{"text": t["text"], "due": t.get("due", "")} for t in toolbox.todos.pending()], now)
+
+    def dates(now):
+        found = toolbox.dates.upcoming(3) if getattr(toolbox, "dates", None) else []
+        if not found:
+            return None
+        parts = [toolbox.dates._label(item, when) + ("(今天)" if when == now.date() else f"({(when - now.date()).days} 天后)")
+                 for when, item in found]
+        return "重要日子:" + "、".join(parts) + "。"
+
+    def bills(now):
+        text = toolbox.bills.brief() if getattr(toolbox, "bills", None) else ""
+        return f"账单:{text}。" if text else None
+
+    def mail(now):
+        google = getattr(toolbox, "google", None)
+        if google is None:
+            return None
+        import friday_google
+
+        api = google.account.service("gmail").users().messages()
+        unread = api.list(userId="me", q="in:inbox is:unread newer_than:1d", maxResults=50).execute()
+        count = len(unread.get("messages", []))
+        if not count:
+            return None
+        important = api.list(userId="me", q="in:inbox is:unread is:important newer_than:1d", maxResults=3).execute()
+        mails = []
+        for m in important.get("messages", []):
+            msg = api.get(userId="me", id=m["id"], format="metadata", metadataHeaders=["From", "Subject"]).execute()
+            sender = friday_google._header(msg, "From").split("<")[0].strip().strip('"') or "某人"
+            mails.append({"from": sender, "subject": friday_google._header(msg, "Subject"), "important": True})
+        mails += [{"from": "", "subject": "", "important": False}] * (count - len(mails))
+        return friday_brief.mail_line(mails)
+
+    def spending(now):
+        ledger = getattr(toolbox, "ledger", None)
+        meter = getattr(session, "meter", None)
+        ai = None
+        if meter is not None:
+            day = (now.date() - datetime.timedelta(days=1)).isoformat()
+            ai = meter.between(day, day)["usd"] * meter.rate
+        return friday_brief.spending_line(ledger.entries if ledger is not None else [], ai, now)
+
+    state = getattr(session, "alert_state", None)
+    if state is None:
+        state = friday_alerts.AlertState(os.path.join(data_dir, "friday_alerts.json"))
+    return friday_brief.MorningBrief(state, [weather, events, reminders, todos, dates, bills, mail, spending])
+
+
+def brief_now(session) -> str:
+    """说“早安”或问今天的简报:马上做一份(今天就不再自动说)。"""
+    text = session.brief.compose(_call_me(session))
+    session.brief.mark()
+    return text
+
+
+def start_morning_brief(session, interval: float = 60) -> None:
+    """早上第一次坐到电脑前(5 点到 12 点),主动说今天的简报。"""
+    import friday_care
+
+    def check() -> None:
+        idle = friday_care.presence_idle() if os.name == "nt" else None
+        if session.brief.due(idle):
+            session.brief.mark()
+            text = session.brief.compose(_call_me(session))
+            announce(session, text, "☀️", "早安简报在窗口里")
+
+    def loop() -> None:
+        time.sleep(45)
+        while True:
+            _quietly(check)
+            time.sleep(interval)
+
+    threading.Thread(target=loop, daemon=True, name="friday-brief").start()
 
 
 def start_heartbeat(events: queue.Queue, data_dir: str, interval: float = 30) -> None:
@@ -2561,6 +2724,7 @@ def start_daily_checks(session, toolbox: Toolbox, data_dir: str, interval: float
     import friday_alerts
 
     state = friday_alerts.AlertState(os.path.join(data_dir, "friday_alerts.json"))
+    session.alert_state = state  # 早安简报也用这一份(同一个文件只能有一份,不然会互相盖掉)
 
     import friday_health
 
@@ -2667,7 +2831,7 @@ def start_event_reminders(session, toolbox: Toolbox, state, interval: float = 60
 
     def check() -> None:
         for text in reminder.check(_call_me(session)):
-            announce(session, text, "📅", text)
+            announce(session, text, "📅", text, timely=True)
 
     def loop() -> None:
         time.sleep(30)
@@ -3035,7 +3199,21 @@ def run_web(args) -> None:
     toolbox.dates = session.quick.dates = friday_dates.Dates(
         os.path.join(data_dir, "friday_dates.json"),
         contacts=friday_dates.google_birthdays(toolbox.google) if toolbox.google is not None else None)
+    import friday_bills
+
+    toolbox.bills = session.quick.bills = friday_bills.Bills(os.path.join(data_dir, "friday_bills.json"))
     start_date_reminders(session, toolbox)
+    import friday_focus
+
+    session.focus = toolbox.focus = session.quick.focus = friday_focus.Focus(os.path.join(data_dir, "friday_focus.json"))
+    if getattr(session, "care", None) is not None:
+        session.care.focus = session.focus  # 专注时不提醒“用太久了”
+    start_focus_loop(session)
+    if os.name == "nt":
+        toolbox.file_roots = lambda folder=None: file_roots(session, toolbox, folder)
+    session.brief = make_brief(session, toolbox, data_dir)
+    toolbox.brief = session.quick.brief = lambda: brief_now(session)
+    start_morning_brief(session)
     if toolbox.google is not None:  # 登录了 Google:笔记同时抄到 Google 文档(在后台抄,不拖慢)
         append = friday_notes.docs_sync(toolbox.google, toolbox.notes)
         toolbox.notes.sync = lambda line: threading.Thread(target=lambda: _quietly(lambda: append(line)),
