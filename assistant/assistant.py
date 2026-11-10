@@ -1634,6 +1634,12 @@ def google_ready(session) -> bool:
     return getattr(toolbox, "google", None) is not None
 
 
+def api_key_tail() -> str | None:
+    """正在用的 Claude 钥匙的最后 4 个字(给你对照 Console 是哪一把;只给这 4 个字,不给整把)。"""
+    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    return key[-4:] if len(key) > 20 and key != PLACEHOLDER_KEY else None
+
+
 def security_state(session) -> dict | None:
     import friday_vendor
     import friday_web
@@ -1724,6 +1730,7 @@ def settings_state(session, meter=None) -> dict:
         "push": push_mode() if getattr(session, "discord", None) is not None else None,
         "remind_calendar": remind_calendar_state(session),
         "security": security_state(session),
+        "api_key_tail": api_key_tail(),
         "health": health_state(session),
         "rain_alert": __import__("friday_alerts").rain_time(),
         "event_lead": __import__("friday_events").lead_minutes() if google_ready(session) else None,

@@ -6765,5 +6765,17 @@ class SpendingReportTest(TempDirTest):
         self.assertIn("星期五用 Claude 花了", toolbox.run(tool_use("ai_spending", {}), lambda s: None)["content"])
 
 
+class ApiKeyTailTest(unittest.TestCase):
+    def test_only_last_four(self):
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-usr-1zWabcdefghijklmnophAAA"}):
+            self.assertEqual(app.api_key_tail(), "hAAA")
+            session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+            state = json.dumps(app.settings_state(session))
+            self.assertIn('"api_key_tail": "hAAA"', state)
+            self.assertNotIn("sk-ant-usr", state)  # 整把钥匙不会送到窗口
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}):
+            self.assertIsNone(app.api_key_tail())
+
+
 if __name__ == "__main__":
     unittest.main()

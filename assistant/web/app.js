@@ -668,6 +668,8 @@ function fillSettings() {
     $("googleState").textContent = (g.state === "ok" ? "正常" : g.label) + left;
     $("googleState").className = "google-state " + (g.state === "ok" ? "ok" : "warn");
   }
+  $("apiKeyRow").hidden = !s.api_key_tail;
+  if (s.api_key_tail) $("apiKeyTail").textContent = "…" + s.api_key_tail;
   $("setAutostart").checked = !!s.autostart;
 }
 async function saveSetting(change, ms = 3200) {
