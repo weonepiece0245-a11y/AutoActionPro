@@ -14,6 +14,7 @@ import datetime
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -144,7 +145,8 @@ FRIDAY_PROMPT = """你是“星期五”,{call_me}的私人 AI 助手。
   用 {todo_tool} 管理待办清单。{call_me}说花了多少钱(“午饭 15 块”“Grab 12 块”)就用 expense 记账(马币),记完简短说一句。
   {call_me}想等某个游戏降价、等网页有货或有变化,用 watch 追踪,星期五会在后台定时去看。
 - {call_me}在手机上想看电脑现在的画面(“截个图给我”),或要电脑上的文件(“把桌面上的报告发给我”),用 send_to_phone;
-  只是要你自己看屏幕回答问题时用 screen。{reminder_note}
+  只是要你自己看屏幕回答问题时用 screen。
+- {call_me}说“以后 XX 的邮件马上告诉我”“标题有 XX 的邮件提醒我”,用 mail_alert 加规则(新邮件一到就在电脑上说、推到手机)。{reminder_note}
 - 消息以“[定时任务]”开头时,是之前设好的任务到点了,{call_me}可能不在电脑前:
   直接把事情做完,结果说得简短清楚;需要确认的操作不能做,留到{call_me}回来再说。
 - 能直接办到的事就直接办,办完简要汇报结果;做不到的事坦白说,并给出替代方案。
@@ -1612,6 +1614,13 @@ def apply_lock_settings(payload: dict, session, env: Path, save_env_value) -> di
     return {"done": done}
 
 
+def mail_alert_state(session) -> dict | None:
+    watch = getattr(getattr(getattr(session, "assistant", None), "toolbox", None), "mailwatch", None)
+    if watch is None:
+        return None
+    return {"senders": watch.senders, "words": watch.words, "important": watch.important}
+
+
 def google_ready(session) -> bool:
     toolbox = getattr(getattr(session, "assistant", None), "toolbox", None)
     return getattr(toolbox, "google", None) is not None
@@ -1710,6 +1719,7 @@ def settings_state(session, meter=None) -> dict:
         "health": health_state(session),
         "rain_alert": __import__("friday_alerts").rain_time(),
         "event_lead": __import__("friday_events").lead_minutes() if google_ready(session) else None,
+        "mail_alert": mail_alert_state(session),
         "weekly_report": __import__("friday_alerts").weekly_enabled(),
         "quick": __import__("friday_quick").quick_enabled() if getattr(session, "quick", None) is not None else None,
         "wake": wake_state(session),
@@ -1857,6 +1867,16 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         done.extend(lock_result.get("done", []))
         if "secret" in lock_result:
             return {"ok": True, "message": "按下面的步骤加到验证器 App 里", "secret": lock_result["secret"]}
+    if "mail_alert" in payload:
+        watch = getattr(toolbox, "mailwatch", None)
+        if watch is None:
+            return {"error": "要先登录 Google"}
+        rules = payload["mail_alert"] if isinstance(payload["mail_alert"], dict) else {}
+        split = lambda value: [p for p in re.split(r"[,,、;;\n]+", str(value or "")) if p.strip()]  # noqa: E731
+        watch.set_rules(senders=split(rules.get("senders")) if "senders" in rules else None,
+                        words=split(rules.get("words")) if "words" in rules else None,
+                        important=rules.get("important") if "important" in rules else None)
+        done.append(watch.describe())
     if "event_lead" in payload:
         import friday_events
 
@@ -2312,6 +2332,32 @@ def start_daily_checks(session, toolbox: Toolbox, data_dir: str, interval: float
     threading.Thread(target=loop, daemon=True, name="friday-daily-checks").start()
     start_event_reminders(session, toolbox, state)
     start_watch(session, toolbox)
+    start_mail_alerts(session, toolbox, data_dir)
+
+
+def start_mail_alerts(session, toolbox: Toolbox, data_dir: str, interval: float = 120) -> None:
+    """重要邮件提醒:每 2 分钟看一次新的未读邮件,对得上规则就说、推到手机。"""
+    import friday_mailwatch
+
+    google = getattr(toolbox, "google", None)
+    if google is None:
+        return
+    watch = friday_mailwatch.MailWatch(os.path.join(data_dir, "friday_mailwatch.json"))
+    toolbox.mailwatch = watch
+    toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+    list_unread, fetch = friday_mailwatch.gmail_source(google)
+
+    def check() -> None:
+        for text in watch.check(list_unread, fetch):
+            announce(session, text, "📧", text)
+
+    def loop() -> None:
+        time.sleep(90)
+        while True:
+            _quietly(check)
+            time.sleep(interval)
+
+    threading.Thread(target=loop, daemon=True, name="friday-mail").start()
 
 
 def start_watch(session, toolbox: Toolbox, interval: float = 30 * 60) -> None:

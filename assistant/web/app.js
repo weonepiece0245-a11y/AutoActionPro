@@ -593,6 +593,13 @@ function fillSettings() {
   if (s.rain_alert) $("setRain").value = s.rain_alert;
   $("eventRow").hidden = s.event_lead === null || s.event_lead === undefined;
   if (s.event_lead != null) $("setEventLead").value = String(s.event_lead);
+  const ml = s.mail_alert;
+  $("mailGroup").hidden = !ml;
+  if (ml && !$("mailGroup").contains(document.activeElement)) {
+    $("mailSenders").value = ml.senders.join(", ");
+    $("mailWords").value = ml.words.join(", ");
+    $("mailImportant").checked = ml.important;
+  }
   $("weeklyRow").hidden = s.weekly_report === null || s.weekly_report === undefined;
   $("setWeekly").checked = !!s.weekly_report;
   $("quickRow").hidden = s.quick === null || s.quick === undefined;
@@ -722,6 +729,9 @@ $("setLockMinutes").onchange = (e) => saveSetting({ lock_minutes: Number(e.targe
 $("discordPair").onclick = () => saveSetting({ discord_pair: true }, 8000);
 $("setRain").onchange = (e) => saveSetting({ rain_alert: e.target.value });
 $("setEventLead").onchange = (e) => saveSetting({ event_lead: Number(e.target.value) });
+$("mailSave").onclick = () => saveSetting({ mail_alert: { senders: $("mailSenders").value, words: $("mailWords").value,
+                                                           important: $("mailImportant").checked } }, 5000);
+$("mailImportant").onchange = () => $("mailSave").click();
 $("setWeekly").onchange = (e) => saveSetting({ weekly_report: e.target.checked });
 $("setQuick").onchange = (e) => saveSetting({ quick: e.target.checked });
 $("setRemindCalendar").onchange = (e) => saveSetting({ remind_calendar: e.target.checked });

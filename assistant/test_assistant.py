@@ -88,6 +88,7 @@ import friday_locks  # noqa: E402
 import friday_images  # noqa: E402
 import friday_events  # noqa: E402
 import friday_watch  # noqa: E402
+import friday_mailwatch  # noqa: E402
 import friday_wake  # noqa: E402
 import friday_cloud  # noqa: E402
 import friday_care  # noqa: E402
@@ -6605,6 +6606,57 @@ class WindowAttachmentTest(TempDirTest):
         self.assertEqual(users, ["📎 报告.pdf\n总结一下"])
         self.assertIsNone(session.ask("", files=[("a.mp3", "audio/mpeg", b"x")]))  # 全都看不了:不问 Claude
         self.assertEqual(len(asked), 1)
+
+
+class MailAlertTest(TempDirTest):
+    def setUp(self):
+        super().setUp()
+        self.inbox = {"m1": {"from": "老板 <boss@abc.com>", "subject": "周会", "snippet": "明天 9 点", "labels": []}}
+
+    def make(self):
+        return friday_mailwatch.MailWatch(os.path.join(self.tmp, "mw.json"))
+
+    def check(self, watch):
+        return watch.check(lambda: list(reversed(list(self.inbox))), lambda i: self.inbox[i])
+
+    def test_new_matching_mail_is_announced_once(self):
+        watch = self.make()
+        self.assertEqual(self.check(watch), [])  # 没设规则:不看
+        watch.add(sender="boss@abc.com")
+        watch.add(word="发票")
+        self.assertEqual(self.check(watch), [])  # 刚开启:原来的邮件不算
+        self.inbox["m2"] = {"from": "Shopee <no-reply@shopee.com>", "subject": "你的发票", "snippet": "订单 &amp; 发票",
+                            "labels": []}
+        self.inbox["m3"] = {"from": "Newsletter <news@x.com>", "subject": "本周优惠", "snippet": "", "labels": ["IMPORTANT"]}
+        self.inbox["m4"] = {"from": "老板 <boss@abc.com>", "subject": "急:合同", "snippet": "", "labels": []}
+        said = self.check(watch)
+        self.assertEqual(len(said), 2)
+        self.assertIn("新邮件(标题有“发票”):Shopee「你的发票」 —— 订单 & 发票", said[0])
+        self.assertIn("来自 boss@abc.com", said[1])
+        self.assertEqual(self.check(watch), [])  # 只说一次
+        watch.set_rules(important=True)
+        self.inbox["m5"] = dict(self.inbox["m3"])
+        self.assertIn("Gmail 标为重要", self.check(watch)[0])
+        reopened = self.make()
+        self.assertEqual((reopened.senders, reopened.words, reopened.important), (["boss@abc.com"], ["发票"], True))
+        self.assertEqual(self.check(reopened), [])
+        self.assertIn("已删掉", reopened.remove("发票"))
+        with self.assertRaises(ValueError):
+            reopened.remove("没有这条")
+
+    def test_tool_and_settings(self):
+        toolbox = self.make_toolbox()
+        toolbox.mailwatch = self.make()
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+        result = toolbox.run(tool_use("mail_alert", {"action": "add", "sender": "Maybank"}), lambda s: None)
+        self.assertIn("寄件人:Maybank", result["content"])
+        env = str(Path(self.tmp, ".env"))
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        out = app.apply_settings({"mail_alert": {"senders": "Maybank, boss@abc.com", "words": "面试、紧急", "important": False}},
+                                 session, toolbox, env)
+        self.assertTrue(out["ok"])
+        self.assertEqual(toolbox.mailwatch.words, ["面试", "紧急"])
+        self.assertIn("error", app.apply_settings({"mail_alert": {}}, session, SimpleNamespace(mailwatch=None), env))
 
 
 if __name__ == "__main__":

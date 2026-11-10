@@ -635,6 +635,26 @@ EXPENSE_TOOL = {
     },
 }
 
+MAIL_ALERT_TOOL = {
+    "name": "mail_alert",
+    "description": (
+        "重要邮件提醒的规则(新邮件一到就在电脑上说、推到手机;后台每 2 分钟看一次,不花钱)。"
+        "add:加规则,sender 是寄件人名字或邮箱(或 @公司域名),word 是标题关键词;remove:删掉一条(key 写原样);"
+        "list:看现在的规则;important:开关“Gmail 标为重要的邮件也提醒”(on=true/false)。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["add", "remove", "list", "important"]},
+            "sender": {"type": "string"},
+            "word": {"type": "string"},
+            "key": {"type": "string"},
+            "on": {"type": "boolean"},
+        },
+        "required": ["action"],
+    },
+}
+
 PHONE_FILE_LIMIT = 10 * 1024 * 1024  # Discord 一般账号收得下的附件大小
 
 PHONE_TOOL = {
@@ -729,6 +749,7 @@ class Toolbox:
         self.watchlist = watchlist  # 特价和网页追踪(friday_watch.Watchlist)
         self.phone = None  # (文字, [(文件名, 内容)]) -> 私信到手机 Discord;没连 Discord 就是 None
         self.phone_override = None  # 正在回答手机消息时:发回那段对话
+        self.mailwatch = None  # 重要邮件提醒(friday_mailwatch.MailWatch),接了 Google 才有
         if ledger is not None and google is not None:
             from friday_ledger import sheet_sync
 
@@ -765,6 +786,7 @@ class Toolbox:
             "expense": self._expense,
             "watch": self._watch,
             "send_to_phone": self._send_to_phone,
+            "mail_alert": self._mail_alert,
         }
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
 
@@ -786,6 +808,8 @@ class Toolbox:
             tools = tools + [WATCH_TOOL]
         if self.phone is not None and self.local_tools:
             tools = tools + [PHONE_TOOL]
+        if self.mailwatch is not None:
+            tools = tools + [MAIL_ALERT_TOOL]
         if self.todos is not None and self.google is None:  # 接了 Google 就用 Google Tasks 当待办清单
             tools = tools + [TODO_TOOL]
         if self.computer is not None and self.computer.available:
@@ -879,6 +903,23 @@ class Toolbox:
                 return ledger.summary(args.get("month") or ""), False
             if action == "delete":
                 return ledger.delete(args.get("id") or "last"), False
+        except ValueError as e:
+            return str(e), True
+        return f"不支持的 action:{action}", True
+
+    def _mail_alert(self, args, on_status):
+        watch = self.mailwatch
+        action = args.get("action")
+        try:
+            if action == "add":
+                return watch.add(str(args.get("sender") or ""), str(args.get("word") or "")), False
+            if action == "remove":
+                return watch.remove(str(args.get("key") or "")), False
+            if action == "list":
+                return watch.describe(), False
+            if action == "important":
+                watch.set_rules(important=bool(args.get("on", True)))
+                return watch.describe(), False
         except ValueError as e:
             return str(e), True
         return f"不支持的 action:{action}", True

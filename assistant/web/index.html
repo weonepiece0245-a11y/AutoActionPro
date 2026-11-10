@@ -233,6 +233,12 @@
         <select class="mini-select" id="setRain"><option value="07:00">早上 7:00</option><option value="07:30">早上 7:30</option><option value="08:00">早上 8:00</option><option value="08:30">早上 8:30</option><option value="09:00">早上 9:00</option><option value="off">不提醒</option></select></div>
       <div class="set-row" id="eventRow" hidden><label for="setEventLead">Google 日历上的活动,提前提醒我(不花钱)</label>
         <select class="mini-select" id="setEventLead"><option value="10">10 分钟</option><option value="15">15 分钟</option><option value="30">30 分钟</option><option value="60">1 小时</option><option value="0">不提醒</option></select></div>
+      <div id="mailGroup" hidden>
+        <div class="set-row"><span>重要邮件马上提醒我(不花钱)</span><button type="button" class="mini-btn" id="mailSave">保存</button></div>
+        <div class="set-row sub"><label for="mailSenders">寄件人</label><input class="mini-input wide" id="mailSenders" placeholder="例如 boss@公司.com, Maybank, @学校.edu.my"></div>
+        <div class="set-row sub"><label for="mailWords">标题关键词</label><input class="mini-input wide" id="mailWords" placeholder="例如 发票, 面试, 紧急"></div>
+        <div class="set-row sub"><label for="mailImportant">Gmail 标为“重要”的也提醒</label><input type="checkbox" class="switch" id="mailImportant"></div>
+      </div>
       <div class="set-row" id="weeklyRow" hidden><label for="setWeekly">每周花费报告(星期天晚上 9 点后,不花钱)</label><input type="checkbox" class="switch" id="setWeekly"></div>
       <div class="set-row" id="quickRow" hidden><label for="setQuick">简单指令不问 Claude(调音量、切歌、几点了、记账……不花钱)</label><input type="checkbox" class="switch" id="setQuick"></div>
       <div class="set-row" id="calendarRow" hidden><label for="setRemindCalendar">提醒同时放进 Google 日历(电脑关机时手机也会响)</label><input type="checkbox" class="switch" id="setRemindCalendar"></div>
