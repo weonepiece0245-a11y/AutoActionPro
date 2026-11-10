@@ -190,9 +190,14 @@ export function start(canvas, state) {
     if (d && d.onOrb && d.moved < 6 && performance.now() - d.at < 400 && state.onOrbClick) state.onOrbClick();
   });
 
+  let appliedPalette = null;
   function frame() {
     const dt = Math.min(clock.getDelta(), 0.05);
     const t = clock.elapsedTime;
+    if (state.palette && state.palette !== appliedPalette) {
+      appliedPalette = state.palette;
+      for (const k of Object.keys(COLORS)) if (state.palette[k]) COLORS[k].set(state.palette[k]);
+    }
     const mode = state.mode || "idle";
     const target = COLORS[mode] || COLORS.idle;
     color.lerp(target, 0.06);

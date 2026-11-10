@@ -25,6 +25,28 @@ $("brightness").addEventListener("input", (e) => {
   try { localStorage.setItem("friday-brightness", String(percent)); } catch {}
 });
 
+// 颜色主题(齿轮设定 → 外观,记在本机)
+const THEMES = {
+  cyan: { idle: "#22d3ee", thinking: "#3b82f6", speaking: "#2bc4e6", listening: "#d946ef" },
+  ironman: { idle: "#fbbf24", thinking: "#ef4444", speaking: "#f59e0b", listening: "#f97316" },
+  violet: { idle: "#a78bfa", thinking: "#6366f1", speaking: "#c4b5fd", listening: "#f472b6" },
+  matrix: { idle: "#34d399", thinking: "#10b981", speaking: "#6ee7b7", listening: "#a3e635" },
+};
+function setTheme(name) {
+  if (!THEMES[name]) name = "cyan";
+  if (name === "cyan") delete document.body.dataset.theme;
+  else document.body.dataset.theme = name;
+  orbState.palette = THEMES[name];
+  $("setTheme").value = name;
+}
+let savedTheme = "cyan";
+try { savedTheme = localStorage.getItem("friday-theme") || "cyan"; } catch {}
+setTheme(savedTheme);
+$("setTheme").addEventListener("change", (e) => {
+  setTheme(e.target.value);
+  try { localStorage.setItem("friday-theme", e.target.value); } catch {}
+});
+
 // ---------- 状态 ----------
 const MODE_TEXT = { idle: "待机 STANDBY", thinking: "思考中 PROCESSING", speaking: "说话中 SPEAKING", listening: "聆听中 LISTENING" };
 let busy = false;
