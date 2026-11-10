@@ -20,7 +20,7 @@ RATES = (0.8, 0.9, 1.0, 1.15, 1.3, 1.5, 1.7)
 SKIP_TAGS = {"script", "style", "noscript", "nav", "footer", "header", "aside", "form", "button", "svg", "figure",
              "iframe", "select", "template"}
 BLOCK_TAGS = {"p", "h1", "h2", "h3", "h4", "li", "blockquote", "pre", "div", "section", "article", "br", "tr", "td"}
-SENTENCE_END = re.compile(r"(?<=[。!?!?;;…])|(?<=[.!?])\s+")
+SENTENCE_END = re.compile(r"(?<=[。!?！？;；…])|(?<=[.!?])\s+")
 
 
 class _TextParser(html.parser.HTMLParser):

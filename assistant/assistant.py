@@ -2181,6 +2181,26 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         else:
             toolbox.apex = session.quick.apex = None
             done.append("Apex 设定已保存(要填钥匙才会连)")
+    if "tapo_user" in payload or "tapo_password" in payload:
+        user = str(payload.get("tapo_user", os.environ.get("FRIDAY_TAPO_USER", "")) or "").strip()
+        password = payload.get("tapo_password")
+        if user and not re.fullmatch(r"[^@\s=]+@[^@\s=]+\.[^@\s=]+", user):
+            return {"error": "Tapo 账号是你登录 Tapo App 用的邮箱"}
+        if password is not None and (len(str(password)) > 128 or any(c in str(password) for c in "\n\r")):
+            return {"error": "密码格式不对"}
+        save_env_value(env, "FRIDAY_TAPO_USER", user)
+        os.environ["FRIDAY_TAPO_USER"] = user
+        if password is not None:
+            save_env_value(env, "FRIDAY_TAPO_PASSWORD", str(password))
+            os.environ["FRIDAY_TAPO_PASSWORD"] = str(password)
+        done.append(start_tapo(session, toolbox, install=True) or "Tapo 设定已保存(邮箱和密码都填了才会连)")
+    if "diary_time" in payload:
+        value = str(payload["diary_time"]).strip()
+        if value != "off" and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", value):
+            return {"error": "时间格式不对"}
+        save_env_value(env, "FRIDAY_DIARY_TIME", value)
+        os.environ["FRIDAY_DIARY_TIME"] = value
+        done.append("不再晚上主动总结" if value == "off" else f"每天 {value} 后做今天的总结")
     if "spotify_client_id" in payload:
         value = str(payload["spotify_client_id"] or "").strip()
         if value and not re.fullmatch(r"[0-9a-fA-F]{32}", value):
@@ -2800,6 +2820,10 @@ def apps_state(session) -> dict | None:
         "apex_key": ("…" + os.environ.get("FRIDAY_APEX_KEY", "").strip()[-4:]) if os.environ.get("FRIDAY_APEX_KEY", "").strip() else "",
         "apex_player": os.environ.get("FRIDAY_APEX_PLAYER", "").strip(),
         "apex_platform": os.environ.get("FRIDAY_APEX_PLATFORM", "PC").strip() or "PC",
+        "tapo_user": os.environ.get("FRIDAY_TAPO_USER", "").strip(),
+        "tapo_set": bool(os.environ.get("FRIDAY_TAPO_PASSWORD", "")),
+        "tapo_devices": len(session.quick.home.devices) if getattr(session.quick, "home", None) is not None else None,
+        "diary_time": __import__("friday_diary").diary_time(),
     }
 
 
@@ -3124,6 +3148,15 @@ def start_connected_apps(session, toolbox, ctx, data_dir: str, port: int) -> Non
     toolbox.news = session.quick.news = friday_news.News()
     if friday_steam.configured():
         toolbox.steam = session.quick.steam = friday_steam.Steam()
+    import friday_diary
+    import friday_shopping
+
+    toolbox.shopping = session.quick.shopping = friday_shopping.Shopping(os.path.join(data_dir, "friday_shopping.json"))
+    diary = friday_diary.Diary(os.path.join(data_dir, "friday_diary.json"))
+    diary.sources = diary_sources(session, toolbox)
+    toolbox.diary = session.quick.diary = diary
+    start_diary_evening(session, diary)
+    start_tapo(session, toolbox)
     if os.name == "nt" and friday_nvidia.find_smi() is not None:
         toolbox.nvidia = session.quick.nvidia = True
         watch = friday_nvidia.GpuWatch()
@@ -3219,6 +3252,110 @@ def start_dota_reports(session, toolbox, interval: float = 30) -> None:
                 continue
 
     threading.Thread(target=loop, daemon=True, name="friday-dota").start()
+
+
+def diary_sources(session, toolbox) -> list:
+    """每日总结里的各项(哪一项没有就跳过)。"""
+    def screen(day):
+        st = getattr(toolbox, "screentime", None)
+        today = datetime.date.today()
+        if st is None or day not in (today, today - datetime.timedelta(days=1)):
+            return None
+        st.save()
+        return st.report("today" if day == today else "yesterday")
+
+    def focus(day):
+        f = getattr(session, "focus", None)
+        if f is None or day != datetime.date.today():
+            return None
+        text = f.report()
+        return None if "还没有专注记录" in text else text
+
+    def habits(day):
+        h = getattr(toolbox, "habits", None)
+        return h.report() if h is not None and h.items and day == datetime.date.today() else None
+
+    def money(day):
+        ledger = getattr(toolbox, "ledger", None)
+        entries = [e for e in (ledger.entries if ledger is not None else []) if e.get("date") == day.isoformat()]
+        if not entries:
+            return None
+        total = sum(e["amount"] for e in entries)
+        top = max(entries, key=lambda e: e["amount"])
+        return f"记账 {len(entries)} 笔,共 RM {total:,.2f},最大一笔是{top.get('item', '')} RM {top['amount']:,.2f}"
+
+    def ai(day):
+        meter = getattr(session, "meter", None)
+        if meter is None:
+            return None
+        usage = meter.between(day.isoformat(), day.isoformat())
+        if not usage["calls"] and not usage["local"]:
+            return None
+        return (f"问了星期五 {usage['calls'] + usage['local']} 次(问 Claude {usage['calls']} 次,约 RM {usage['usd'] * meter.rate:.2f})")
+
+    def notes(day):
+        n = getattr(toolbox, "notes", None)
+        items = [x for x in (n.items if n is not None else []) if str(x.get("time", "")).startswith(day.isoformat())]
+        if not items:
+            return None
+        return f"记了 {len(items)} 条笔记:" + ";".join(x["text"][:30] for x in items[:3])
+
+    return [screen, focus, habits, money, ai, notes]
+
+
+def start_diary_evening(session, diary, interval: float = 60) -> None:
+    """晚上到点(默认 22:30)、人在电脑前:主动做今天的总结,问你今天过得怎么样。"""
+    import friday_care
+
+    def check() -> None:
+        idle = friday_care.presence_idle() if os.name == "nt" else None
+        if diary.evening_due(idle):
+            text = diary.evening(_call_me(session))
+            announce(session, text, "📔", "今天的总结在窗口里")
+
+    def loop() -> None:
+        time.sleep(90)
+        while True:
+            _quietly(check)
+            time.sleep(interval)
+
+    threading.Thread(target=loop, daemon=True, name="friday-diary").start()
+
+
+def start_tapo(session, toolbox, install: bool = False) -> str | None:
+    """填好 Tapo 账号就连上家里的 Tapo 设备;第一次要装 python-kasa(在后台装,装好告诉你)。"""
+    import friday_tapo
+
+    toolbox.home = session.quick.home = None
+    if not friday_tapo.configured():
+        return None
+    user, password = os.environ.get("FRIDAY_TAPO_USER", "").strip(), os.environ.get("FRIDAY_TAPO_PASSWORD", "")
+
+    def connect() -> None:
+        home = friday_tapo.TapoHome(lambda: friday_tapo.KasaBackend(user, password))
+        toolbox.home = session.quick.home = home
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+        try:
+            text = home.describe()
+        except ValueError as e:
+            text = str(e)
+        session.hub.broadcast({"type": "status", "text": "💡 " + text})
+
+    if friday_tapo.kasa_installed():
+        threading.Thread(target=lambda: _quietly(connect), daemon=True, name="friday-tapo-connect").start()
+        return "在找家里的 Tapo 设备,找到会在窗口里说。"
+    if not install:
+        return None
+
+    def setup() -> None:
+        session.hub.broadcast({"type": "status", "text": "💡 第一次用 Tapo:在安装控制组件(一两分钟)……"})
+        if friday_tapo.install_kasa():
+            connect()
+        else:
+            session.hub.broadcast({"type": "error", "text": "💡 Tapo 控制组件没装好(可能网络有问题),等一下在齿轮设定里再点一次保存。"})
+
+    threading.Thread(target=lambda: _quietly(setup), daemon=True, name="friday-tapo-install").start()
+    return "第一次用 Tapo,要先在后台安装控制组件(一两分钟),装好会在窗口里说找到了哪些设备。"
 
 
 def start_heartbeat(events: queue.Queue, data_dir: str, interval: float = 30) -> None:

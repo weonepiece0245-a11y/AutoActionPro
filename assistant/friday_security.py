@@ -41,7 +41,7 @@ SECRET_RE = re.compile("|".join(SECRET_PATTERNS), re.I)
 SECRET_WORDS = re.compile(
     r"(\.env\b|google_token|google_login|credentials\.json|friday_discord|cloud_key|friday_cloud_state|"
     r"\.ssh|id_rsa|id_ed25519|login data|logins\.json|\.kdbx|cmdkey|vaultcmd|mimikatz|lsass|sekurlsa|"
-    r"anthropic_api_key|friday_discord_token|friday_telegram_token|friday_admin_key|sk-ant-)", re.I)
+    r"anthropic_api_key|friday_discord_token|friday_telegram_token|friday_tapo_password|friday_admin_key|sk-ant-)", re.I)
 # 写这些地方会让程序开机自动运行、或者改掉星期五自己
 STARTUP_RE = re.compile(r"[\\/]start menu[\\/]programs[\\/]startup([\\/]|$)|[\\/]startup([\\/]|$)", re.I)
 # 看起来像在下命令、想改掉星期五规矩的话(不记进记忆)

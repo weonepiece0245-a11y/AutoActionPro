@@ -76,6 +76,9 @@ class QuickCommands:
         self.dota = None  # friday_dota.Dota
         self.apex = None  # friday_apex.Apex
         self.sleep_timer = None  # friday_sleeptimer.SleepTimer
+        self.diary = None  # friday_diary.Diary
+        self.shopping = None  # friday_shopping.Shopping
+        self.home = None  # friday_tapo.TapoHome
         self.on_say = None  # 场景里“说”的那一步:马上读出来
         self.silent = False  # 这次的回答已经读过了(场景模式),不用再读
         self.clock = clock
@@ -121,11 +124,11 @@ class QuickCommands:
                         r"|^(电脑|我的电脑)?(有没有|有)(中)?病毒$|^上次(什么时候)?(扫描|扫毒|杀毒)(是)?(什么时候)?$"), self._virus_status),
         ]
 
-    NOTE_ADD = re.compile(r"^\s*(星期五[,,\s]*)?(帮我)?(记一下|记下来|记下|备忘一下|备忘|速记)\s*[::,,]?\s*(?P<text>.+)$", re.S)
-    NOTE_FIND = re.compile(r"^\s*(帮我)?(找|查|搜)(一下)?(我的)?笔记\s*[::,,]?\s*(?P<q>.+?)\s*$|"
-                           r"^\s*笔记里(有没有|找一下|找)\s*(?P<q2>.+?)(吗|的)?\s*[??]?$")
-    NOTE_RECENT = re.compile(r"^\s*(看一?下|看看|打开)?(我的|最近的?)?笔记(本)?\s*[??!!。]?$")
-    NOTE_DELETE = re.compile(r"^\s*(删掉|删除|撤销)(刚才|刚刚|上一|最后一)(那|一)?条笔记\s*[。!!]?$")
+    NOTE_ADD = re.compile(r"^\s*(星期五[,，\s]*)?(帮我)?(记一下|记下来|记下|备忘一下|备忘|速记)\s*[:：,，]?\s*(?P<text>.+)$", re.S)
+    NOTE_FIND = re.compile(r"^\s*(帮我)?(找|查|搜)(一下)?(我的)?笔记\s*[:：,，]?\s*(?P<q>.+?)\s*$|"
+                           r"^\s*笔记里(有没有|找一下|找)\s*(?P<q2>.+?)(吗|的)?\s*[?？]?$")
+    NOTE_RECENT = re.compile(r"^\s*(看一?下|看看|打开)?(我的|最近的?)?笔记(本)?\s*[?？!！。]?$")
+    NOTE_DELETE = re.compile(r"^\s*(删掉|删除|撤销)(刚才|刚刚|上一|最后一)(那|一)?条笔记\s*[。!！]?$")
 
     def _notes(self, text: str) -> str | None:
         notes = self.notes
@@ -155,6 +158,17 @@ class QuickCommands:
                 reply = str(e)
             if reply:
                 return reply
+        if self.shopping is not None and len(text) <= 120:
+            found = self.SHOP_ADD.match(re.sub(r"\s*[:\uff1a]\s*", "", text.strip().rstrip("。!\uff01")))
+            if found:  # 用原话(带顿号、逗号)分开每一样东西
+                return self.shopping.add(found.group("t") or found.group("t2"))
+        if self.diary is not None:
+            found = self.DIARY_WRITE.match(text)
+            if found:
+                try:
+                    return self.diary.write(found.group("t"))
+                except ValueError as e:
+                    return str(e)
         if self.reader is not None:
             try:
                 reply = self._reader_url(text)
@@ -178,8 +192,8 @@ class QuickCommands:
                 reply = None
             if reply:
                 return reply
-        for check in (self._reader_control, self._interpret, self._clipboard, self._habits, self._network, self._money,
-                      self._timer, self._games, self._apps):
+        for check in (self._reader_control, self._interpret, self._clipboard, self._shopping_done, self._habits, self._network, self._money,
+                      self._timer, self._games, self._diary, self._shopping, self._home, self._apps):
             try:
                 reply = check(sentence)
             except ValueError as e:
@@ -377,6 +391,107 @@ class QuickCommands:
             return None
         word = found.group("lang") or found.group("lang2")
         return self.interpret_start(friday_interpret.language_of(word))
+
+    # ---------- 日记 ----------
+    DIARY_WRITE = re.compile(r"^\s*(帮我)?(写|记)?(一下)?日记\s*[:：,，]\s*(?P<t>.{2,})$", re.S)
+    DIARY_SUMMARY = re.compile(r"^(今天|今日)?(的)?(总结|总结一下|小结|回顾)$|^(帮我)?(总结|回顾)(一下)?今天$")
+    DIARY_READ = re.compile(r"^(看|读|念)?(一下)?(?P<d>今天|昨天|前天|大前天|上上?个?(周|星期|礼拜)[一二三四五六日天七]|(这|本)?(周|星期|礼拜)[一二三四五六日天七]"
+                            r"|\d{4}-\d{1,2}-\d{1,2}|(\d{4}年)?\d{1,2}月\d{1,2}[日号]?)的?日记$")
+    DIARY_FIND = re.compile(r"^(在)?日记(里)?(找|搜)(一下)?(?P<q>.{1,20})$")
+
+    def _diary(self, sentence: str) -> str | None:
+        diary = self.diary
+        if diary is None:
+            return None
+        if self.DIARY_SUMMARY.match(sentence):
+            return diary.summary()
+        found = self.DIARY_READ.match(sentence)
+        if found:
+            import friday_diary
+
+            day = friday_diary.parse_day(found.group("d"), self.clock().date())
+            return diary.read(day) if day else None
+        found = self.DIARY_FIND.match(sentence)
+        if found:
+            return diary.search(found.group("q"))
+        return None
+
+    # ---------- 购物清单 ----------
+    SHOP_ADD = re.compile(r"^(我)?(要买|还要买|记得买|帮我记(一下)?要买|购物清单(加上?|记上?)|加到购物清单|买东西)"
+                          r"(?!什么|啥|哪些|多少|吗|的东西|几样)(?P<t>.{1,60})$"
+                          r"|^(?P<t2>.{1,40})(加到|加进|放进|记到)购物清单(里)?$")
+    SHOP_LIST = re.compile(r"^(我)?(还)?(要|需要)?买(些)?什么(东西)?$|^(看一?下)?(我的)?(购物清单|购物单|要买的东西)$")
+    SHOP_DONE = re.compile(r"^(?P<t>[^\d]{1,12}?)(已经)?(买了|买好了|买到了)(rm|RM)?(?P<x>\d{1,5}(\.\d{1,2})?)?(块钱|块|元|令吉)?$")
+    SHOP_REMOVE = re.compile(r"^(购物清单里?)?(不用|不要|别)买(?P<t>.{1,20})了?$")
+    SHOP_CLEAR = re.compile(r"^(清空|清掉)购物清单$")
+
+    def _shopping(self, sentence: str) -> str | None:
+        shop = self.shopping
+        if shop is None:
+            return None
+        if self.SHOP_CLEAR.match(sentence):
+            return shop.clear()
+        if self.SHOP_LIST.match(sentence):
+            return shop.describe()
+        found = self.SHOP_REMOVE.match(sentence)
+        if found:
+            return shop.remove(found.group("t"))
+        found = self.SHOP_ADD.match(sentence)
+        if found:
+            return shop.add(found.group("t") or found.group("t2"))
+        return None
+
+    def _shopping_done(self, sentence: str) -> str | None:
+        """“牛奶买了”“牛奶买了 8 块”:划掉;带价钱就顺便记账。清单上没有就不管(可能是普通记账)。"""
+        shop = self.shopping
+        found = self.SHOP_DONE.match(sentence) if shop is not None else None
+        if not found:
+            return None
+        result = shop.done(found.group("t").strip())
+        if result is None:
+            return None
+        text, item = result
+        ledger = getattr(self.toolbox, "ledger", None)
+        if found.group("x") and ledger is not None:
+            category = guess_category(item["text"])
+            ledger.add(item["text"], found.group("x"), "购物" if category == "其他" else category)
+            text += f"也记了一笔账 RM {float(found.group('x')):.2f}。"
+        return text
+
+    # ---------- 智能家居 ----------
+    HOME_ON = re.compile(r"^(把)?(?P<n>.{1,14}?)(打开|开起来|开一下|开了)$|^(打开|开|开一下)(?P<n2>.{1,14})$")
+    HOME_OFF = re.compile(r"^(把)?(?P<n>.{1,14}?)(关掉|关了|关一下|关上|关闭)$|^(关掉|关闭|关|关一下)(?P<n2>.{1,14})$")
+    HOME_LIGHTER = re.compile(r"^(把)?(?P<n>.{0,10}?)(调亮|调暗|亮一点|暗一点|调亮一点|调暗一点|亮一些|暗一些|亮点|暗点)$")
+    HOME_LEVEL = re.compile(r"^(把)?(?P<n>.{0,10}?)(的)?亮度(调到|调成|设为|设成|调|到)?(?P<v>\d{1,3})%?$")
+    HOME_WARM = re.compile(r"^(把)?(?P<n>.{0,10}?)(换成|调成|变成|调)?(?P<w>暖光|暖色|暖一点|黄光|白光|冷光|冷一点|白一点)$")
+    HOME_COLOR = re.compile(r"^(把)?(?P<n>.{0,10}?)(换成|调成|变成)(?P<c>[红橙黄绿青蓝紫粉白])色(的)?$")
+    HOME_STATUS = re.compile(r"^(家里)?(有)?(哪些|什么)?(灯|设备|插座)(还)?(开着|有开着|状态)(吗|没有)?$|^(智能家居|家里的设备|tapo|Tapo)(状态|设备|有哪些)?$")
+
+    def _home(self, sentence: str) -> str | None:
+        home = self.home
+        if home is None:
+            return None
+        words = lambda found: (found.group("n") or "").replace("的", "")  # noqa: E731
+        if self.HOME_STATUS.match(sentence):
+            return home.describe()
+        for pattern, on in ((self.HOME_ON, True), (self.HOME_OFF, False)):
+            found = pattern.match(sentence)
+            if found:
+                target = (found.group("n") or found.group("n2") or "").replace("的", "")
+                return home.switch(target, on)  # 没有这个设备:返回 None,交给别的规则(例如打开程序)
+        found = self.HOME_LEVEL.match(sentence)
+        if found:
+            return home.brightness(words(found), value=int(found.group("v")))
+        found = self.HOME_LIGHTER.match(sentence)
+        if found:
+            return home.brightness(words(found), step=25 if "亮" in sentence[len(found.group("n") or ""):] else -25)
+        found = self.HOME_COLOR.match(sentence)
+        if found:
+            return home.color(words(found), found.group("c"))
+        found = self.HOME_WARM.match(sentence)
+        if found:
+            return home.warmth(words(found), warm=found.group("w") in ("暖光", "暖色", "暖一点", "黄光"))
+        return None
 
     # ---------- 睡前定时 ----------
     NUM = r"(?P<n>\d{1,3}|[零一二两三四五六七八九十半]{1,4}个?)(?P<u>分钟|分|个?小时|个?钟头)"

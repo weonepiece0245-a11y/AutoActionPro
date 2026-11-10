@@ -761,7 +761,7 @@ FX_TOOL = {
 CHANNEL_PRIVATE_TOOLS = {
     "ai_spending", "bills", "calendar", "cleanup", "clipboard_history", "contacts", "dates", "docs", "drive", "expense",
     "find_files", "gmail", "google_tasks", "habits", "mail_alert", "morning_brief", "notes", "read_file", "reminder",
-    "screen", "screen_time", "search_history", "sheets", "todo", "virus_scan", "steam", "folder_backup",
+    "screen", "screen_time", "search_history", "sheets", "todo", "virus_scan", "steam", "folder_backup", "diary",
 }
 CHANNEL_REFUSAL = "这在 Discord 服务器频道里,别人也看得到,这个工具会说出私人资料,不能用。请主人改用私信再问一次。"
 
@@ -854,6 +854,33 @@ SLEEP_TIMER_TOOL = {
         "action": {"type": "string", "enum": ["set", "cancel", "status"]},
         "what": {"type": "string", "enum": ["music", "song", "sleep", "shutdown"]}, "minutes": {"type": "number"}},
         "required": ["action"]},
+}
+
+DIARY_TOOL = {
+    "name": "diary",
+    "description": ("用户的日记和每日总结:summary 某天的总结(date:今天/昨天/上周三/11月5号,默认今天;用电脑多久、游戏、专注、"
+                    "习惯、花费、笔记);write 记一篇(text,date 可空);read 读某天的日记;search 找(query)。"),
+    "input_schema": {"type": "object", "properties": {
+        "action": {"type": "string", "enum": ["summary", "write", "read", "search"]},
+        "date": {"type": "string"}, "text": {"type": "string"}, "query": {"type": "string"}}, "required": ["action"]},
+}
+
+SHOPPING_TOOL = {
+    "name": "shopping",
+    "description": ("购物清单:add 加(items 用顿号分开);list 要买什么;done 买了一样(item,amount 花了多少马币,可空,会顺便记账);"
+                    "remove 不用买了;clear 清空。"),
+    "input_schema": {"type": "object", "properties": {
+        "action": {"type": "string", "enum": ["add", "list", "done", "remove", "clear"]},
+        "items": {"type": "string"}, "item": {"type": "string"}, "amount": {"type": "number"}}, "required": ["action"]},
+}
+
+SMART_HOME_TOOL = {
+    "name": "smart_home",
+    "description": ("家里的 Tapo 灯和插座:list 看有哪些、开着没;on / off 开关(target:设备名,如“客厅灯”,或“灯”“插座”“全部”);"
+                    "brightness 亮度(target,value 1~100);warm / cool 暖光 / 白光;color 颜色(color:红橙黄绿青蓝紫粉白)。"),
+    "input_schema": {"type": "object", "properties": {
+        "action": {"type": "string", "enum": ["list", "on", "off", "brightness", "warm", "cool", "color"]},
+        "target": {"type": "string"}, "value": {"type": "integer"}, "color": {"type": "string"}}, "required": ["action"]},
 }
 
 CLEANUP_TOOL = {
@@ -1040,6 +1067,9 @@ class Toolbox:
         self.dota = None  # friday_dota.Dota
         self.apex = None  # friday_apex.Apex
         self.sleep_timer = None  # friday_sleeptimer.SleepTimer
+        self.diary = None  # friday_diary.Diary
+        self.shopping = None  # friday_shopping.Shopping
+        self.home = None  # friday_tapo.TapoHome
         self.virus = None  # (开始扫描(kind) -> 话, 状态() -> 话),由主程序接上
         self.cleanup = None  # (scan, list, recycle) 三个函数,由主程序接上
         self.notes = None  # 速记本(friday_notes.Notes)
@@ -1105,6 +1135,9 @@ class Toolbox:
             "dota": self._dota,
             "apex": self._apex,
             "sleep_timer": self._sleep_timer,
+            "diary": self._diary,
+            "shopping": self._shopping,
+            "smart_home": self._smart_home,
             "notes": self._notes,
             "dates": self._dates,
         }
@@ -1176,6 +1209,12 @@ class Toolbox:
             tools = tools + [APEX_TOOL]
         if self.sleep_timer is not None and self.local_tools:
             tools = tools + [SLEEP_TIMER_TOOL]
+        if self.diary is not None:
+            tools = tools + [DIARY_TOOL]
+        if self.shopping is not None:
+            tools = tools + [SHOPPING_TOOL]
+        if self.home is not None:
+            tools = tools + [SMART_HOME_TOOL]
         if self.notes is not None:
             tools = tools + [NOTES_TOOL]
         if self.dates is not None:
@@ -1626,6 +1665,81 @@ class Toolbox:
         except ValueError as e:
             return str(e), True
         return f"不支持的 action:{action}", True
+
+    def _diary(self, args, on_status):
+        import friday_diary
+
+        diary = self.diary
+        action = args.get("action")
+        try:
+            day = None
+            if args.get("date"):
+                day = friday_diary.parse_day(str(args["date"]), diary.clock().date())
+                if day is None:
+                    try:
+                        day = datetime.date.fromisoformat(str(args["date"]))
+                    except ValueError:
+                        return "日期看不懂,用 2026-11-05 这样的写法", True
+            if action == "summary":
+                return diary.summary(day), False
+            if action == "write":
+                return diary.write(str(args.get("text") or ""), day), False
+            if action == "read":
+                return diary.read(day or diary.clock().date()), False
+            if action == "search":
+                return diary.search(str(args.get("query") or "")), False
+        except ValueError as e:
+            return str(e), True
+        return f"不支持的 action:{action}", True
+
+    def _shopping(self, args, on_status):
+        shop = self.shopping
+        action = args.get("action")
+        try:
+            if action == "add":
+                return shop.add(str(args.get("items") or args.get("item") or "")), False
+            if action == "list":
+                return shop.describe(), False
+            if action == "done":
+                result = shop.done(str(args.get("item") or ""))
+                if result is None:
+                    return "清单上没有这一样", True
+                text, item = result
+                if args.get("amount") and self.ledger is not None:
+                    self.ledger.add(item["text"], args["amount"], "购物")
+                    text += f"也记了一笔账 RM {float(args['amount']):.2f}。"
+                return text, False
+            if action == "remove":
+                return shop.remove(str(args.get("item") or "")), False
+            if action == "clear":
+                return shop.clear(), False
+        except ValueError as e:
+            return str(e), True
+        return f"不支持的 action:{action}", True
+
+    def _smart_home(self, args, on_status):
+        home = self.home
+        action = args.get("action")
+        target = str(args.get("target") or "")
+        try:
+            if action == "list":
+                on_status("在找家里的 Tapo 设备")
+                return friday_security.mark_external(home.describe()), False  # 设备名字是自己取的,当资料
+            if action in ("on", "off"):
+                result = home.switch(target or "灯", action == "on")
+            elif action == "brightness":
+                result = home.brightness(target, value=int(args.get("value") or 50))
+            elif action in ("warm", "cool"):
+                result = home.warmth(target, warm=action == "warm")
+            elif action == "color":
+                result = home.color(target, str(args.get("color") or "").rstrip("色"))
+            else:
+                return f"不支持的 action:{action}", True
+            if result is None:
+                return f"没找到“{target}”这个设备,先用 list 看看有哪些", True
+            return result, False
+        except ValueError as e:
+            return str(e), True
 
     def _morning_brief(self, args, on_status):
         on_status("在准备今天的简报")

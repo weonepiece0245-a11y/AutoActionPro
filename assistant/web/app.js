@@ -54,7 +54,64 @@ function setMode(mode) {
   orbState.mode = mode;
   document.body.dataset.mode = mode;
   $("modeText").textContent = MODE_TEXT[mode] || mode;
+  syncMini();
 }
+
+// ---------- 迷你悬浮窗:一个小光球浮在所有窗口最上面(浏览器的“画中画”窗口) ----------
+let mini = null;
+const MINI_TEXT = { idle: "待机", thinking: "思考中", speaking: "说话中", listening: "在听" };
+const MINI_CSS = `
+  body { margin: 0; height: 100vh; display: flex; align-items: center; gap: 12px; padding: 0 14px; box-sizing: border-box;
+         background: #050b14; color: #e6f6ff; font: 13px "Microsoft YaHei", system-ui, sans-serif; overflow: hidden; user-select: none; }
+  .orb { flex: none; width: 54px; height: 54px; border-radius: 50%; cursor: pointer; border: none;
+         background: radial-gradient(circle at 35% 30%, #fff 0%, var(--c) 35%, transparent 72%);
+         box-shadow: 0 0 22px var(--c), inset 0 0 14px var(--c); animation: breathe 3s ease-in-out infinite; }
+  body[data-mode="listening"] .orb { animation-duration: .7s; }
+  body[data-mode="speaking"] .orb { animation-duration: 1.1s; }
+  body[data-mode="thinking"] .orb { animation: spin 1.2s linear infinite; }
+  @keyframes breathe { 50% { transform: scale(.88); opacity: .8; } }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .info { min-width: 0; flex: 1; }
+  .mode { font-weight: 600; color: var(--c); letter-spacing: .05em; }
+  .chips { font-size: 12px; opacity: .85; margin-top: 2px; }
+  .last { font-size: 12px; opacity: .7; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }`;
+function miniColor() {
+  return getComputedStyle(document.body).getPropertyValue("--accent").trim() || "#22d3ee";
+}
+function syncMini() {
+  if (!mini || mini.closed) { mini = null; return; }
+  const doc = mini.document;
+  const mode = orbState.mode || "idle";
+  doc.body.dataset.mode = mode;
+  doc.body.style.setProperty("--c", miniColor());
+  doc.getElementById("miniMode").textContent = "星期五 · " + (MINI_TEXT[mode] || mode);
+  const chips = [$("focusChip"), $("sleepChip")].filter((c) => !c.hidden).map((c) => c.textContent);
+  doc.getElementById("miniChips").textContent = chips.join("  ");
+}
+function miniLast(text) {
+  if (!mini || mini.closed) return;
+  mini.document.getElementById("miniLast").textContent = (text || "").replace(/\s+/g, " ").slice(0, 80);
+}
+async function openMini() {
+  if (mini && !mini.closed) { mini.close(); mini = null; return; }
+  if (!("documentPictureInPicture" in window)) { toast("这个浏览器不支持悬浮窗,用最新的 Edge 或 Chrome 打开星期五就有", 4000); return; }
+  try {
+    mini = await documentPictureInPicture.requestWindow({ width: 280, height: 96 });
+  } catch { toast("悬浮窗没打开"); return; }
+  const doc = mini.document;
+  doc.title = "星期五";
+  const style = doc.createElement("style");
+  style.textContent = MINI_CSS;
+  doc.head.append(style);
+  doc.body.innerHTML = '<button class="orb" id="miniOrb" title="点一下说话;再点一下停"></button>' +
+    '<div class="info"><div class="mode" id="miniMode"></div><div class="chips" id="miniChips"></div><div class="last" id="miniLast"></div></div>';
+  doc.getElementById("miniOrb").onclick = () => orbState.onOrbClick && orbState.onOrbClick();
+  mini.addEventListener("pagehide", () => { mini = null; });
+  syncMini();
+  if (!miniTimer) miniTimer = setInterval(syncMini, 1000);  // 倒计时每秒更新
+}
+let miniTimer = null;
+$("miniBtn").onclick = openMini;
 let lastActivity = "";
 function refreshMode() {
   // 告诉星期五窗口正在录音/朗读,唤醒功能这时暂停,免得听到自己的声音
@@ -187,7 +244,7 @@ function handle(ev) {
     case "status":
       addLine(ev.text); break;
     case "done":
-      busy = false; finishAnswer(ev.text, ev.source); refreshMode(); loadState();
+      busy = false; finishAnswer(ev.text, ev.source); refreshMode(); loadState(); miniLast(ev.text);
       if (ev.source === "voice") { followUpTurn = ev.turn ?? "none"; maybeFollowUp(); }
       break;
     case "audio_end":
@@ -632,6 +689,13 @@ function fillSettings() {
     if (document.activeElement !== $("apexPlayer")) $("apexPlayer").value = ap.apex_player || "";
     $("apexPlatform").value = ap.apex_platform || "PC";
   }
+  if (ap) {
+    if (document.activeElement !== $("tapoUser")) $("tapoUser").value = ap.tapo_user || "";
+    $("tapoPass").placeholder = ap.tapo_set ? "已设置(要换才填)" : "密码";
+    if (ap.tapo_devices != null) $("tapoNote").textContent = `✓ 连上 Tapo,找到 ${ap.tapo_devices} 个设备:可以说“开灯”“关掉客厅灯”“灯调暗一点”“灯换成暖光”“家里哪些灯开着”。`;
+    $("diaryRow").hidden = false;
+    $("setDiary").value = ap.diary_time || "22:30";
+  }
   const tg = s.telegram;
   if (tg) {
     $("tgToken").placeholder = tg.set ? (tg.bot ? `已连接 @${tg.bot}(要换才填)` : "已设置(要换才填)") : "123456789:AA…";
@@ -961,6 +1025,13 @@ $("tgSave").onclick = () => {
   $("tgToken").value = "";
   saveSetting({ telegram_token: value }, 9000);
 };
+$("tapoSave").onclick = () => {
+  const change = { tapo_user: $("tapoUser").value.trim() };
+  if ($("tapoPass").value) change.tapo_password = $("tapoPass").value;
+  $("tapoPass").value = "";
+  saveSetting(change, 8000);
+};
+$("setDiary").onchange = (e) => saveSetting({ diary_time: e.target.value });
 $("tgPair").onclick = () => saveSetting({ telegram_pair: true }, 8000);
 $("spotifySave").onclick = () => saveSetting({ spotify_client_id: $("spotifyClient").value.trim() }, 5000);
 $("spotifyLogin").onclick = () => {

@@ -9032,5 +9032,179 @@ class AuditRound4Test(TempDirTest):
         self.assertTrue(events.empty())
 
 
+class DiaryTest(TempDirTest):
+    def make(self, when):
+        import friday_diary
+
+        self.now = [when]
+        diary = friday_diary.Diary(os.path.join(self.tmp, "d.json"), clock=lambda: self.now[0])
+        diary.sources = [lambda day: "用电脑 5 小时", lambda day: None, lambda day: 1 / 0]
+        return diary
+
+    def test_summary_write_read_search(self):
+        import friday_diary
+
+        diary = self.make(datetime.datetime(2026, 11, 12, 22, 40))
+        self.assertIn("· 用电脑 5 小时", diary.summary())
+        self.assertIn("11 月 12 日", diary.write("跟朋友吃火锅,很开心"))
+        self.now[0] = datetime.datetime(2026, 11, 13, 1, 30)  # 半夜写的算前一天
+        diary.write("还没睡")
+        again = friday_diary.Diary(os.path.join(self.tmp, "d.json"))
+        text = again.read(datetime.date(2026, 11, 12))
+        self.assertIn("火锅", text)
+        self.assertIn("还没睡", text)
+        self.assertIn("找到 1 天", again.search("火锅"))
+        self.assertIn("没有", again.search("旅行"))
+
+    def test_evening_once_per_day_and_after_midnight(self):
+        diary = self.make(datetime.datetime(2026, 11, 12, 21, 0))
+        self.assertFalse(diary.evening_due(10))  # 还没到 22:30
+        self.now[0] = datetime.datetime(2026, 11, 12, 22, 31)
+        self.assertFalse(diary.evening_due(600))  # 人不在电脑前
+        self.assertTrue(diary.evening_due(10))
+        self.assertIn("今天过得怎么样", diary.evening("老板"))
+        self.assertFalse(diary.evening_due(10))
+        self.now[0] = datetime.datetime(2026, 11, 13, 0, 40)
+        self.assertFalse(diary.evening_due(10))  # 过了半夜:还是同一天,不再问
+        with mock.patch.dict(os.environ, {"FRIDAY_DIARY_TIME": "off"}):
+            self.now[0] = datetime.datetime(2026, 11, 13, 23, 0)
+            self.assertFalse(diary.evening_due(10))
+
+    def test_parse_day(self):
+        import friday_diary
+
+        today = datetime.date(2026, 11, 12)  # 星期四
+        self.assertEqual(friday_diary.parse_day("昨天", today), datetime.date(2026, 11, 11))
+        self.assertEqual(friday_diary.parse_day("上周三", today), datetime.date(2026, 11, 4))
+        self.assertEqual(friday_diary.parse_day("星期五", today), datetime.date(2026, 11, 6))  # 最近过去的那个
+        self.assertEqual(friday_diary.parse_day("11月5号", today), datetime.date(2026, 11, 5))
+        self.assertEqual(friday_diary.parse_day("12月25日", today), datetime.date(2025, 12, 25))
+        self.assertIsNone(friday_diary.parse_day("某天", today))
+
+
+class ShoppingTest(TempDirTest):
+    def test_add_done_with_expense_and_quick(self):
+        import friday_quick
+        import friday_shopping
+
+        shop = friday_shopping.Shopping(os.path.join(self.tmp, "s.json"))
+        added = []
+        quick = friday_quick.QuickCommands(SimpleNamespace(ledger=SimpleNamespace(add=lambda *a: added.append(a))))
+        quick.shopping = shop
+        self.assertIn("牛奶、鸡蛋、面。", quick.handle("要买牛奶、鸡蛋和两包面"))
+        self.assertIn("洗发水、牙膏", quick.handle("帮我记一下要买：洗发水，牙膏。"))
+        self.assertIn("要买 5 样", quick.handle("要买什么"))
+        self.assertIn("划掉了牛奶", quick.handle("牛奶买了 8.5 块"))
+        self.assertEqual(added, [("牛奶", "8.5", "购物")])
+        self.assertIsNone(quick.handle("可乐买了"))  # 清单上没有:不管
+        self.assertIn("拿掉了面", quick.handle("不用买面了"))
+        again = friday_shopping.Shopping(os.path.join(self.tmp, "s.json"))
+        self.assertEqual([i["text"] for i in again.pending()], ["鸡蛋", "洗发水", "牙膏"])
+        self.assertIn("清空", quick.handle("清空购物清单"))
+
+    def test_tool(self):
+        import friday_shopping
+
+        box = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m.json")), lambda a: True)
+        box.shopping = friday_shopping.Shopping(os.path.join(self.tmp, "s.json"))
+        added = []
+        box.ledger = SimpleNamespace(add=lambda *a: added.append(a))
+        box._shopping({"action": "add", "items": "米、油"}, print)
+        text, error = box._shopping({"action": "done", "item": "米", "amount": 25}, print)
+        self.assertIn("记了一笔账 RM 25.00", text)
+        self.assertEqual(added, [("米", 25, "购物")])
+
+
+class TapoTest(unittest.TestCase):
+    class Backend:
+        def __init__(self):
+            self.calls = []
+            self.fail = set()
+
+        def discover(self):
+            return [{"id": "1", "name": "客厅灯", "on": False, "kind": "light", "brightness": 60},
+                    {"id": "2", "name": "卧室灯", "on": True, "kind": "light", "brightness": 40},
+                    {"id": "3", "name": "电脑插座", "on": True, "kind": "plug", "brightness": None}]
+
+        def set_on(self, key, on):
+            if key in self.fail:
+                raise OSError("offline")
+            self.calls.append(("on", key, on))
+
+        def set_brightness(self, key, value):
+            self.calls.append(("b", key, value))
+
+        def set_color_temp(self, key, kelvin):
+            self.calls.append(("ct", key, kelvin))
+
+        def set_hsv(self, key, h, s, v):
+            self.calls.append(("hsv", key, h))
+
+    def make(self):
+        import friday_quick
+        import friday_tapo
+
+        self.backend = self.Backend()
+        home = friday_tapo.TapoHome(lambda: self.backend)
+        quick = friday_quick.QuickCommands(SimpleNamespace())
+        quick.home = home
+        return home, quick
+
+    def test_phrases(self):
+        home, quick = self.make()
+        self.assertEqual(quick.handle("开灯"), "已打开:客厅灯、卧室灯。")
+        self.assertEqual(quick.handle("关掉客厅的灯"), "已关掉:客厅灯。")
+        self.assertEqual(quick.handle("把电脑插座关掉"), "已关掉:电脑插座。")
+        self.assertIn("客厅灯、卧室灯、电脑插座", quick.handle("全部关掉"))
+        self.assertIn("亮度调到 80%", quick.handle("客厅灯亮度调到80"))
+        self.assertIn("暖光", quick.handle("灯换成暖光"))
+        self.assertIn("蓝色", quick.handle("把灯换成蓝色"))
+        self.assertIn("3 个 Tapo 设备", quick.handle("家里哪些灯开着"))
+        for text in ("打开微信", "关机", "打开Spotify"):
+            self.assertIsNone(quick.handle(text), text)  # 不是家里的设备:交给别的规则
+
+    def test_offline_device_reported(self):
+        home, quick = self.make()
+        home.refresh()
+        self.backend.fail.add("2")
+        text = home.switch("灯", True)
+        self.assertIn("已打开:客厅灯", text)
+        self.assertIn("卧室灯 没反应", text)
+
+    def test_bad_login_message(self):
+        import friday_tapo
+
+        class Bad:
+            def discover(self):
+                raise RuntimeError("Authentication failed")
+        home = friday_tapo.TapoHome(lambda: Bad())
+        with self.assertRaises(ValueError) as caught:
+            home.describe()
+        self.assertIn("第三方兼容", str(caught.exception))
+
+    def test_tool_and_settings_need_both_fields(self):
+        home, quick = self.make()
+        box = tools.Toolbox(tools.Memory(os.path.join(tempfile.mkdtemp(), "m.json")), lambda a: True)
+        box.home = home
+        self.assertEqual(box._smart_home({"action": "on", "target": "卧室灯"}, print), ("已打开:卧室灯。", False))
+        text, error = box._smart_home({"action": "off", "target": "车库"}, print)
+        self.assertTrue(error)
+        import friday_tapo
+
+        with mock.patch.dict(os.environ, {"FRIDAY_TAPO_USER": "a@b.com", "FRIDAY_TAPO_PASSWORD": ""}):
+            self.assertFalse(friday_tapo.configured())
+
+
+class MiniAndCharsetTest(unittest.TestCase):
+    def test_fullwidth_punctuation_in_notes_and_bills(self):
+        import friday_bills
+        import friday_quick
+
+        quick = friday_quick.QuickCommands(SimpleNamespace())
+        quick.notes = SimpleNamespace(add=lambda text: f"记下:{text}")
+        self.assertEqual(quick.handle("记一下：明天交报告"), "记下:明天交报告")
+        self.assertEqual(friday_bills.NAME_CHARS.sub(" ", "电费，水费：").strip(), "电费 水费")
+
+
 if __name__ == "__main__":
     unittest.main()

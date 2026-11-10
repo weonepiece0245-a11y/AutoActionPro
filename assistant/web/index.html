@@ -47,6 +47,9 @@
     <button type="button" class="icon-btn small" id="lockBtn" title="马上上锁" aria-label="马上上锁" hidden>
       <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
     </button>
+    <button type="button" class="icon-btn small" id="miniBtn" title="迷你悬浮窗(永远在最上面)" aria-label="迷你悬浮窗">
+      <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="14" rx="2"/><rect x="12" y="11" width="7" height="5" rx="1"/></svg>
+    </button>
     <button type="button" class="icon-btn small" id="settingsBtn" title="设定" aria-label="设定">
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
     </button>
@@ -236,6 +239,9 @@
       <div class="set-row" id="tgOwnersRow" hidden><span>能用 Telegram 控制星期五的账号</span><button type="button" class="mini-btn" id="tgPair">添加新账号</button></div>
       <div id="tgOwners"></div>
       <div class="set-note" id="tgPairNote" hidden></div>
+      <div class="set-row"><label for="tapoUser">Tapo 智能家居(Tapo App 的邮箱和密码)</label>
+        <span class="set-ctl"><input class="mini-input" id="tapoUser" autocomplete="off" placeholder="邮箱"><input class="mini-input" id="tapoPass" type="password" autocomplete="off" placeholder="密码"><button type="button" class="mini-btn" id="tapoSave">保存</button></span></div>
+      <div class="set-note" id="tapoNote">Tapo 设备要用你的 Tapo 账号在家里网络里验证。先在 Tapo App 里打开 我 → 第三方服务 → 第三方兼容(Third-Party Compatibility),电脑和设备要连同一个 Wi-Fi。密码只存在你的电脑,不要发给任何人。</div>
       <div class="set-note" id="nvidiaNote" hidden>✓ 认得到 NVIDIA 显卡:可以说“显卡温度”“刚才那段存下来”“开始录像”“游戏截图”。</div>
     </div>
 
@@ -292,6 +298,8 @@
       <h3>其他</h3>
       <div class="set-row" id="googleRow" hidden><span>Google 账号 <b class="google-state" id="googleState">—</b></span>
         <button type="button" class="mini-btn" id="googleLogin" title="打开浏览器重新登录 Google(测试模式大约每 7 天要登录一次)">重新登录 Google</button></div>
+      <div class="set-row" id="diaryRow" hidden><label for="setDiary">晚上做今天的总结,问你今天过得怎么样(日记,不花钱)</label>
+        <select class="mini-select" id="setDiary"><option value="21:00">晚上 9:00</option><option value="22:00">晚上 10:00</option><option value="22:30">晚上 10:30</option><option value="23:00">晚上 11:00</option><option value="23:30">晚上 11:30</option><option value="off">不要</option></select></div>
       <div class="set-row" id="briefRow" hidden><label for="setBrief">早上第一次坐到电脑前,说今天的早安简报(天气、日历、待办、账单……不花钱)</label><input type="checkbox" class="switch" id="setBrief"></div>
       <div class="set-row" id="rainRow" hidden><label for="setRain">会下雨就提醒带伞(每天看一次天气,不花钱)</label>
         <select class="mini-select" id="setRain"><option value="07:00">早上 7:00</option><option value="07:30">早上 7:30</option><option value="08:00">早上 8:00</option><option value="08:30">早上 8:30</option><option value="09:00">早上 9:00</option><option value="off">不提醒</option></select></div>

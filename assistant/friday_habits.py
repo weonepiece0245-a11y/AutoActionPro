@@ -62,7 +62,7 @@ class Habits:
             raise ValueError("每天的目标在 1 到 50 之间")
         clean_times = []
         for t in times or []:
-            found = re.fullmatch(r"\s*(\d{1,2})[::.](\d{2})\s*", str(t))
+            found = re.fullmatch(r"\s*(\d{1,2})[:：.](\d{2})\s*", str(t))
             if not found or int(found.group(1)) > 23 or int(found.group(2)) > 59:
                 raise ValueError(f"提醒时间“{t}”不对,要像 09:00 这样")
             clean_times.append(f"{int(found.group(1)):02d}:{found.group(2)}")

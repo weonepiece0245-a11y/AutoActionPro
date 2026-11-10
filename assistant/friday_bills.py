@@ -17,7 +17,7 @@ from typing import Callable
 
 LEAD_DAYS = (3, 0, -2)  # 前 3 天、当天、过期 2 天
 NOTIFY_HOUR = 8
-NAME_CHARS = re.compile(r"[\s,,。.、::]+")
+NAME_CHARS = re.compile(r"[\s,，。.、:：]+")
 
 
 def _due_on(year: int, month: int, day: int) -> datetime.date:
