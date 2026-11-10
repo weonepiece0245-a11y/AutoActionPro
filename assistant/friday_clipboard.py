@@ -31,6 +31,16 @@ def enabled() -> bool:
     return os.environ.get("FRIDAY_CLIPBOARD", "on") != "off"
 
 
+def _luhn(digits: str) -> bool:
+    if not 13 <= len(digits) <= 19:
+        return False
+    total = 0
+    for i, d in enumerate(reversed(digits)):
+        n = int(d) * (2 if i % 2 else 1)
+        total += n - 9 if n > 9 else n
+    return total % 10 == 0
+
+
 def looks_secret(text: str) -> bool:
     """像密码、钥匙、验证码的就不记。"""
     text = text.strip()
@@ -38,6 +48,11 @@ def looks_secret(text: str) -> bool:
         return True
     if re.fullmatch(r"\d{4,8}", text):
         return True  # 验证码
+    if re.search(r"\b\d{6}-?\d{2}-?\d{4}\b", text) and len(text) <= 40:
+        return True  # 身份证号(MyKad)
+    for run in re.findall(r"(?:\d[ -]?){13,19}", text):
+        if _luhn(re.sub(r"\D", "", run)):
+            return True  # 信用卡、提款卡号
     if re.search(r"\s", text) or not 8 <= len(text) <= 64:
         return False
     if "://" in text or text.lower().startswith("www.") or re.search(r"[\\/]", text) or re.fullmatch(r"[^@\s]+@[^@\s]+\.\w+", text):
@@ -77,7 +92,7 @@ class ClipHistory:
 
     def _save(self) -> None:
         try:
-            temp = self.path.with_name(self.path.name + ".tmp")
+            temp = self.path.with_name(f"{self.path.name}.{threading.get_ident()}.tmp")
             temp.write_text(json.dumps({"items": self.items}, ensure_ascii=False), encoding="utf-8")
             os.replace(temp, self.path)
         except OSError:

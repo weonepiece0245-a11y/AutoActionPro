@@ -757,6 +757,14 @@ FX_TOOL = {
         "required": ["action"]},
 }
 
+# 在 Discord 服务器频道里(别人也看得到回答)不能用的工具:都会说出私人资料
+CHANNEL_PRIVATE_TOOLS = {
+    "ai_spending", "bills", "calendar", "cleanup", "clipboard_history", "contacts", "dates", "docs", "drive", "expense",
+    "find_files", "gmail", "google_tasks", "habits", "mail_alert", "morning_brief", "notes", "read_file", "reminder",
+    "screen", "screen_time", "search_history", "sheets", "todo", "virus_scan",
+}
+CHANNEL_REFUSAL = "这在 Discord 服务器频道里,别人也看得到,这个工具会说出私人资料,不能用。请主人改用私信再问一次。"
+
 CLEANUP_TOOL = {
     "name": "cleanup",
     "description": ("找大文件和重复文件(在用户的下载、桌面、文档、视频、图片、音乐文件夹里):scan 扫描(要一两分钟),"
@@ -917,6 +925,7 @@ class Toolbox:
         self.watchlist = watchlist  # 特价和网页追踪(friday_watch.Watchlist)
         self.phone = None  # (文字, [(文件名, 内容)]) -> 私信到手机 Discord;没连 Discord 就是 None
         self.phone_override = None  # 正在回答手机消息时:发回那段对话
+        self.in_channel = False  # 正在回答 Discord 服务器频道里的消息(别人也看得到):私人资料的工具不能用
         self.mailwatch = None  # 重要邮件提醒(friday_mailwatch.MailWatch),接了 Google 才有
         self.meter = None  # 花费统计(给 ai_spending 用)
         self.scenes = None  # 场景模式(friday_scenes.Scenes)
@@ -1078,6 +1087,8 @@ class Toolbox:
         if handler is None or spec is None:
             return {**result, "content": f"没有名为 {block.name} 的工具", "is_error": True}
 
+        if self.in_channel and block.name in CHANNEL_PRIVATE_TOOLS:
+            return {**result, "content": CHANNEL_REFUSAL, "is_error": True}
         args = block.input
         if not isinstance(args, dict) or not all(isinstance(args.get(k), str) for k in spec["required"]):
             bad = json.dumps(args, ensure_ascii=False, default=str)
@@ -1215,7 +1226,7 @@ class Toolbox:
             result = friday_files.search(self.file_roots(args.get("folder")), words, args.get("kind"),
                                          float(days) if days else None, skip=friday_cleanup._skip)
             self.found_files = result["files"]
-            return friday_files.describe(result), False
+            return friday_security.mark_external(friday_files.describe(result)), False  # 文件名可能是别人取的
         if action in ("open", "show"):
             try:
                 item = self.found_files[int(args.get("id")) - 1]
@@ -1315,7 +1326,7 @@ class Toolbox:
 
     def _morning_brief(self, args, on_status):
         on_status("在准备今天的简报")
-        return self.brief(), False
+        return friday_security.mark_external(self.brief()), False  # 里面有邮件标题、日历活动名(别人写的)
 
     def _virus_scan(self, args, on_status):
         start, status = self.virus

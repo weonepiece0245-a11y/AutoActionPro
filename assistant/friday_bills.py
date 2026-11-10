@@ -10,6 +10,7 @@ import calendar
 import datetime
 import json
 import os
+import threading
 import re
 from pathlib import Path
 from typing import Callable
@@ -47,7 +48,7 @@ class Bills:
         self.told: dict[str, str] = dict(data.get("told") or {})
 
     def _save(self) -> None:
-        temp = self.path.with_name(self.path.name + ".tmp")
+        temp = self.path.with_name(f"{self.path.name}.{threading.get_ident()}.tmp")
         temp.write_text(json.dumps({"bills": self.items, "paid": self.paid, "told": self.told},
                                    ensure_ascii=False, indent=1), encoding="utf-8")
         os.replace(temp, self.path)

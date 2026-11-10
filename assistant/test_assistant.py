@@ -7841,5 +7841,74 @@ class FxTest(TempDirTest):
             friday_fx.Rates(fetch=fetch).rate("USD", "MYR")
 
 
+
+class AuditRound3Test(TempDirTest):
+    def test_channel_blocks_private_tools(self):
+        box = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m.json")), lambda a: True)
+        box.habits = SimpleNamespace(report=lambda period: "今天的习惯:吃药 2/2")
+        box.focus = SimpleNamespace(status=lambda: "现在没有在专注。")
+        box._specs = {t["name"]: t["input_schema"] for t in box.definitions() if "input_schema" in t}
+        block = SimpleNamespace(id="t1", name="habits", input={"action": "report"})
+        self.assertNotIn("is_error", box.run(block, print))
+        box.in_channel = True
+        result = box.run(block, print)
+        self.assertTrue(result["is_error"])
+        self.assertIn("私信", result["content"])
+        weather = SimpleNamespace(id="t2", name="focus", input={"action": "status"})
+        self.assertNotIn("is_error", box.run(weather, print))  # 不私人的照常能用
+
+    def test_channel_flag_resets_after_discord_message(self):
+        box = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m.json")), lambda a: True)
+        seen = []
+        assistant = SimpleNamespace(toolbox=box)
+        message = SimpleNamespace(text="你好", reply=lambda t: None, private=False, audio=None, images=None, ask=None)
+        with mock.patch.object(app, "answer", lambda *a, **k: seen.append(box.in_channel) or True):
+            app.handle_discord(message, assistant, SimpleNamespace())
+        self.assertEqual(seen, [True])
+        self.assertFalse(box.in_channel)
+
+    def test_only_documents_open(self):
+        import friday_files
+
+        for name in ("a.pdf", "b.docx", "c.jpg", "d.mp4", "e.zip"):
+            self.assertTrue(friday_files.can_open(name), name)
+        for name in ("a.exe", "b.hta", "c.chm", "d.lnk", "e.js", "f.iso", "g.appref-ms", "h.settingcontent-ms"):
+            self.assertFalse(friday_files.can_open(name), name)
+
+    def test_stale_focus_after_restart_is_dropped(self):
+        import friday_focus
+
+        t = [1000.0]
+        focus = friday_focus.Focus(os.path.join(self.tmp, "f.json"), clock=lambda: t[0])
+        focus.start(25)
+        t[0] += 3 * 3600  # 星期五关了三个小时
+        again = friday_focus.Focus(os.path.join(self.tmp, "f.json"), clock=lambda: t[0])
+        self.assertEqual(again.tick(), [])
+        self.assertFalse(again.active())
+        self.assertIn("还没有专注记录", again.report())
+
+    def test_habit_words_that_are_not_check_ins(self):
+        import friday_habits
+
+        habits = friday_habits.Habits(os.path.join(self.tmp, "h.json"))
+        habits.add("喝水", 8, [], "杯")
+        for sentence in ("我忘了喝水", "该喝水了", "要喝水了", "水喝了吗", "我没喝水"):
+            self.assertIsNone(habits.match_sentence(sentence), sentence)
+        self.assertIsNotNone(habits.match_sentence("水喝了"))
+
+    def test_clipboard_skips_cards_and_ids(self):
+        import friday_clipboard
+
+        for text in ("4111 1111 1111 1111", "900101-14-5678", "我的卡 5500-0000-0000-0004"):
+            self.assertTrue(friday_clipboard.looks_secret(text), text)
+        self.assertFalse(friday_clipboard.looks_secret("订单 12345"))
+
+    def test_fx_ascii_codes_need_whole_words(self):
+        import friday_fx
+
+        self.assertEqual(friday_fx.mentions("europe audio"), [])
+        self.assertEqual(friday_fx.mentions("100 usd 换 rm"), ["USD", "MYR"])
+
+
 if __name__ == "__main__":
     unittest.main()

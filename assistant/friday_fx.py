@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import threading
 import re
 import time
 import urllib.request
@@ -52,8 +53,8 @@ def mentions(text: str) -> list[str]:
     found: list[tuple[int, str]] = []
     for code, words in CURRENCIES.items():
         for word in sorted(words, key=len, reverse=True):
-            if word in ("rm",):
-                hit = re.search(r"(?<![a-z])rm(?![a-z])", low)
+            if word.isascii():  # 英文代码要单独成词:“europe”里的 eur、“audio”里的 aud 不算
+                hit = re.search(rf"(?<![a-z]){re.escape(word)}(?![a-z])", low)
                 at = hit.start() if hit else -1
             else:
                 at = low.find(word)
@@ -147,9 +148,10 @@ class FxAlerts:
         except (OSError, ValueError):
             data = {}
         self.items: list[dict] = [a for a in (data.get("alerts") or []) if isinstance(a, dict)] if isinstance(data, dict) else []
+        self.lock = threading.Lock()  # 每小时检查的线程和主循环都会改
 
     def _save(self) -> None:
-        temp = self.path.with_name(self.path.name + ".tmp")
+        temp = self.path.with_name(f"{self.path.name}.{threading.get_ident()}.tmp")
         temp.write_text(json.dumps({"alerts": self.items}, ensure_ascii=False, indent=1), encoding="utf-8")
         os.replace(temp, self.path)
 
@@ -166,20 +168,22 @@ class FxAlerts:
         now = self.rates.rate(base, quote)
         if direction not in ("above", "below"):
             direction = "above" if now < target else "below"
-        self.items = [a for a in self.items if not (a["base"] == base and a["quote"] == quote)]
-        self.items.append({"base": base, "quote": quote, "target": target, "direction": direction})
-        self._save()
+        with self.lock:
+            self.items = [a for a in self.items if not (a["base"] == base and a["quote"] == quote)]
+            self.items.append({"base": base, "quote": quote, "target": target, "direction": direction})
+            self._save()
         word = "涨到" if direction == "above" else "跌到"
         return (f"好,1 {name(base)}{word} {money(target, quote, rate=True)} {'以上' if direction == 'above' else '以下'}"
                 f"就告诉你,也会推到手机。现在是 {money(now, quote, rate=True)}。")
 
     def remove(self, base: str) -> str:
         base = base.upper()
-        before = len(self.items)
-        self.items = [a for a in self.items if a["base"] != base]
-        if len(self.items) == before:
-            raise ValueError(f"没有{name(base)}的汇率提醒")
-        self._save()
+        with self.lock:
+            before = len(self.items)
+            self.items = [a for a in self.items if a["base"] != base]
+            if len(self.items) == before:
+                raise ValueError(f"没有{name(base)}的汇率提醒")
+            self._save()
         return f"取消了{name(base)}的汇率提醒"
 
     def describe(self) -> str:
@@ -193,7 +197,7 @@ class FxAlerts:
         if not self.items:
             return []
         said, keep = [], []
-        for alert in self.items:
+        for alert in list(self.items):
             try:
                 now = self.rates.rate(alert["base"], alert["quote"])
             except ValueError:
@@ -208,8 +212,10 @@ class FxAlerts:
             else:
                 keep.append(alert)
         if said:
-            self.items = keep
-            self._save()
+            fired = {(a["base"], a["quote"], a["target"]) for a in self.items} - {(a["base"], a["quote"], a["target"]) for a in keep}
+            with self.lock:  # 检查期间新加的提醒留着
+                self.items = [a for a in self.items if (a["base"], a["quote"], a["target"]) not in fired]
+                self._save()
         return said
 
 

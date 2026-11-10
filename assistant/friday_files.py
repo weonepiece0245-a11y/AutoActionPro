@@ -23,7 +23,7 @@ KINDS = {
     "text": ({".txt", ".md", ".log", ".json"}, "文字文件"),
     "installer": ({".exe", ".msi"}, "安装程序"),
 }
-# 这些打开会执行程序,星期五不替你打开
+# 这些打开会执行程序(就算以后加进 KINDS 也不打开)
 NO_OPEN = {".exe", ".msi", ".bat", ".cmd", ".ps1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".scr", ".com",
            ".lnk", ".url", ".reg", ".hta", ".cpl", ".msc", ".jar", ".py", ".pyw"}
 SKIP_DIRS = {"appdata", "node_modules", ".git", "$recycle.bin", "system volume information", "windows",
@@ -146,5 +146,10 @@ def describe(result: dict, numbered: bool = True) -> str:
     return head + "\n" + "\n".join(lines) + tail
 
 
+# 只替你打开这些:文件、图片、影音、压缩包(用默认程序看,不会执行程序)
+OPENABLE = set().union(*(exts for kind, (exts, _) in KINDS.items() if kind != "installer"))
+
+
 def can_open(path: str | Path) -> bool:
-    return Path(path).suffix.lower() not in NO_OPEN
+    suffix = Path(path).suffix.lower()
+    return suffix in OPENABLE and suffix not in NO_OPEN

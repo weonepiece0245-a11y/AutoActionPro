@@ -10,6 +10,7 @@ import datetime
 import json
 import math
 import os
+import threading
 import re
 from pathlib import Path
 from typing import Callable
@@ -40,7 +41,7 @@ class Habits:
         self.told: dict[str, str] = dict(data.get("told") or {})
 
     def _save(self) -> None:
-        temp = self.path.with_name(self.path.name + ".tmp")
+        temp = self.path.with_name(f"{self.path.name}.{threading.get_ident()}.tmp")
         temp.write_text(json.dumps({"habits": self.items, "log": self.log, "told": self.told}, ensure_ascii=False, indent=1),
                         encoding="utf-8")
         os.replace(temp, self.path)
@@ -182,7 +183,7 @@ class Habits:
 
     def match_sentence(self, sentence: str) -> tuple[dict, int] | None:
         """“水喝了”“吃了药”“喝了两杯水”“跑步打卡” -> (习惯, 次数);不像打卡就返回 None。"""
-        if len(sentence) > 14 or re.search(r"没|吗|不|提醒|几|多少|什么|删|改|撤销|设", sentence):
+        if len(sentence) > 14 or re.search(r"没|吗|不|提醒|几|多少|什么|删|改|撤销|设|忘|该|要|想|准备|快|等|会|记得", sentence):
             return None
         if not ("了" in sentence or "打卡" in sentence or "完成" in sentence):
             return None

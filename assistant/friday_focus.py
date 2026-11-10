@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import threading
 import re
 import time
 from pathlib import Path
@@ -17,6 +18,7 @@ from typing import Callable
 DEFAULT_MINUTES = 25
 BREAK_MINUTES = 5
 MAX_MINUTES = 180
+STALE_SECONDS = 10 * 60  # 到点超过 10 分钟才看到(星期五当时没开):不补说
 CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 
 
@@ -70,11 +72,12 @@ class Focus:
         self.current: dict | None = current if isinstance(current, dict) and current.get("until") else None
         self.break_until: float | None = data.get("break_until")
         self.held: list[str] = []
+        self.lock = threading.RLock()  # 计时线程和主循环都会动它
         self.on_change: Callable[[dict], None] = lambda state: None  # 开始/结束时通知窗口(倒计时)
 
     def _save(self) -> None:
         try:
-            temp = self.path.with_name(self.path.name + ".tmp")
+            temp = self.path.with_name(f"{self.path.name}.{threading.get_ident()}.tmp")
             temp.write_text(json.dumps({"days": self.days, "current": self.current, "break_until": self.break_until},
                                        ensure_ascii=False), encoding="utf-8")
             os.replace(temp, self.path)
@@ -118,6 +121,10 @@ class Focus:
 
     # ---------- 开始 / 结束 ----------
     def start(self, minutes: int | None = None, task: str = "") -> str:
+        with self.lock:
+            return self._start(minutes, task)
+
+    def _start(self, minutes: int | None = None, task: str = "") -> str:
         minutes = int(minutes or DEFAULT_MINUTES)
         if not 1 <= minutes <= MAX_MINUTES:
             raise ValueError(f"专注时间要在 1 到 {MAX_MINUTES} 分钟之间")
@@ -134,6 +141,10 @@ class Focus:
                 "这段时间我不主动打扰你,时间到叫你休息。")
 
     def stop(self) -> str:
+        with self.lock:
+            return self._stop()
+
+    def _stop(self) -> str:
         if not self.current:
             self.break_until = None
             self._changed()
@@ -148,12 +159,24 @@ class Focus:
         return f"好,专注结束,这次专注了 {minutes_text(done)}。" + self._held_text()
 
     def hold(self, text: str, short: str | None = None) -> None:
-        self.held.append(short or text)
+        with self.lock:
+            self.held.append(short or text)
 
     def tick(self, name: str = "老板") -> list[str]:
         """时间到了就返回要说的话(专注结束叫你休息;休息完叫你回来)。"""
+        with self.lock:
+            return self._tick(name)
+
+    def _tick(self, name: str) -> list[str]:
         now = self.clock()
         said = []
+        if self.current and now - self.current["until"] > STALE_SECONDS:
+            self.current = None  # 星期五关着的时候就到点了:不补说,也不算这一个番茄
+            self.held = []
+            self._changed()
+        if self.break_until and now - self.break_until > STALE_SECONDS:
+            self.break_until = None
+            self._changed()
         if self.current and now >= self.current["until"]:
             minutes = self.current["minutes"]
             self._record(minutes, finished=True)
