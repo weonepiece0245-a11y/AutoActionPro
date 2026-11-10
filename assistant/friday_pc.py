@@ -271,6 +271,20 @@ class WindowsPC:
     def sleep(self, seconds: float) -> None:
         time.sleep(seconds)
 
+    def processes(self) -> list[str]:
+        """正在跑的程序文件名(例如 spotify.exe)。"""
+        code, out = self.run(["tasklist", "/fo", "csv", "/nh"])
+        names = []
+        for line in out.splitlines():
+            if line.startswith('"'):
+                names.append(line.split('","', 1)[0].strip('"'))
+        return names
+
+    def foreground_exe(self) -> str | None:
+        import friday_care
+
+        return friday_care.foreground_app()
+
 
 # ======================== Steam 游戏 ========================
 
@@ -383,8 +397,50 @@ $apps = @(Get-StartApps | Where-Object { $_.Name -like ('*' + $n + '*') })
 $exact = @($apps | Where-Object { $_.Name -eq $n })
 if ($exact.Count -gt 0) { $app = $exact[0] } elseif ($apps.Count -gt 0) { $app = $apps[0] } else { exit 3 }
 Start-Process ('shell:AppsFolder\' + $app.AppID)
-Write-Output $app.Name
+Write-Output ($app.Name + '|' + $app.AppID)
 """
+
+# 有自己网址开头(协议)的程序:开始菜单打不开时,用它的协议再试一次
+APP_URIS = {"spotify": "spotify:", "steam": "steam:", "discord": "discord:", "microsoft teams": "msteams:",
+            "teams": "msteams:", "zoom": "zoommtg:", "whatsapp": "whatsapp:", "telegram": "tg:",
+            "telegram desktop": "tg:", "设置": "ms-settings:", "settings": "ms-settings:", "epic games launcher": "com.epicgames.launcher:"}
+# 程序的中文名和它真正的程序文件名不一样时
+PROCESS_HINTS = {"微信": ["wechat", "weixin"], "记事本": ["notepad"], "计算器": ["calculator", "calc"],
+                 "画图": ["mspaint"], "网易云音乐": ["cloudmusic"], "qq音乐": ["qqmusic"], "钉钉": ["dingtalk"],
+                 "腾讯会议": ["wemeet"], "资源管理器": ["explorer"], "文件资源管理器": ["explorer"], "设置": ["systemsettings"],
+                 "任务管理器": ["taskmgr"], "命令提示符": ["cmd"], "照片": ["photos"], "相机": ["camera"]}
+GENERIC_HINTS = {"app", "apps", "microsoft", "windows", "desktop", "client", "launcher", "update", "setup"}
+START_HOSTS = {"searchhost.exe", "startmenuexperiencehost.exe", "searchapp.exe", "searchui.exe", "shellexperiencehost.exe"}
+OPEN_WAIT = 10.0  # 打开后最多等几秒确认它真的开起来了
+
+
+def _token(text: str) -> str:
+    return re.sub(r"[^0-9a-z一-鿿]", "", text.lower())
+
+
+def app_hints(asked: str, name: str, app_id: str) -> list[str]:
+    """用来认出“这个程序开起来了没有”的关键字(程序文件名、窗口标题里会出现的字)。"""
+    hints = [asked, name] + PROCESS_HINTS.get(asked.lower(), []) + PROCESS_HINTS.get(name.lower(), [])
+    app_id = app_id.strip()
+    if ".exe" in app_id.lower():  # 一般程序:AppID 里有程序路径
+        hints.append(re.split(r"[\\/]", app_id)[-1].rsplit(".", 1)[0])
+    elif "!" in app_id:  # 商店程序:公司.程序名_xxx!入口
+        package, entry = app_id.split("!", 1)
+        hints += [entry, package.split("_")[0].split(".")[-1]]
+    elif app_id:
+        hints.append(app_id.split(".")[-1])
+    clean = []
+    for hint in hints:
+        token = _token(hint)
+        if not token or token in GENERIC_HINTS or (token.isascii() and len(token) < 3) or token in clean:
+            continue
+        clean.append(token)
+    return clean
+
+
+def _matches(hint: str, process: str) -> bool:
+    process = _token(process.rsplit(".", 1)[0] if process.lower().endswith(".exe") else process)
+    return hint == process or (len(hint) >= 4 and len(process) >= 4 and (hint in process or process in hint))
 
 SAVE_SCREENSHOT = r"""
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -512,7 +568,8 @@ COMPUTER_ACTIONS = {
     "audio_devices": "列出所有播放设备(耳机、音箱等),* 号是当前在用的",
     "switch_audio": "切换播放设备,value 是设备名里的关键词(先用 audio_devices 看有哪些)",
     # 程序、游戏、网址、文件夹
-    "open_app": "打开开始菜单里的程序,value 是程序名,如 Discord、Spotify、记事本",
+    "open_app": ("打开开始菜单里的程序,value 是程序名,如 Discord、Spotify、记事本;会确认真的开起来了,"
+                 "打不开时自己换办法,最后会问用户能不能用开始菜单搜索(不要自己对着桌面乱点)"),
     "open_game": "打开游戏,value 是游戏名(英文名更准,如 Apex Legends、Dota 2);先找 Steam,找不到再找开始菜单",
     "open_url": "用默认浏览器打开 value 里的网址",
     "open_path": "打开文件夹或文件,value 是路径或 下载/桌面/文档/图片/视频/音乐;打开程序文件需要用户确认",
@@ -624,12 +681,89 @@ class Computer:
 
     # ---- 程序、游戏、文件 ----
     def _do_open_app(self, pc, value, approve, **_):
+        """打开程序,并确认它真的开起来了;开始菜单打不开就换办法(程序的协议、开始菜单搜索)。"""
         if not value:
             raise ValueError("请在 value 里写程序名")
+        check = hasattr(pc, "processes")  # 能看有哪些程序在跑,才确认得了
+        before = self._running(pc) if check else ([], [])
         code, opened = pc.powershell(FIND_AND_OPEN_APP, env={"FRIDAY_APP_NAME": value})
-        if code == 3 or not opened:
+        found = code != 3 and bool(opened)
+        name, _, app_id = (opened or "").partition("|")
+        name = name.strip() or value
+        if found and not check:
+            return f"已打开 {name}"
+        hints = app_hints(value, name, app_id)
+        if found:
+            result = self._wait_open(pc, name, hints, before)
+            if result:
+                return result
+        uri = APP_URIS.get(value.lower()) or APP_URIS.get(name.lower())
+        if uri and check:
+            try:
+                pc.open(uri)
+            except OSError:
+                pass
+            else:
+                result = self._wait_open(pc, name, hints, before)
+                if result:
+                    return result
+        if check and approve is not _allow and hasattr(pc, "foreground_exe"):
+            if approve(f"用开始菜单搜索打开“{value}”(会按 Win 键、打字“{value}”、按回车;过程中别动键盘)"):
+                if self._start_search(pc, value):
+                    result = self._wait_open(pc, value, hints or [_token(value)], before)
+                    if result:
+                        return result + "(用开始菜单搜索打开的)"
+                else:
+                    return "开始菜单没弹出来,我就没打字(免得打进别的窗口)。你自己在开始菜单点一下试试。"
+        if not found:
             return f"开始菜单里没有找到名字包含“{value}”的程序,可以换个叫法"
-        return f"已打开 {opened}"
+        return (f"已经叫 Windows 打开 {name},但 {OPEN_WAIT:.0f} 秒内没看到它开起来。可能还在慢慢启动(等一下再看),"
+                "或者它出了问题;你自己在开始菜单点一下试试。")
+
+    @staticmethod
+    def _running(pc) -> tuple[list[str], list[str]]:
+        try:
+            processes = [p.lower() for p in pc.processes()]
+        except Exception:
+            processes = []
+        try:
+            titles = [t.lower() for _, t in pc.windows()]
+        except Exception:
+            titles = []
+        return processes, titles
+
+    def _wait_open(self, pc, name: str, hints: list[str], before) -> str | None:
+        """等程序开起来:看到它的窗口 -> “已打开”;只看到它在跑(缩在右下角托盘) -> 也算,但说清楚。"""
+        waited = 0.0
+        was_running = any(_matches(h, p) for h in hints for p in before[0])
+        while True:
+            processes, titles = self._running(pc)
+            window = any(h in t for h in hints if len(h) >= 2 for t in titles)
+            running = any(_matches(h, p) for h in hints for p in processes)
+            if window:
+                return f"已打开 {name}"
+            if running and not was_running and waited >= 2:
+                return f"已打开 {name}(还在启动,窗口等一下就出来)"
+            if running and was_running and waited >= 3:
+                return f"{name} 本来就在运行(可能缩在右下角托盘里),已经叫它出来;没看到窗口的话,点一下右下角托盘里的图标。"
+            if waited >= OPEN_WAIT:
+                return None
+            pc.sleep(0.5)
+            waited += 0.5
+
+    @staticmethod
+    def _start_search(pc, text: str) -> bool:
+        """按 Win 键打开开始菜单,确认真的是开始菜单在最前面,才打字、按回车。"""
+        pc.press(KEY_CODES["win"])
+        pc.sleep(0.8)
+        if (pc.foreground_exe() or "").lower() not in START_HOSTS:
+            return False
+        pc.type_text(text)
+        pc.sleep(1.2)
+        if (pc.foreground_exe() or "").lower() not in START_HOSTS:
+            return False  # 你点到别的地方去了:不按回车
+        pc.press(KEY_CODES["enter"])
+        return True
 
     def _do_open_game(self, pc, value, approve, **_):
         if not value:

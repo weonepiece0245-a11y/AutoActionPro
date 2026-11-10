@@ -262,7 +262,9 @@ class QuickCommands:
         if any(w in name for w in ("文件", "网页", "网站", "链接", "http", "www", "设定", "设置", "窗口")):
             return None
         result = self._computer().do("open_app", name)
-        return result + "。" if result.startswith("已打开") else None  # 没找到:交给 Claude(它会试游戏、网页)
+        if result.startswith("已打开") or "本来就在运行" in result:
+            return result if result.endswith(("。", ")", ")")) else result + "。"
+        return None  # 没找到、或者没开起来:交给 Claude(它会试游戏、网页,或者问你能不能用开始菜单搜索)
 
     # ---------- 生日 ----------
     def _dates(self, found):

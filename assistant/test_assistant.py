@@ -8486,5 +8486,115 @@ class TakeoverNoticeTest(unittest.TestCase):
         self.assertEqual(ended, [1])  # 出错也会收起红条
 
 
+
+class OpenAppReliablyTest(unittest.TestCase):
+    """打开程序后确认真的开起来了;开始菜单打不开就换办法;不会乱打字。"""
+
+    class PC:
+        def __init__(self, start_output="Spotify|SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify", appear_after=None,
+                     appear_on=None, running=(), foreground="searchhost.exe"):
+            self.start_output = start_output
+            self.appear_after = appear_after  # 打开后过几次检查才出现
+            self.appear_on = appear_on  # 哪一种打开方式才真的能开起来:"start" / "uri" / "search"
+            self.procs = list(running)
+            self.titles = []
+            self.calls = []
+            self.checks = 0
+            self.foreground = foreground
+
+        def powershell(self, script, stdin=None, env=None):
+            self.calls.append(("start_menu", env["FRIDAY_APP_NAME"]))
+            if not self.start_output:
+                return 3, ""
+            self._launched("start")
+            return 0, self.start_output
+
+        def _launched(self, how):
+            if self.appear_on in (None, how):
+                self.pending = self.appear_after
+
+        pending = None
+
+        def processes(self):
+            self.checks += 1
+            if self.pending is not None:
+                if self.pending <= 0:
+                    self.procs.append("Spotify.exe")
+                    self.titles.append("Spotify Premium")
+                    self.pending = None
+                else:
+                    self.pending -= 1
+            return list(self.procs)
+
+        def windows(self):
+            return [(1, t) for t in self.titles]
+
+        def open(self, target):
+            self.calls.append(("open", target))
+            self._launched("uri")
+
+        def sleep(self, seconds):
+            pass
+
+        def press(self, vk, times=1):
+            self.calls.append(("press", vk))
+            if vk == pcmod.KEY_CODES["enter"]:
+                self._launched("search")
+
+        def type_text(self, text):
+            self.calls.append(("type", text))
+
+        def foreground_exe(self):
+            return self.foreground
+
+    def computer(self, pc):
+        return pcmod.Computer(backend=pc)
+
+    def test_confirms_it_really_opened(self):
+        pc = self.PC(appear_after=2)
+        self.assertEqual(self.computer(pc).do("open_app", "spotify"), "已打开 Spotify")
+
+    def test_falls_back_to_uri_when_start_menu_launch_does_nothing(self):
+        pc = self.PC(appear_after=0, appear_on="uri")
+        self.assertEqual(self.computer(pc).do("open_app", "spotify"), "已打开 Spotify")
+        self.assertIn(("open", "spotify:"), pc.calls)
+
+    def test_honest_when_nothing_starts(self):
+        pc = self.PC(appear_on="never")
+        result = self.computer(pc).do("open_app", "spotify")  # 简单指令那边:不问你,也不去按键盘
+        self.assertIn("没看到它开起来", result)
+        self.assertFalse(any(c[0] in ("press", "type") for c in pc.calls))
+
+    def test_start_menu_search_only_with_permission_and_only_into_start_menu(self):
+        asked = []
+        pc = self.PC(appear_after=0, appear_on="search")
+        result = self.computer(pc).do("open_app", "spotify", approve=lambda q: asked.append(q) or True)
+        self.assertIn("开始菜单搜索", asked[0])
+        self.assertIn("已打开", result)
+        self.assertIn(("type", "spotify"), pc.calls)
+        wrong = self.PC(appear_on="search", foreground="chrome.exe")  # 开始菜单没弹出来
+        result = self.computer(wrong).do("open_app", "spotify", approve=lambda q: True)
+        self.assertIn("没打字", result)
+        self.assertFalse(any(c[0] == "type" for c in wrong.calls))
+        declined = self.PC(appear_on="search")
+        self.computer(declined).do("open_app", "spotify", approve=lambda q: False)
+        self.assertFalse(any(c[0] == "press" for c in declined.calls))
+
+    def test_already_running_in_tray(self):
+        pc = self.PC(appear_on="never", running=["Spotify.exe"])
+        result = self.computer(pc).do("open_app", "spotify")
+        self.assertIn("本来就在运行", result)
+
+    def test_not_in_start_menu(self):
+        pc = self.PC(start_output="", appear_on="never")
+        self.assertIn("没有找到", self.computer(pc).do("open_app", "不存在的程序"))
+
+    def test_hints(self):
+        self.assertEqual(pcmod.app_hints("spotify", "Spotify", "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify"),
+                         ["spotify", "spotifymusic"])
+        self.assertIn("wechat", pcmod.app_hints("微信", "微信", ""))
+        self.assertIn("notepad", pcmod.app_hints("记事本", "记事本", "Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"))
+
+
 if __name__ == "__main__":
     unittest.main()
