@@ -42,7 +42,7 @@
       <div class="brand-sub">星期五 · 私人 AI 助手</div>
     </div>
   </div>
-  <div class="status-pill" id="modePill"><span class="dot"></span><span id="modeText">待机 STANDBY</span><span class="model-chip" id="modelChip" hidden></span><span class="model-chip focus-chip" id="focusChip" hidden></span></div>
+  <div class="status-pill" id="modePill"><span class="dot"></span><span id="modeText">待机 STANDBY</span><span class="model-chip" id="modelChip" hidden></span><span class="model-chip focus-chip" id="focusChip" hidden></span><span class="model-chip" id="sleepChip" hidden></span></div>
   <div class="top-right">
     <button type="button" class="icon-btn small" id="lockBtn" title="马上上锁" aria-label="马上上锁" hidden>
       <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
@@ -225,6 +225,17 @@
       <div class="set-row"><label for="spotifyClient">Spotify Client ID</label>
         <span class="set-ctl"><input class="mini-input" id="spotifyClient" autocomplete="off"><button type="button" class="mini-btn" id="spotifySave">保存</button><button type="button" class="mini-btn" id="spotifyLogin">登录 Spotify</button></span></div>
       <div class="set-note" id="spotifyNote"></div>
+      <div class="set-row"><label for="apexKey">Apex 钥匙(apexlegendsapi.com)</label>
+        <span class="set-ctl"><input class="mini-input" id="apexKey" type="password" autocomplete="off" placeholder="钥匙"></span></div>
+      <div class="set-row"><label for="apexPlayer">Apex 的 EA 名字和平台</label>
+        <span class="set-ctl"><input class="mini-input" id="apexPlayer" autocomplete="off" placeholder="EA 名字"><select class="mini-select" id="apexPlatform"><option value="PC">PC</option><option value="PS4">PlayStation</option><option value="X1">Xbox</option><option value="SWITCH">Switch</option></select><button type="button" class="mini-btn" id="apexSave">保存</button></span></div>
+      <div class="set-note">Apex 钥匙在 portal.apexlegendsapi.com 免费申请(用 Discord 登录)。填了钥匙就能问“现在 Apex 是什么地图”,再填 EA 名字就能问排位分。</div>
+      <div class="set-row"><label for="tgToken">Telegram 机器人钥匙</label>
+        <span class="set-ctl"><input class="mini-input" id="tgToken" type="password" autocomplete="off" placeholder="123456789:AA…"><button type="button" class="mini-btn" id="tgSave">保存</button></span></div>
+      <div class="set-note" id="tgNote">在 Telegram 里找 @BotFather,发 /newbot,按它说的取名字,它会给你一把钥匙,贴在上面。钥匙只存在你的电脑,不要发给任何人。</div>
+      <div class="set-row" id="tgOwnersRow" hidden><span>能用 Telegram 控制星期五的账号</span><button type="button" class="mini-btn" id="tgPair">添加新账号</button></div>
+      <div id="tgOwners"></div>
+      <div class="set-note" id="tgPairNote" hidden></div>
       <div class="set-note" id="nvidiaNote" hidden>✓ 认得到 NVIDIA 显卡:可以说“显卡温度”“刚才那段存下来”“开始录像”“游戏截图”。</div>
     </div>
 

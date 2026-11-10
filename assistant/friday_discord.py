@@ -103,6 +103,7 @@ class DiscordMessage:
         self.ask = ask
         self.audio = audio
         self.reply_voice = reply_voice or reply
+        self.service = "Discord"  # 从哪个 App 来的(Telegram 也用这个类)
 
 
 class DiscordGate:
@@ -113,6 +114,8 @@ class DiscordGate:
     和 discord.py 无关,方便测试。send(channel, text) 用来回消息。
     """
 
+    SERVICE = "Discord"  # 记进安全记录时说是哪个 App
+    PAIRED_REPLY = "配对成功!以后私信我,或在名字带 friday / 星期五 的频道里说话,或 @我 都可以。"
     PAIR_MINUTES = 10
     MAX_WRONG_PER_ACCOUNT = 5  # 一个账号猜错这么多次配对码:以后不理它
     MAX_WRONG_TOTAL = 20  # 所有人加起来猜错这么多次:配对码作废,要在电脑上重新生成
@@ -248,7 +251,7 @@ class DiscordGate:
     def _queue(self, author_id: int, text: str, channel, is_dm: bool, audio: bytes | None,
                images: list[bytes] | None = None) -> None:
         send_voice = self.send_voice
-        self.events.put(("discord", DiscordMessage(
+        message = DiscordMessage(
             text,
             reply=lambda answer: self.send(channel, answer),
             ask=lambda question: self.ask(channel, question, author_id),
@@ -257,7 +260,9 @@ class DiscordGate:
             private=is_dm,
             images=images,
             send_files=lambda text, files: self.send(channel, text, files=files),
-        )))
+        )
+        message.service = self.SERVICE
+        self.events.put(("discord", message))
 
     def _stranger(self, author_id: int, author_name: str, is_dm: bool, text: str, channel) -> None:
         """没配对的账号:只能私信配对码;猜错太多次就不理它,并提醒主人。"""
@@ -275,20 +280,20 @@ class DiscordGate:
             self.pair_code = self.pair_expires = None
             self.wrong.pop(author_id, None)
             self._save_owners()
-            self.on_status(f"已和 Discord 账号 {author_name} 配对(现在共 {len(self.owners)} 个账号)")
-            friday_security.record("discord_paired", f"Discord 账号“{author_name}”(id {author_id})和星期五配对了。"
+            self.on_status(f"已和 {self.SERVICE} 账号 {author_name} 配对(现在共 {len(self.owners)} 个账号)")
+            friday_security.record("discord_paired", f"{self.SERVICE} 账号“{author_name}”(id {author_id})和星期五配对了。"
                                    "如果不是你自己,马上到齿轮设定 → 安全 里移除它。", "alert")
-            self.send(channel, "配对成功!以后私信我,或在名字带 friday / 星期五 的频道里说话,或 @我 都可以。")
+            self.send(channel, self.PAIRED_REPLY)
             return
         if looks_like_code:
             self.wrong[author_id] = self.wrong.get(author_id, 0) + 1
             self.wrong_total += 1
-            friday_security.record("discord_wrong_code", f"Discord 账号“{author_name}”(id {author_id})发了错的配对码"
+            friday_security.record("discord_wrong_code", f"{self.SERVICE} 账号“{author_name}”(id {author_id})发了错的配对码"
                                    f"(第 {self.wrong[author_id]} 次)", "info")
             if self.wrong[author_id] >= self.MAX_WRONG_PER_ACCOUNT:
                 self.blocked.add(author_id)
                 self._save_owners()
-                friday_security.record("discord_blocked", f"Discord 账号“{author_name}”(id {author_id})猜错配对码 "
+                friday_security.record("discord_blocked", f"{self.SERVICE} 账号“{author_name}”(id {author_id})猜错配对码 "
                                        f"{self.wrong[author_id]} 次,已拉黑,以后不理它", "alert")
             if self.wrong_total >= self.MAX_WRONG_TOTAL and self.pair_code is not None:
                 self.pair_code = self.pair_expires = None
@@ -298,7 +303,7 @@ class DiscordGate:
             self.send(channel, "还没有配对。请发送“星期五”电脑窗口里显示的 6 位配对码。")
         elif not looks_like_code:
             self.on_status(f"有没配对的账号({author_name})找机器人说话,已忽略")
-            friday_security.record("discord_stranger", f"没配对的 Discord 账号“{author_name}”(id {author_id})私信机器人,已忽略",
+            friday_security.record("discord_stranger", f"没配对的 {self.SERVICE} 账号“{author_name}”(id {author_id})私信机器人,已忽略",
                                    "info")
 
     def ask(self, channel, question: str, author_id: int | None = None, timeout: float = ASK_TIMEOUT) -> bool:

@@ -205,6 +205,8 @@ function handle(ev) {
       showFocus(ev); break;
     case "reader":
       readerEvent(ev); break;
+    case "sleeptimer":
+      showSleepTimer(ev); break;
     case "takeover":
       $("takeoverBar").hidden = !ev.active;
       if (ev.active) $("takeoverText").textContent = ev.text || "";
@@ -278,6 +280,24 @@ function renderFocus() {
   chip.title = focusState.until ? (focusState.task || "专注中") + ",说“停止专注”可以提前结束" : "休息中";
 }
 
+// 睡前定时的倒计时(状态栏上的小标签)
+let sleepState = null, sleepTicker = null;
+function showSleepTimer(t) {
+  sleepState = t && t.at ? t : null;
+  clearInterval(sleepTicker); sleepTicker = null;
+  renderSleepTimer();
+  if (sleepState) sleepTicker = setInterval(renderSleepTimer, 1000);
+}
+function renderSleepTimer() {
+  const chip = $("sleepChip");
+  const left = sleepState ? Math.max(0, Math.round(sleepState.at - Date.now() / 1000)) : 0;
+  if (!left) { chip.hidden = true; return; }
+  const h = Math.floor(left / 3600), m = Math.floor((left % 3600) / 60), sec = left % 60;
+  chip.hidden = false;
+  chip.textContent = `🌙 ${sleepState.label} ` + (h ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}` : `${m}:${String(sec).padStart(2, "0")}`);
+  chip.title = "说“取消定时”就不停";
+}
+
 async function loadState() {
   const s = await api("/api/state");
   if (!s || s.error) return;
@@ -285,6 +305,7 @@ async function loadState() {
   $("versionText").textContent = s.version || "未记录";
   if (s.settings) settingsState = s.settings;
   if (s.settings && "focus" in s.settings) showFocus(s.settings.focus);
+  if (s.settings && "sleep_timer" in s.settings) showSleepTimer(s.settings.sleep_timer);
   if (s.model) showModel(s.model.model, s.model.mode);
   if (s.startup_error) { $("banner").hidden = false; $("banner").textContent = s.startup_error; }
   fillList("memoryList", s.memories, "还没有记忆,多跟我聊聊你自己", (m) => li(m.text, `${m.category || "其他"} · ${m.added}`));
@@ -607,6 +628,30 @@ function fillSettings() {
       : `在 developer.spotify.com/dashboard 建一个应用(免费),Redirect URI 填 ${ap.spotify_redirect},勾 Web API,把 Client ID 填在上面,再点“登录 Spotify”。只有 Premium 账号能直接播放。`;
     $("spotifyLogin").textContent = ap.spotify_connected ? "断开" : "登录 Spotify";
     $("nvidiaNote").hidden = !ap.nvidia;
+    $("apexKey").placeholder = ap.apex_key ? `已设置 ${ap.apex_key}` : "钥匙";
+    if (document.activeElement !== $("apexPlayer")) $("apexPlayer").value = ap.apex_player || "";
+    $("apexPlatform").value = ap.apex_platform || "PC";
+  }
+  const tg = s.telegram;
+  if (tg) {
+    $("tgToken").placeholder = tg.set ? (tg.bot ? `已连接 @${tg.bot}(要换才填)` : "已设置(要换才填)") : "123456789:AA…";
+    $("tgOwnersRow").hidden = !tg.set;
+    const box = $("tgOwners");
+    box.replaceChildren();
+    for (const o of tg.owners || []) {
+      const row = document.createElement("div");
+      row.className = "set-row sub";
+      const name = document.createElement("span");
+      name.textContent = `${o.name || "(没有名字)"} · id ${o.id}`;
+      const btn = document.createElement("button");
+      btn.type = "button"; btn.className = "mini-btn"; btn.textContent = "移除";
+      btn.onclick = () => { if (confirm(`移除“${o.name || o.id}”?它以后不能再用 Telegram 控制星期五。`)) saveSetting({ telegram_remove: o.id }, 5000); };
+      row.append(name, btn);
+      box.append(row);
+    }
+    if (tg.set && !(tg.owners || []).length) box.textContent = "还没有配对任何账号";
+    $("tgPairNote").hidden = !tg.pair_code;
+    if (tg.pair_code) $("tgPairNote").textContent = `配对码 ${tg.pair_code}:在 Telegram 里私聊你的机器人${tg.bot ? " @" + tg.bot : ""},发这 6 位数字。`;
   }
   const fb = s.folder_backup;
   $("fbGroup").hidden = !fb;
@@ -904,6 +949,19 @@ $("steamSave").onclick = () => {
   $("steamKey").value = "";
   saveSetting(change, 6000);
 };
+$("apexSave").onclick = () => {
+  const change = { apex_player: $("apexPlayer").value.trim(), apex_platform: $("apexPlatform").value };
+  if ($("apexKey").value.trim()) change.apex_key = $("apexKey").value.trim();
+  $("apexKey").value = "";
+  saveSetting(change, 6000);
+};
+$("tgSave").onclick = () => {
+  const value = $("tgToken").value.trim();
+  if (!value && !confirm("钥匙是空的:要断开 Telegram 吗?")) return;
+  $("tgToken").value = "";
+  saveSetting({ telegram_token: value }, 9000);
+};
+$("tgPair").onclick = () => saveSetting({ telegram_pair: true }, 8000);
 $("spotifySave").onclick = () => saveSetting({ spotify_client_id: $("spotifyClient").value.trim() }, 5000);
 $("spotifyLogin").onclick = () => {
   const connected = settingsState && settingsState.apps && settingsState.apps.spotify_connected;

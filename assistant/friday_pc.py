@@ -43,7 +43,7 @@ class NeedsUser(Exception):
 
 VK = {
     "volume_up": 0xAF, "volume_down": 0xAE, "mute": 0xAD,
-    "play_pause": 0xB3, "next_track": 0xB0, "previous_track": 0xB1,
+    "play_pause": 0xB3, "next_track": 0xB0, "previous_track": 0xB1, "stop_media": 0xB2,
 }
 
 KEY_CODES = {
@@ -565,6 +565,7 @@ COMPUTER_ACTIONS = {
     "play_pause": "播放 / 暂停",
     "next_track": "下一首",
     "previous_track": "上一首",
+    "stop_media": "停止播放(媒体“停止”键,不会把停着的音乐打开)",
     "audio_devices": "列出所有播放设备(耳机、音箱等),* 号是当前在用的",
     "switch_audio": "切换播放设备,value 是设备名里的关键词(先用 audio_devices 看有哪些)",
     # 程序、游戏、网址、文件夹
@@ -653,7 +654,7 @@ class Computer:
             return f"已{'调高' if action == 'volume_up' else '调低'}音量约 {times * 2}%"
         pc.press(VK[action])
         return {"mute": "已切换静音", "play_pause": "已切换播放/暂停", "next_track": "已切到下一首",
-                "previous_track": "已切到上一首"}[action]
+                "previous_track": "已切到上一首", "stop_media": "已停止播放"}[action]
 
     def _audio_module(self, pc, approve) -> None:
         _, has = pc.powershell(AUDIO_HAS_MODULE)

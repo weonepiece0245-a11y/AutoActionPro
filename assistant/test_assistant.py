@@ -8657,5 +8657,296 @@ class SpotifyPauseThenNextTest(TempDirTest):
             self.assertEqual(friday_spotify._request("PUT", "https://api.spotify.com/v1/me/player/pause", {}), (200, {}))
 
 
+class DotaTest(unittest.TestCase):
+    def make(self, matches, heroes_stats=None, player=None):
+        import friday_dota
+
+        now = 1_800_000_000
+
+        def fetch(url, method="GET"):
+            if url.endswith("/heroes") and "/players/" not in url:
+                return [{"id": 1, "localized_name": "Anti-Mage"}, {"id": 2, "localized_name": "Axe"}]
+            if url.endswith("/recentMatches"):
+                return matches
+            if url.endswith("/players/1000/heroes"):
+                return heroes_stats or []
+            if url.endswith("/wl"):
+                return {"win": 60, "lose": 40}
+            if url.endswith("/players/1000"):
+                return player or {}
+            return {}
+        return friday_dota.Dota(lambda: str(76561197960265728 + 1000), fetch=fetch, clock=lambda: now)
+
+    def match(self, mid, hero, radiant_slot, radiant_win, k=5, d=3, a=10, ended=1_800_000_000 - 600):
+        return {"match_id": mid, "hero_id": hero, "player_slot": 0 if radiant_slot else 130, "radiant_win": radiant_win,
+                "kills": k, "deaths": d, "assists": a, "duration": 2400, "start_time": ended - 2400,
+                "gold_per_min": 520, "xp_per_min": 610, "last_hits": 210, "hero_damage": 23456}
+
+    def test_last_match_summary_and_report(self):
+        import friday_dota
+
+        matches = [self.match(3, 1, True, True, d=0, k=8), self.match(2, 2, False, True), self.match(1, 2, False, True)]
+        dota = self.make(matches)
+        last = dota.last_match()
+        self.assertIn("10 分钟前那局用 Anti-Mage赢了", last)
+        self.assertIn("KDA 8/0/10", last)
+        self.assertIn("一次都没死", last)
+        summary = dota.summary()
+        self.assertIn("最近 3 局赢 1 输 2", summary)
+        self.assertIn("Axe(2 局)", summary)
+        report = dota.new_match_report("老板", since=1_800_000_000 - 3600)
+        self.assertIn("Dota 打完啦", report)
+        self.assertIsNone(dota.new_match_report("老板", since=0))  # 同一局不报两次
+        self.assertEqual(friday_dota.rank_text(54), "传奇 4 星")
+        self.assertEqual(friday_dota.rank_text(80), "冠绝一世")
+        self.assertIsNone(friday_dota.rank_text(None))
+
+    def test_private_profile_and_heroes(self):
+        dota = self.make([], heroes_stats=[{"hero_id": 1, "games": 20, "win": 15}, {"hero_id": 2, "games": 50, "win": 20},
+                                           {"hero_id": 3, "games": 2, "win": 2}],
+                         player={"profile": {"personaname": "老板"}, "rank_tier": 35})
+        self.assertIn("公开比赛数据", dota.last_match())
+        heroes = dota.best_heroes()
+        self.assertIn("Anti-Mage 75%(20 局)", heroes)
+        self.assertNotIn("2 局", heroes.split("玩最多")[0])  # 太少局的不算胜率
+        self.assertIn("中军 5 星", dota.profile())
+        self.assertIn("胜率 60%", dota.profile())
+
+    def test_needs_steam(self):
+        import friday_dota
+
+        def no_steam():
+            raise ValueError("Steam 还没连")
+        with self.assertRaises(ValueError):
+            friday_dota.Dota(no_steam, fetch=lambda url: []).last_match()
+
+
+class ApexTest(unittest.TestCase):
+    def test_maps_and_player(self):
+        import friday_apex
+
+        def fetch(url):
+            if "maprotation" in url:
+                return {"battle_royale": {"current": {"map": "World's Edge", "remainingMins": 75},
+                                          "next": {"map": "Olympus", "start": 1_800_000_000}},
+                        "ranked": {"current": {"map": "Storm Point", "remainingMins": 600}, "next": {"map": "Broken Moon"}}}
+            return {"global": {"name": "BossKL", "level": 520, "rank": {"rankName": "Platinum", "rankDiv": 2, "rankScore": 10500}},
+                    "realtime": {"isOnline": 1, "isInGame": 1}, "legends": {"selected": {"LegendName": "Wraith"}}}
+        apex = friday_apex.Apex(fetch=fetch)
+        with mock.patch.dict(os.environ, {"FRIDAY_APEX_KEY": "k" * 32, "FRIDAY_APEX_PLAYER": "BossKL"}):
+            maps = apex.maps()
+            player = apex.player()
+        self.assertIn("普通现在是 世界尽头(World's Edge),还有 1 小时 15 分钟", maps)
+        self.assertIn("换成 奥林匹斯(Olympus)", maps)
+        self.assertIn("排位现在是 风暴点", maps)
+        self.assertIn("排位 白金 II(10,500 分)", player)
+        self.assertIn("在游戏里", player)
+
+    def test_errors_hide_key(self):
+        import urllib.error
+        import friday_apex
+
+        def boom(*a, **k):
+            raise urllib.error.HTTPError("https://api.mozambiquehe.re/bridge?auth=SECRETKEY", 403, "x", {}, None)
+        with mock.patch("urllib.request.urlopen", boom):
+            with self.assertRaises(ValueError) as caught:
+                friday_apex.fetch_json("https://api.mozambiquehe.re/bridge?auth=SECRETKEY")
+        self.assertNotIn("SECRETKEY", str(caught.exception))
+        with mock.patch.dict(os.environ, {"FRIDAY_APEX_KEY": ""}):
+            with self.assertRaises(ValueError):
+                friday_apex.Apex(fetch=lambda url: {}).maps()
+
+
+class SleepTimerTest(unittest.TestCase):
+    def make(self, playing=True):
+        import friday_sleeptimer
+
+        self.now = [1000.0]
+        self.calls = []
+        self.keys = []
+
+        class Spotify:
+            connected = True
+
+            def api(inner, method, path, params=None, body=None):
+                self.calls.append((method, path, (params or {}).get("volume_percent")))
+                if path == "/me/player":
+                    return 200, {"is_playing": playing, "device": {"volume_percent": 80}}
+                if path == "/me/player/currently-playing":
+                    return 200, {"is_playing": True, "progress_ms": 60_000,
+                                 "item": {"name": "晴天", "uri": "spotify:track:1", "duration_ms": 270_000}}
+                return 204, {}
+        computer = SimpleNamespace(do=lambda action, value="": self.keys.append((action, value)) or "ok")
+        timer = friday_sleeptimer.SleepTimer(spotify=lambda: Spotify(), computer=lambda: computer, clock=lambda: self.now[0])
+        return timer
+
+    def test_fade_then_pause_and_restore_volume(self):
+        timer = self.make()
+        done = []
+        timer.on_done = done.append
+        with mock.patch("time.sleep", lambda s: None):
+            self.assertIn("30 分钟后", timer.set("music", 30))
+            self.now[0] += 29 * 60 + 30  # 还剩 30 秒:在变小声
+            timer.tick()
+            volumes = [v for m, p, v in self.calls if p == "/me/player/volume"]
+            self.assertEqual(volumes, [40])
+            self.now[0] += 31
+            timer.tick()
+        self.assertIn(("PUT", "/me/player/pause", None), self.calls)
+        self.assertEqual([v for m, p, v in self.calls if p == "/me/player/volume"][-1], 80)  # 停了再调回原来的音量
+        self.assertIn("音乐停了", done[0])
+        self.assertIn("没有定时", timer.status())
+
+    def test_other_player_uses_stop_key_and_sleep(self):
+        timer = self.make(playing=False)
+        timer.set("sleep", 1)
+        self.now[0] += 61
+        with mock.patch("time.sleep", lambda s: None):
+            self.assertIn("电脑去睡觉", timer.tick())
+        self.assertEqual(self.keys, [("stop_media", ""), ("sleep", "")])
+
+    def test_song_cancel_shutdown(self):
+        timer = self.make()
+        self.assertIn("还有 4 分钟", timer.set("song"))
+        self.assertIn("取消", timer.cancel())
+        timer.set("shutdown", 60)
+        self.assertEqual(self.keys[-1], ("shutdown", "60"))
+        timer.cancel()
+        self.assertEqual(self.keys[-1], ("cancel_shutdown", ""))
+        with self.assertRaises(ValueError):
+            timer.set("music", 0)
+
+    def test_tool_asks_before_sleep(self):
+        box = tools.Toolbox(tools.Memory(os.path.join(tempfile.mkdtemp(), "m.json")), lambda a: False)
+        box.sleep_timer = self.make()
+        box.confirm = lambda q: False
+        text, error = box._sleep_timer({"action": "set", "what": "sleep", "minutes": 30}, print)
+        self.assertTrue(error)
+        self.assertIsNone(box.sleep_timer.job)
+
+
+class TelegramTest(TempDirTest):
+    def make(self):
+        import friday_telegram
+
+        self.sent = []
+        self.events = queue.Queue()
+
+        def http(url, body, kind, timeout):
+            method = url.rsplit("/", 1)[-1]
+            self.sent.append((method, body))
+            if method == "getMe":
+                return {"ok": True, "result": {"username": "friday_boss_bot"}}
+            if method == "getFile":
+                return {"ok": True, "result": {"file_path": "voice/1.oga", "file_size": 10}}
+            return {"ok": True, "result": {}}
+        bridge = friday_telegram.TelegramBridge("123456:" + "A" * 35, self.events, os.path.join(self.tmp, "tg.json"),
+                                                on_status=lambda t: None, http=http, download=lambda url: b"OGG")
+        return bridge
+
+    def update(self, user_id, text=None, chat_type="private", **extra):
+        message = {"chat": {"id": user_id, "type": chat_type}, "from": {"id": user_id, "username": f"u{user_id}"}}
+        if text is not None:
+            message["text"] = text
+        message.update(extra)
+        return {"update_id": 1, "message": message}
+
+    def test_pairing_and_messages(self):
+        bridge = self.make()
+        code = bridge.gate.pair_code
+        bridge.handle_update(self.update(42, "123"))  # 陌生人乱说:不处理
+        self.assertTrue(self.events.empty())
+        bridge.handle_update(self.update(42, code, chat_type="group"))  # 群组里不配对
+        self.assertNotIn(42, bridge.gate.owners)
+        bridge.handle_update(self.update(42, code))
+        self.assertIn(42, bridge.gate.owners)
+        self.assertTrue(any(m == "sendMessage" and "配对成功" in json.loads(b)["text"] for m, b in self.sent))
+        bridge.handle_update(self.update(42, "几点了"))
+        kind, message = self.events.get_nowait()
+        self.assertEqual((kind, message.text, message.service), ("discord", "几点了", "Telegram"))
+        bridge.handle_update(self.update(42, voice={"file_id": "v1"}))
+        _, voice = self.events.get_nowait()
+        self.assertEqual(voice.audio, b"OGG")
+
+    def test_strangers_files_are_not_downloaded(self):
+        bridge = self.make()
+        downloads = []
+        bridge.download = lambda url: downloads.append(url) or b"x"
+        bridge.handle_update(self.update(7, photo=[{"file_id": "p", "file_size": 5}]))
+        self.assertEqual(downloads, [])
+
+    def test_send_split_audio_files_and_notify(self):
+        bridge = self.make()
+        bridge.gate.owners = {42: "u42", 43: "u43"}
+        bridge.send(42, "字" * 9000, audio=b"mp3", files=[("shot.png", b"png"), ("report.pdf", b"pdf")])
+        methods = [m for m, _ in self.sent]
+        self.assertEqual(methods.count("sendMessage"), 3)
+        self.assertIn("sendAudio", methods)
+        self.assertIn("sendPhoto", methods)
+        self.assertIn("sendDocument", methods)
+        self.assertEqual(bridge.notify_owners("提醒"), 2)
+
+    def test_token_never_in_errors(self):
+        import urllib.error
+        import friday_telegram
+
+        def boom(*a, **k):
+            raise urllib.error.HTTPError("https://api.telegram.org/botSECRET/getMe", 401, "x", {}, io.BytesIO(b'{"description":"Unauthorized"}'))
+        with mock.patch("urllib.request.urlopen", boom):
+            with self.assertRaises(friday_telegram.TelegramError) as caught:
+                friday_telegram._http("https://api.telegram.org/botSECRET/getMe", b"{}", "application/json", 5)
+        self.assertNotIn("SECRET", str(caught.exception))
+        self.assertIn("Unauthorized", str(caught.exception))
+        self.assertTrue(friday_telegram.token_ok("123456789:" + "A" * 35))
+        self.assertFalse(friday_telegram.token_ok("not a token"))
+
+
+class PhonesFanoutTest(unittest.TestCase):
+    def test_push_goes_to_discord_and_telegram(self):
+        sent = []
+        done = threading.Event()
+
+        def phone(name):
+            def notify(text, **k):
+                sent.append(name)
+                if len(sent) == 2:
+                    done.set()
+            return SimpleNamespace(notify_owners=notify)
+        session = SimpleNamespace(discord=phone("discord"), telegram=phone("telegram"))
+        with mock.patch.dict(os.environ, {"FRIDAY_PUSH": "always"}):
+            self.assertTrue(app.push_to_phone(session, "提醒"))
+        self.assertTrue(done.wait(5))
+        self.assertEqual(sorted(sent), ["discord", "telegram"])
+        self.assertFalse(app.push_to_phone(SimpleNamespace(discord=None, telegram=None), "x"))
+
+    def test_telegram_message_tag(self):
+        seen = []
+        message = SimpleNamespace(text="你好", reply=lambda t: None, private=True, audio=None, images=None, ask=None,
+                                  service="Telegram")
+        with mock.patch.object(app, "answer", lambda a, p, text, *x, **k: seen.append(text) or True):
+            app.handle_discord(message, SimpleNamespace(toolbox=None), SimpleNamespace())
+        self.assertTrue(seen[0].startswith("[来自手机 Telegram]"))
+
+
+class GamesQuickTest(unittest.TestCase):
+    def test_phrases(self):
+        import friday_quick
+
+        quick = friday_quick.QuickCommands(SimpleNamespace(steam=object()))
+        quick.dota = SimpleNamespace(last_match=lambda: "LAST", summary=lambda: "SUM", best_heroes=lambda: "HEROES",
+                                     profile=lambda: "PROFILE")
+        quick.apex = SimpleNamespace(maps=lambda: "MAPS", player=lambda: "PLAYER")
+        quick.sleep_timer = SimpleNamespace(set=lambda kind, minutes=None: f"{kind}:{minutes}", cancel=lambda: "CANCEL",
+                                            status=lambda: "STATUS")
+        cases = {"刚才那局怎么样": "LAST", "最近10局赢了几局": "SUM", "我哪个英雄胜率最高": "HEROES", "我的dota段位": "PROFILE",
+                 "现在Apex是什么地图": "MAPS", "下一张图几点换": "MAPS", "我的apex排位分": "PLAYER",
+                 "30分钟后停音乐": "music:30", "半小时后关掉音乐": "music:30", "听完这首就停": "song:None",
+                 "取消定时": "CANCEL", "定时还剩多久": "STATUS"}
+        for text, expected in cases.items():
+            self.assertEqual(quick.handle(text), expected, text)
+        self.assertIsNone(quick.handle("一小时后关机"))  # 要先问你:交给 Claude
+        self.assertIsNone(quick.handle("我的段位"))  # 不知道是哪个游戏
+
+
 if __name__ == "__main__":
     unittest.main()

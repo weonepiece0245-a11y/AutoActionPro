@@ -831,6 +831,31 @@ INTERPRETER_TOOL = {
         "action": {"type": "string", "enum": ["start", "stop"]}, "language": {"type": "string"}}, "required": ["action"]},
 }
 
+DOTA_TOOL = {
+    "name": "dota",
+    "description": ("用户的 Dota 2 战绩(OpenDota,用他连好的 Steam 账号):last 刚才那局;recent 最近 10 局输赢、KDA、常用英雄;"
+                    "heroes 胜率最高和玩最多的英雄;profile 段位和总胜率。英雄名是英文。"),
+    "input_schema": {"type": "object", "properties": {
+        "action": {"type": "string", "enum": ["last", "recent", "heroes", "profile"]}}, "required": ["action"]},
+}
+
+APEX_TOOL = {
+    "name": "apex",
+    "description": "Apex 英雄:maps 现在普通和排位是什么地图、几点换;player 排位分和等级(name 可空,默认是用户自己)。",
+    "input_schema": {"type": "object", "properties": {
+        "action": {"type": "string", "enum": ["maps", "player"]}, "name": {"type": "string"}}, "required": ["action"]},
+}
+
+SLEEP_TIMER_TOOL = {
+    "name": "sleep_timer",
+    "description": ("睡前定时:set(what:music 几分钟后停音乐 / song 这首放完就停 / sleep 几分钟后停音乐并让电脑睡眠 / "
+                    "shutdown 几分钟后关机;minutes 分钟数,song 不用);cancel 取消;status 还剩多久。睡眠、关机会先问用户。"),
+    "input_schema": {"type": "object", "properties": {
+        "action": {"type": "string", "enum": ["set", "cancel", "status"]},
+        "what": {"type": "string", "enum": ["music", "song", "sleep", "shutdown"]}, "minutes": {"type": "number"}},
+        "required": ["action"]},
+}
+
 CLEANUP_TOOL = {
     "name": "cleanup",
     "description": ("找大文件和重复文件(在用户的下载、桌面、文档、视频、图片、音乐文件夹里):scan 扫描(要一两分钟),"
@@ -1012,6 +1037,9 @@ class Toolbox:
         self.reader = None  # (friday_reader.Reader, 开始读(标题, 段落) -> 话)
         self.spotify = None  # friday_spotify.Spotify
         self.interpret = None  # (开始(语言) -> 话, 结束() -> 话)
+        self.dota = None  # friday_dota.Dota
+        self.apex = None  # friday_apex.Apex
+        self.sleep_timer = None  # friday_sleeptimer.SleepTimer
         self.virus = None  # (开始扫描(kind) -> 话, 状态() -> 话),由主程序接上
         self.cleanup = None  # (scan, list, recycle) 三个函数,由主程序接上
         self.notes = None  # 速记本(friday_notes.Notes)
@@ -1074,6 +1102,9 @@ class Toolbox:
             "read_aloud": self._read_aloud,
             "spotify": self._spotify,
             "interpreter": self._interpreter,
+            "dota": self._dota,
+            "apex": self._apex,
+            "sleep_timer": self._sleep_timer,
             "notes": self._notes,
             "dates": self._dates,
         }
@@ -1139,6 +1170,12 @@ class Toolbox:
             tools = tools + [SPOTIFY_TOOL]
         if self.interpret is not None and self.local_tools:
             tools = tools + [INTERPRETER_TOOL]
+        if self.dota is not None and self.steam is not None:
+            tools = tools + [DOTA_TOOL]
+        if self.apex is not None:
+            tools = tools + [APEX_TOOL]
+        if self.sleep_timer is not None and self.local_tools:
+            tools = tools + [SLEEP_TIMER_TOOL]
         if self.notes is not None:
             tools = tools + [NOTES_TOOL]
         if self.dates is not None:
@@ -1543,6 +1580,51 @@ class Toolbox:
             return start(code if code in friday_interpret.LANGS else friday_interpret.language_of(code)), False
         if action == "stop":
             return stop(), False
+        return f"不支持的 action:{action}", True
+
+    def _dota(self, args, on_status):
+        action = args.get("action")
+        try:
+            if action == "last":
+                return self.dota.last_match(), False
+            if action == "recent":
+                return self.dota.summary(), False
+            if action == "heroes":
+                return self.dota.best_heroes(), False
+            if action == "profile":
+                return friday_security.mark_external(self.dota.profile()), False
+        except ValueError as e:
+            return str(e), True
+        return f"不支持的 action:{action}", True
+
+    def _apex(self, args, on_status):
+        action = args.get("action")
+        try:
+            if action == "maps":
+                return self.apex.maps(), False
+            if action == "player":
+                return friday_security.mark_external(self.apex.player(args.get("name"))), False
+        except ValueError as e:
+            return str(e), True
+        return f"不支持的 action:{action}", True
+
+    def _sleep_timer(self, args, on_status):
+        timer = self.sleep_timer
+        action = args.get("action")
+        try:
+            if action == "set":
+                what = args.get("what") or "music"
+                if what in ("sleep", "shutdown"):
+                    word = "让电脑睡眠" if what == "sleep" else "关机"
+                    if not self._confirmed(f"{args.get('minutes')} 分钟后{word}"):
+                        return "用户没有允许", True
+                return timer.set(what, args.get("minutes")), False
+            if action == "cancel":
+                return timer.cancel(), False
+            if action == "status":
+                return timer.status(), False
+        except ValueError as e:
+            return str(e), True
         return f"不支持的 action:{action}", True
 
     def _morning_brief(self, args, on_status):

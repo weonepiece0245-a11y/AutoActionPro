@@ -73,6 +73,9 @@ class QuickCommands:
         self.interpret_start = None  # (语言代码) -> 话
         self.reader = None  # (friday_reader.Reader, 开始读(标题, 段落) -> 话)
         self.spotify = None  # friday_spotify.Spotify
+        self.dota = None  # friday_dota.Dota
+        self.apex = None  # friday_apex.Apex
+        self.sleep_timer = None  # friday_sleeptimer.SleepTimer
         self.on_say = None  # 场景里“说”的那一步:马上读出来
         self.silent = False  # 这次的回答已经读过了(场景模式),不用再读
         self.clock = clock
@@ -176,7 +179,7 @@ class QuickCommands:
             if reply:
                 return reply
         for check in (self._reader_control, self._interpret, self._clipboard, self._habits, self._network, self._money,
-                      self._apps):
+                      self._timer, self._games, self._apps):
             try:
                 reply = check(sentence)
             except ValueError as e:
@@ -374,6 +377,61 @@ class QuickCommands:
             return None
         word = found.group("lang") or found.group("lang2")
         return self.interpret_start(friday_interpret.language_of(word))
+
+    # ---------- 睡前定时 ----------
+    NUM = r"(?P<n>\d{1,3}|[零一二两三四五六七八九十半]{1,4}个?)(?P<u>分钟|分|个?小时|个?钟头)"
+    TIMER_MUSIC = re.compile(r"^" + NUM + r"(后|以后|之后)(就)?(停|停止|关掉|关|暂停)(掉)?(音乐|歌|播放|放歌)?$"
+                             r"|^" + NUM.replace("?P<n>", "?P<n2>").replace("?P<u>", "?P<u2>") + r"(后|以后|之后)(就)?不(要)?(放|听)了$")
+    TIMER_SONG = re.compile(r"^(听完|放完|播完)(这首|这一首|这首歌)(就|以后|之后)?(停|停止|暂停|睡觉|关掉)?$")
+    TIMER_CANCEL = re.compile(r"^(取消|关掉|停止|不要)(睡眠|睡前)?定时(器)?$|^不要停(音乐|歌)?了$")
+    TIMER_STATUS = re.compile(r"^(睡眠|睡前)?定时(还剩|还有)(多久|多少时间)$|^(还有|还剩)多久(停音乐|停歌|关机|睡眠)$")
+
+    def _timer(self, sentence: str) -> str | None:
+        timer = self.sleep_timer
+        if timer is None:
+            return None
+        found = self.TIMER_MUSIC.match(sentence)
+        if found:
+            import friday_focus
+
+            n, u = found.group("n") or found.group("n2"), found.group("u") or found.group("u2")
+            minutes = friday_focus.cn_number(n + u)
+            return timer.set("music", minutes) if minutes else None
+        if self.TIMER_SONG.match(sentence):
+            return timer.set("song")
+        if self.TIMER_CANCEL.match(sentence):
+            return timer.cancel()
+        if self.TIMER_STATUS.match(sentence):
+            return timer.status()
+        return None
+
+    # ---------- 游戏战绩 ----------
+    DOTA = r"(dota|刀塔|dota2|dota 2)"
+    DOTA_LAST = re.compile(r"^" + DOTA + r"?(刚才|刚刚|上一|最后一)(那|一)?(局|把|场)(dota|刀塔)?(怎么样|打得怎么样|战绩|如何|数据)?$", re.I)
+    DOTA_RECENT = re.compile(r"^" + DOTA + r"?(最近|近)(\d{1,2}|[一二三四五六七八九十]{1,3}|几)?(局|把|场)(dota|刀塔)?"
+                             r"(赢了几局|输赢|战绩|怎么样|胜率|赢几局)$", re.I)
+    DOTA_HEROES = re.compile(r"^" + DOTA + r"?(我)?(哪个|什么)英雄(胜率最高|最强|玩得最好|赢最多)$|^" + DOTA + r"英雄(胜率|统计)$", re.I)
+    DOTA_RANK = re.compile(r"^(我的?)?" + DOTA + r"(的)?(段位|天梯|排名|分段)(是什么|多少)?$", re.I)
+    APEX_MAP = re.compile(r"^(现在)?(apex)?(现在)?(是|在|玩)?(什么|哪张|哪个)(地图|图)$|^(apex)?(下一张|下张)(图|地图)(几点|什么时候)(换|是什么)?$"
+                          r"|^(apex)?(地图|图)(轮换|什么时候换)$", re.I)
+    APEX_RANK = re.compile(r"^(我的?)?apex(的)?(排位|段位|分数|等级|战绩|排位分)(多少|是什么|怎么样)?(分)?$", re.I)
+
+    def _games(self, sentence: str) -> str | None:
+        if self.dota is not None and getattr(self.toolbox, "steam", None) is not None:
+            if self.DOTA_LAST.match(sentence):
+                return self.dota.last_match()
+            if self.DOTA_RECENT.match(sentence):
+                return self.dota.summary()
+            if self.DOTA_HEROES.match(sentence):
+                return self.dota.best_heroes()
+            if self.DOTA_RANK.match(sentence):
+                return self.dota.profile()
+        if self.apex is not None:
+            if self.APEX_MAP.match(sentence):
+                return self.apex.maps()
+            if self.APEX_RANK.match(sentence):
+                return self.apex.player()
+        return None
 
     # ---------- 连接的应用 ----------
     NEWS_RE = re.compile(r"^(今天|最新|最近|现在)?(有)?(什么|啥|哪些)?(?P<topic>马来西亚|大马|本地|国内|国际|世界|国外|科技|财经|经济|股市|体育|娱乐)?"
