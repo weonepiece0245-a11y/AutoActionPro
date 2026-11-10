@@ -524,6 +524,8 @@ COMPUTER_ACTIONS = {
     "close_app": "关闭程序(正常关闭,会提示保存),value 是程序名或窗口标题关键词,需要用户确认",
     "tidy_downloads": "整理下载文件夹:最上层的文件按类型分进 图片/视频/音乐/文档/压缩包/安装程序/其他 子文件夹,需要用户确认,可以撤销",
     "undo_tidy": "撤销上次整理下载文件夹(把文件放回原处)",
+    "sort_photos": "照片按月整理:把文件夹最上层的照片和视频按拍摄日期分进 2026-11 这样的子文件夹(value 是文件夹,不填就是“图片”),需要用户确认,可以撤销",
+    "undo_sort_photos": "撤销上次照片整理",
     "game_mode": "一键游戏模式:关掉用户在齿轮设定里事先选好的程序(已经同意过,不用再确认)",
     # 状态
     "system_status": "查看 CPU、内存、硬盘剩余空间、电池、最占内存的程序、IP、网络",
@@ -741,6 +743,19 @@ class Computer:
 
         back = friday_health.undo_tidy()
         return f"已把 {back} 个文件放回原处" if back else "没有可以撤销的整理"
+
+    def _do_sort_photos(self, pc, value, approve, **_):
+        import friday_photos
+
+        folder = friday_photos.check_folder(Path(value) if value else pc.known_folder("pictures"))
+        self._confirm(approve, f"整理照片:把 {folder} 最上层的照片和视频按拍摄月份分进子文件夹(可以撤销)")
+        return friday_photos.describe(friday_photos.sort_photos(folder))
+
+    def _do_undo_sort_photos(self, pc, value, approve, **_):
+        import friday_photos
+
+        back = friday_photos.undo()
+        return f"已把 {back} 个文件放回原处" if back else "没有可以撤销的照片整理"
 
     def _do_game_mode(self, pc, value, approve, **_):
         import friday_care

@@ -1951,6 +1951,22 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         save_env_value(env, "FRIDAY_HEALTH", "on" if on else "off")
         os.environ["FRIDAY_HEALTH"] = "on" if on else "off"
         done.append("会提醒硬盘快满、内存太紧、很久没重启、下载文件夹太乱" if on else "不再做电脑健康提醒")
+    if "sort_photos" in payload or payload.get("undo_sort_photos"):
+        import friday_photos
+
+        if payload.get("undo_sort_photos"):
+            back = friday_photos.undo()
+            done.append(f"已把 {back} 个文件放回原处" if back else "没有可以撤销的照片整理")
+        else:
+            computer = getattr(toolbox, "computer", None)
+            folder = str(payload["sort_photos"] or "").strip()
+            if not folder:
+                folder = str(computer.folder("pictures")) if computer is not None and computer.available else str(
+                    Path.home() / "Pictures")
+            try:
+                done.append(friday_photos.describe(friday_photos.sort_photos(Path(folder))))
+            except ValueError as e:
+                return {"error": str(e)}
     if payload.get("tidy_downloads") or payload.get("undo_tidy"):
         import friday_health
 

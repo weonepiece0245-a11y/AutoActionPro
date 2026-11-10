@@ -96,6 +96,7 @@ import friday_cleanup  # noqa: E402
 import friday_notes  # noqa: E402
 import friday_guard  # noqa: E402
 import friday_dates  # noqa: E402
+import friday_photos  # noqa: E402
 import friday_wake  # noqa: E402
 import friday_cloud  # noqa: E402
 import friday_care  # noqa: E402
@@ -7179,6 +7180,41 @@ class DatesTest(TempDirTest):
             {"names": [{"displayName": "没生日的人"}]}]}})
         self.assertEqual(friday_dates.google_birthdays(SimpleNamespace(account=account))(),
                          [{"name": "阿明", "month": 11, "day": 15, "year": None}])
+
+
+class PhotoSortTest(TempDirTest):
+    def test_sort_and_undo(self):
+        from PIL import Image
+
+        folder = Path(self.tmp, "Pictures")
+        folder.mkdir()
+        exif = Image.Exif()
+        exif.get_ifd(0x8769)[36867] = "2025:03:14 10:00:00"
+        Image.new("RGB", (10, 10)).save(folder / "beach.jpg", exif=exif)  # 照片里记的拍摄时间
+        (folder / "IMG_20261105_120000.jpg").write_bytes(b"x")  # 文件名里的日期
+        (folder / "Screenshot_2026-10-01.png").write_bytes(b"x")
+        (folder / "notes.txt").write_text("不是照片")
+        old = datetime.datetime(2024, 7, 1).timestamp()
+        (folder / "old.mov").write_bytes(b"x")
+        for name in ("beach.jpg", "IMG_20261105_120000.jpg", "Screenshot_2026-10-01.png", "old.mov"):
+            os.utime(folder / name, (old, old))
+        (folder / "new.jpg").write_bytes(b"x")  # 刚放进来的:不动
+        result = friday_photos.sort_photos(folder, log_dir=Path(self.tmp))
+        self.assertEqual(result["months"], {"2025-03": 1, "2026-11": 1, "2026-10": 1, "2024-07": 1})
+        self.assertTrue((folder / "2025-03" / "beach.jpg").exists())
+        self.assertTrue((folder / "new.jpg").exists())
+        self.assertTrue((folder / "notes.txt").exists())
+        self.assertIn("4 张照片和视频按月分进了 4 个文件夹", friday_photos.describe(result))
+        self.assertEqual(friday_photos.undo(Path(self.tmp)), 4)
+        self.assertTrue((folder / "beach.jpg").exists())
+        self.assertFalse((folder / "2025-03").exists())
+
+    def test_refuses_dangerous_folders(self):
+        for bad in (Path.home(), Path(Path.home().anchor), friday_photos.ASSISTANT_DIR):
+            with self.assertRaises(ValueError):
+                friday_photos.check_folder(bad)
+        with self.assertRaises(ValueError):
+            friday_photos.check_folder(Path(self.tmp, "nope"))
 
 
 if __name__ == "__main__":

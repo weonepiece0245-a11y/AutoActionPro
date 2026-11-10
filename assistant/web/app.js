@@ -806,6 +806,12 @@ function showCleanup(items) {
   $("cleanupActions").hidden = !(items || []).length;
   updatePicked();
 }
+$("photoSort").onclick = () => {
+  const folder = $("photoFolder").value.trim();
+  if (!confirm(`把${folder ? "“" + folder + "”" : "“图片”文件夹"}最上层的照片和视频,按拍摄月份分进“2026-11”这样的子文件夹?整理错了可以撤销。`)) return;
+  saveSetting({ sort_photos: folder }, 6000);
+};
+$("photoUndo").onclick = () => saveSetting({ undo_sort_photos: true }, 5000);
 $("cleanupScan").onclick = async () => {
   const btn = $("cleanupScan"); btn.disabled = true; btn.textContent = "找中…(一两分钟)";
   const r = await api("/api/settings", { cleanup_scan: true }).catch(() => ({ error: "星期五没有响应" }));
