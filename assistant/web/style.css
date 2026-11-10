@@ -313,3 +313,7 @@ body.locked > *:not(#lockScreen) { visibility: hidden !important; }
 .lock-error { min-height: 18px; color: #fca5a5; font-size: 13px; }
 .mono { font-family: "JetBrains Mono", monospace; letter-spacing: .05em; user-select: all; }
 #remoteLockBox div { margin: 4px 0; }
+/* PIN 那一行有三个输入框:窄一点、放不下就换行,设定窗口不再出现横向滚动条 */
+.set-ctl { flex-wrap: wrap; justify-content: flex-end; }
+#pinOld, #pinNew, #pinNew2 { width: 84px; }
+#settings .modal-card, #settings > div { overflow-x: hidden; }
