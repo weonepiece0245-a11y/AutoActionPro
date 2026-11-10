@@ -268,6 +268,7 @@ class Care:
         self.game: str | None = None  # 正在玩的游戏
         self.game_seen = 0.0
         self.held: list[str] = []  # 打游戏时先记着的提醒
+        self.screentime = None  # 电脑使用时间统计(friday_screentime.ScreenTime)
 
     def _line(self, options: list[str], **values) -> str:
         return self.rng.choice(options).format(name=self.name(), **values)
@@ -325,6 +326,11 @@ class Care:
         snapshot = look(self.idle, self.app, self.fullscreen, self.display)
         if snapshot is None:
             return None
+        if self.screentime is not None:
+            try:
+                self.screentime.record(snapshot)
+            except Exception:
+                pass
         now = self.clock()
         settings = self.settings()
         said = self._watch_game(snapshot["game"], now)

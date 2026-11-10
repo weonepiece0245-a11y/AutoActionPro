@@ -2303,6 +2303,9 @@ def weekly_report(session, toolbox: Toolbox, state, now: datetime.datetime | Non
     budget = getattr(session, "budget", None)
     text = friday_alerts.weekly_report(session.meter, getattr(toolbox, "ledger", None), week, _call_me(session),
                                        budget.budget_myr if budget is not None else 0.0)
+    screentime = getattr(toolbox, "screentime", None)
+    if screentime is not None:
+        text += screentime.week_line(*week)
     state.set("weekly", week[0].isoformat())
     announce(session, text, "📊", "这周的花费报告在窗口里")
     return text
@@ -2824,6 +2827,11 @@ def run_web(args) -> None:
 
     toolbox.scenes = session.quick.scenes = friday_scenes.Scenes(os.path.join(data_dir, "friday_scenes.json"))
     session.quick.on_say = lambda text: session.speak(text) if session.speak_enabled else None
+    if getattr(session, "care", None) is not None:  # 电脑使用时间(只在 Windows 上有)
+        import friday_screentime
+
+        session.care.screentime = friday_screentime.ScreenTime(os.path.join(data_dir, "friday_screentime.json"))
+        toolbox.screentime = session.quick.screentime = session.care.screentime
     toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
     try:
         web_loop(session, events, voice_module.transcribe_audio)

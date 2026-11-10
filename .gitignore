@@ -59,3 +59,4 @@ assistant/web/vendor/
 assistant/friday_security.log*
 assistant/friday_tidy.json
 assistant/friday_scenes.json
+assistant/friday_screentime.json

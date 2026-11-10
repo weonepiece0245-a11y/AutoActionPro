@@ -635,6 +635,13 @@ EXPENSE_TOOL = {
     },
 }
 
+SCREEN_TIME_TOOL = {
+    "name": "screen_time",
+    "description": "用户用电脑的时间统计(各程序、各游戏用了多久,在电脑上记录的):period 是 today / yesterday / week。",
+    "input_schema": {"type": "object", "properties": {"period": {"type": "string", "enum": ["today", "yesterday", "week"]}},
+                     "required": []},
+}
+
 SCENE_TOOL = {
     "name": "scene",
     "description": (
@@ -780,6 +787,7 @@ class Toolbox:
         self.mailwatch = None  # 重要邮件提醒(friday_mailwatch.MailWatch),接了 Google 才有
         self.meter = None  # 花费统计(给 ai_spending 用)
         self.scenes = None  # 场景模式(friday_scenes.Scenes)
+        self.screentime = None  # 电脑使用时间(friday_screentime.ScreenTime)
         self.budget = None
         if ledger is not None and google is not None:
             from friday_ledger import sheet_sync
@@ -820,6 +828,7 @@ class Toolbox:
             "mail_alert": self._mail_alert,
             "ai_spending": self._ai_spending,
             "scene": self._scene,
+            "screen_time": self._screen_time,
         }
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
 
@@ -847,6 +856,8 @@ class Toolbox:
             tools = tools + [SPENDING_TOOL]
         if self.scenes is not None and self.local_tools:
             tools = tools + [SCENE_TOOL]
+        if self.screentime is not None:
+            tools = tools + [SCREEN_TIME_TOOL]
         if self.todos is not None and self.google is None:  # 接了 Google 就用 Google Tasks 当待办清单
             tools = tools + [TODO_TOOL]
         if self.computer is not None and self.computer.available:
@@ -943,6 +954,10 @@ class Toolbox:
         except ValueError as e:
             return str(e), True
         return f"不支持的 action:{action}", True
+
+    def _screen_time(self, args, on_status):
+        self.screentime.save()
+        return self.screentime.report(args.get("period") or "today"), False
 
     def _scene(self, args, on_status):
         import friday_scenes

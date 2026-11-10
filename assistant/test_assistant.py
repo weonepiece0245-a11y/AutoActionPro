@@ -91,6 +91,7 @@ import friday_watch  # noqa: E402
 import friday_mailwatch  # noqa: E402
 import friday_memtidy  # noqa: E402
 import friday_scenes  # noqa: E402
+import friday_screentime  # noqa: E402
 import friday_wake  # noqa: E402
 import friday_cloud  # noqa: E402
 import friday_care  # noqa: E402
@@ -6869,6 +6870,52 @@ class ScenesTest(TempDirTest):
         self.assertIn("error", app.apply_settings({"scene_save": {"name": "a", "triggers": "b", "steps": "乱写"}},
                                                   session, toolbox, env))
         self.assertEqual(app.scenes_state(session)["list"][-1]["triggers"], ["看电影", "电影时间"])
+
+
+class ScreenTimeTest(TempDirTest):
+    def test_records_and_reports(self):
+        now = [datetime.datetime(2026, 11, 10, 20, 0)]
+        st = friday_screentime.ScreenTime(os.path.join(self.tmp, "st.json"), clock=lambda: now[0])
+
+        def tick(app, game=None, idle=0, seconds=30):
+            now[0] += datetime.timedelta(seconds=seconds)
+            st.record({"app": app, "game": game, "present_idle": idle})
+
+        st.record({"app": "chrome.exe", "game": None, "present_idle": 0})  # 第一次只定起点
+        for _ in range(120):
+            tick("r5apex.exe", "Apex")  # 1 小时 Apex
+        for _ in range(60):
+            tick("chrome.exe")  # 30 分钟 Chrome
+        for _ in range(40):
+            tick("chrome.exe", idle=600)  # 人不在:不算
+        tick("discord.exe", seconds=3600)  # 电脑睡眠过:不算
+        st.save()
+        text = friday_screentime.ScreenTime(os.path.join(self.tmp, "st.json"), clock=lambda: now[0]).report("today")
+        self.assertIn("今天用电脑大约 1 小时 30 分钟", text)
+        self.assertIn("Apex 1 小时、Chrome 30 分钟", text)
+        self.assertIn("其中打游戏 1 小时(Apex 1 小时)", text)
+        self.assertIn("打游戏 1 小时", st.week_line(datetime.date(2026, 11, 9), datetime.date(2026, 11, 15)))
+        self.assertIn("昨天还没有使用记录", st.report("yesterday"))
+
+    def test_quick_and_tool(self):
+        st = friday_screentime.ScreenTime(os.path.join(self.tmp, "st.json"))
+        quick = friday_quick.QuickCommands(SimpleNamespace())
+        quick.screentime = st
+        self.assertIn("今天还没有使用记录", quick.handle("我今天玩了多久游戏"))
+        self.assertIn("这周还没有使用记录", quick.handle("这周用了多久电脑"))
+        toolbox = self.make_toolbox()
+        toolbox.screentime = st
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+        self.assertIn("昨天", toolbox.run(tool_use("screen_time", {"period": "yesterday"}), lambda s: None)["content"])
+
+    def test_care_feeds_screen_time(self):
+        recorded = []
+        care = friday_care.Care(lambda t: True, name=lambda: "老板", idle=lambda: 0, app=lambda: "chrome.exe",
+                                settings=lambda: {"welcome": False, "break_minutes": 0, "night": False},
+                                fullscreen=lambda: False, display=lambda: False)
+        care.screentime = SimpleNamespace(record=recorded.append)
+        care.tick()
+        self.assertEqual(recorded[0]["app"], "chrome.exe")
 
 
 if __name__ == "__main__":
