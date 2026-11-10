@@ -1307,6 +1307,7 @@ class WebSession:
     defender = None  # 病毒扫描(friday_defender.Defender)
     focus = None  # 专注模式(friday_focus.Focus)
     brief = None  # 早安简报(friday_brief.MorningBrief)
+    clips = None  # 剪贴板历史(friday_clipboard.ClipHistory)
     alert_state = None  # friday_alerts.json(下雨、每周报告、早安简报共用)
     discord = None  # Discord 机器人(提醒推到手机)
     cloud = None  # 云端后备的连接(friday_cloud.CloudClient)
@@ -1821,6 +1822,8 @@ def settings_state(session, meter=None) -> dict:
         "defender": defender_state(session),
         "focus": session.focus.state() if getattr(session, "focus", None) is not None else None,
         "brief": __import__("friday_brief").enabled() if getattr(session, "brief", None) is not None else None,
+        "clipboard": {"enabled": __import__("friday_clipboard").enabled(), "count": len(session.clips.items)}
+        if getattr(session, "clips", None) is not None and os.name == "nt" else None,
         "rain_alert": __import__("friday_alerts").rain_time(),
         "event_lead": __import__("friday_events").lead_minutes() if google_ready(session) else None,
         "mail_alert": mail_alert_state(session),
@@ -1979,6 +1982,13 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         save_env_value(env, "FRIDAY_BRIEF", "on" if on else "off")
         os.environ["FRIDAY_BRIEF"] = "on" if on else "off"
         done.append("每天早上第一次坐到电脑前会说早安简报" if on else "不再自动说早安简报(说“早安”还是会说)")
+    if "clipboard" in payload:
+        on = bool(payload["clipboard"])
+        save_env_value(env, "FRIDAY_CLIPBOARD", "on" if on else "off")
+        os.environ["FRIDAY_CLIPBOARD"] = "on" if on else "off"
+        done.append("会记住最近复制的文字(密码不记)" if on else "不再记剪贴板历史")
+    if payload.get("clipboard_clear") and getattr(session, "clips", None) is not None:
+        done.append(session.clips.clear())
     if payload.get("virus_scan") in ("quick", "full") and getattr(session, "defender", None) is not None:
         done.append(start_virus_scan(session, payload["virus_scan"]))
     if payload.get("tidy_downloads") or payload.get("undo_tidy"):
@@ -2438,6 +2448,9 @@ def weekly_report(session, toolbox: Toolbox, state, now: datetime.datetime | Non
     screentime = getattr(toolbox, "screentime", None)
     if screentime is not None:
         text += screentime.week_line(*week)
+    habits = getattr(toolbox, "habits", None)
+    if habits is not None and habits.items:
+        text += habits.week_line(week[1])
     state.set("weekly", week[0].isoformat())
     announce(session, text, "📊", "这周的花费报告在窗口里")
     return text
@@ -2522,8 +2535,8 @@ def start_memory_tidy(session, toolbox: Toolbox, data_dir: str):
     return session.memtidy
 
 
-def start_date_reminders(session, toolbox: Toolbox, interval: float = 15 * 60) -> None:
-    """生日、纪念日和账单:每 15 分钟看一次,提前 3 天和当天提醒(早上 8 点后)。"""
+def start_date_reminders(session, toolbox: Toolbox, interval: float = 5 * 60) -> None:
+    """生日、纪念日、账单、习惯:每 5 分钟看一次该不该提醒。"""
     def loop() -> None:
         time.sleep(120)
         while True:
@@ -2533,6 +2546,9 @@ def start_date_reminders(session, toolbox: Toolbox, interval: float = 15 * 60) -
                 if getattr(toolbox, "bills", None) is not None:
                     for text in toolbox.bills.due(_call_me(session)):
                         announce(session, text, "🧾", text)
+                if getattr(toolbox, "habits", None) is not None:
+                    for text in toolbox.habits.due(_call_me(session)):
+                        announce(session, text, "✅", text)
 
             _quietly(check)
             time.sleep(interval)
@@ -2695,6 +2711,64 @@ def start_morning_brief(session, interval: float = 60) -> None:
             time.sleep(interval)
 
     threading.Thread(target=loop, daemon=True, name="friday-brief").start()
+
+
+def say_here(session, text: str, icon: str) -> None:
+    """只在电脑上说(不推到手机,例如断网的时候本来也推不出去)。"""
+    session.hub.broadcast({"type": "reminder", "text": f"{icon} {text}"})
+    care = getattr(session, "care", None)
+    if care is not None and care.quiet_now():
+        try:
+            care.toast(text)
+        except Exception:
+            pass
+    elif session.speak_enabled and session.hub.connected and not session.busy:
+        session.speak(text)
+
+
+def start_network(session, toolbox, data_dir: str) -> None:
+    """网速测试 + 断网记录。"""
+    import friday_net
+
+    speed = friday_net.SpeedTest()
+    watch = friday_net.NetWatch(os.path.join(data_dir, "friday_net.json"))
+
+    def speed_done(text: str) -> None:
+        announce(session, text, "📶", "网速测好了,结果在窗口里", timely=True)
+
+    def start_speed() -> str:
+        return speed.start(speed_done)
+
+    def on_event(kind: str, text: str) -> None:
+        if kind == "down":
+            say_here(session, text, "📶")
+        else:
+            announce(session, text, "📶", text)
+
+    watch.start(on_event)
+    toolbox.network = (start_speed, watch)
+    session.quick.speed, session.quick.netwatch = start_speed, watch
+
+
+def start_fx(session, toolbox, data_dir: str, interval: float = 3600) -> None:
+    """汇率换算 + 汇率提醒(每小时看一次)。"""
+    import friday_fx
+
+    rates = friday_fx.Rates()
+    alerts = friday_fx.FxAlerts(os.path.join(data_dir, "friday_fx.json"), rates)
+    toolbox.fx = session.quick.fx = (rates, alerts)
+
+    def loop() -> None:
+        time.sleep(180)
+        while True:
+            def check() -> None:
+                for text in alerts.check(_call_me(session)):
+                    announce(session, text, "💱", text, urgent=True)
+
+            _quietly(check)
+            time.sleep(interval)
+
+    threading.Thread(target=loop, daemon=True, name="friday-fx").start()
 
 
 def start_heartbeat(events: queue.Queue, data_dir: str, interval: float = 30) -> None:
@@ -3214,6 +3288,16 @@ def run_web(args) -> None:
     session.brief = make_brief(session, toolbox, data_dir)
     toolbox.brief = session.quick.brief = lambda: brief_now(session)
     start_morning_brief(session)
+    import friday_clipboard
+
+    session.clips = toolbox.clips = session.quick.clips = friday_clipboard.ClipHistory(
+        os.path.join(data_dir, "friday_clipboard.json"))
+    session.clips.start()
+    import friday_habits
+
+    toolbox.habits = session.quick.habits = friday_habits.Habits(os.path.join(data_dir, "friday_habits.json"))
+    start_network(session, toolbox, data_dir)
+    start_fx(session, toolbox, data_dir)
     if toolbox.google is not None:  # 登录了 Google:笔记同时抄到 Google 文档(在后台抄,不拖慢)
         append = friday_notes.docs_sync(toolbox.google, toolbox.notes)
         toolbox.notes.sync = lambda line: threading.Thread(target=lambda: _quietly(lambda: append(line)),

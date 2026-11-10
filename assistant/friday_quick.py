@@ -61,6 +61,11 @@ class QuickCommands:
         self.bills = None  # 账单(friday_bills.Bills)
         self.focus = None  # 专注模式(friday_focus.Focus)
         self.brief = None  # () -> 早安简报
+        self.clips = None  # 剪贴板历史(friday_clipboard.ClipHistory)
+        self.habits = None  # 习惯打卡(friday_habits.Habits)
+        self.speed = None  # () -> 开始测网速,马上返回
+        self.netwatch = None  # 断网记录(friday_net.NetWatch)
+        self.fx = None  # (friday_fx.Rates, friday_fx.FxAlerts)
         self.on_say = None  # 场景里“说”的那一步:马上读出来
         self.silent = False  # 这次的回答已经读过了(场景模式),不用再读
         self.clock = clock
@@ -153,6 +158,15 @@ class QuickCommands:
             try:
                 reply = self._bills(sentence)
             except ValueError:
+                reply = None
+            if reply:
+                return reply
+        for check in (self._clipboard, self._habits, self._network, self._money):
+            try:
+                reply = check(sentence)
+            except ValueError as e:
+                reply = str(e)
+            except Exception:
                 reply = None
             if reply:
                 return reply
@@ -252,6 +266,105 @@ class QuickCommands:
             return text
         if "账单" in sentence and len(sentence) <= 14 and not re.search(r"\d|删|记|加|每|改|设", sentence):
             return self.bills.describe()
+        return None
+
+    # ---------- 剪贴板历史 ----------
+    CLIP_LIST = re.compile(r"^(看看?|打开)?(我的)?(剪贴板|剪切板)(历史|记录)?$|^(我)?(最近|刚才|之前)?(复制|拷贝)(过|了)?(什么|哪些)(东西)?$"
+                           r"|^最近复制的(东西)?$")
+    CLIP_COPY = re.compile(r"^(复制|拿回|贴回|放回|还原|再复制)(剪贴板(历史)?(里|的)?)?第(?P<n>\d{1,2}|[一二三四五六七八九十]{1,3})(个|段|条)$")
+    CLIP_FIND = re.compile(r"^(在)?(剪贴板|剪切板)(历史)?(里|里面)?(找|搜)(一下)?(?P<q>.{1,20})$")
+    CLIP_KIND = re.compile(r"^(把)?(刚才|刚刚|之前|上次|最近)?(复制|拷贝)的?(那个|那条|那段)?(?P<k>网址|链接|网页|link|电话|号码|电话号码|邮箱|email|电邮)(拿回来|放回去)?$", re.I)
+    CLIP_CLEAR = re.compile(r"^(清空|清除|删掉|删除)(剪贴板|剪切板)(历史|记录)?$")
+
+    def _clipboard(self, sentence: str) -> str | None:
+        clips = self.clips
+        if clips is None:
+            return None
+        if self.CLIP_CLEAR.match(sentence):
+            return clips.clear()
+        if self.CLIP_LIST.match(sentence):
+            return clips.describe()
+        found = self.CLIP_COPY.match(sentence)
+        if found:
+            import friday_desktop
+            import friday_focus
+
+            n = found.group("n")
+            return clips.copy_back(int(n) if n.isdigit() else friday_focus.cn_number(n) or 0, friday_desktop.write_clipboard)
+        found = self.CLIP_FIND.match(sentence)
+        if found:
+            return clips.describe(clips.find(found.group("q")))
+        found = self.CLIP_KIND.match(sentence)
+        if found:
+            import friday_desktop
+
+            kind = {"网址": "url", "链接": "url", "网页": "url", "link": "url", "邮箱": "email", "email": "email",
+                    "电邮": "email"}.get(found.group("k").lower(), "number")
+            hits = clips.find(kind=kind)
+            if not hits:
+                return "剪贴板历史里没有这样的。"
+            return clips.copy_back(hits[0][0], friday_desktop.write_clipboard)
+        return None
+
+    # ---------- 习惯 ----------
+    HABIT_REPORT = re.compile(r"^(?P<when>今天|这周|本周|这个星期)?(的)?(习惯|打卡)(情况|统计|记录|怎么样|完成了吗|完成得怎么样)?$")
+    HABIT_UNDO = re.compile(r"^(撤销|取消)(刚才|上一次|上次)?(的)?(?P<n>[一-鿿]{1,6}?)打卡$")
+
+    def _habits(self, sentence: str) -> str | None:
+        habits = self.habits
+        if habits is None or not habits.items:
+            return None
+        found = self.HABIT_REPORT.match(sentence)
+        if found:
+            week = (found.group("when") or "") in ("这周", "本周", "这个星期")
+            return habits.report("week" if week else "today")
+        found = self.HABIT_UNDO.match(sentence)
+        if found:
+            return habits.undo(found.group("n"))
+        hit = habits.match_sentence(sentence)
+        if hit:
+            habit, count = hit
+            return habits.check_in(habit["name"], count)
+        return None
+
+    # ---------- 网络 ----------
+    NET_SPEED = re.compile(r"^(测|测试|测量|看看|查|查查)(一下|一测)?(网速|网络速度|网络|速度|延迟|ping)$"
+                           r"|^(网速|网络|延迟|ping)(怎么样|多少|快不快|高不高|好不好)$", re.I)
+    NET_OUTAGE = re.compile(r"^(?P<when>今天|这周|本周|最近)?(断了?几次网|网络断了几次|断网(记录|几次|了几次)|有没有断网|网断过吗|断过网吗)$")
+
+    def _network(self, sentence: str) -> str | None:
+        if self.speed is not None and self.NET_SPEED.match(sentence):
+            return self.speed()
+        found = self.NET_OUTAGE.match(sentence)
+        if found and self.netwatch is not None:
+            week = (found.group("when") or "") in ("这周", "本周", "最近")
+            return self.netwatch.report("week" if week else "today")
+        return None
+
+    # ---------- 汇率 ----------
+    def _money(self, sentence: str) -> str | None:
+        if self.fx is None or len(sentence) > 30:
+            return None
+        import friday_fx
+
+        rates, alerts = self.fx
+        if re.fullmatch(r"(我的)?汇率提醒(有哪些|列表)?", sentence):
+            return alerts.describe()
+        found = re.fullmatch(r"(取消|删掉|删除|不要)(?P<c>.{1,6}?)(的)?汇率提醒", sentence)
+        if found:
+            codes = friday_fx.mentions(found.group("c"))
+            return alerts.remove(codes[0]) if codes else None
+        alert = friday_fx.parse_alert(sentence)
+        if alert:
+            base, target, quote, direction = alert
+            return alerts.add(base, target, quote, direction)
+        convert = friday_fx.parse_convert(sentence)
+        if convert:
+            return rates.convert(*convert)
+        if "汇率" in sentence and not re.search(r"\d", sentence):
+            codes = [c for c in friday_fx.mentions(sentence) if c != "MYR"]
+            if len(codes) == 1:
+                return rates.describe_rate(codes[0])
         return None
 
     # ---------- 专注 ----------

@@ -7593,5 +7593,253 @@ class BriefTest(unittest.TestCase):
             self.assertEqual(quick.handle(text), "简报", text)
 
 
+
+class ClipboardTest(TempDirTest):
+    def test_records_skips_secrets_and_copies_back(self):
+        import friday_clipboard
+
+        clips = friday_clipboard.ClipHistory(os.path.join(self.tmp, "c.json"), clock=lambda: 1.0)
+        for text in ("https://example.com/x", "你好世界", "Abc12345!", "sk-ant-api03-zzz", "482913",
+                     "password: hunter2", "你好世界"):
+            clips.add(text)
+        self.assertEqual([i["text"] for i in clips.items], ["你好世界", "https://example.com/x"])
+        written = []
+        self.assertIn("已放回剪贴板", clips.copy_back(2, lambda t: written.append(t) or True))
+        self.assertEqual(written, ["https://example.com/x"])
+        self.assertFalse(clips.add("https://example.com/x"))  # 星期五自己放回去的不算新复制
+        self.assertEqual(clips.items[0]["text"], "https://example.com/x")
+        again = friday_clipboard.ClipHistory(os.path.join(self.tmp, "c.json"))
+        self.assertEqual(len(again.items), 2)
+        with self.assertRaises(ValueError):
+            clips.get(9)
+        self.assertIn("清空", clips.clear())
+
+    def test_watcher_and_switch(self):
+        import friday_clipboard
+
+        clips = friday_clipboard.ClipHistory(os.path.join(self.tmp, "c.json"))
+        seq = iter([1, 2, 2, 3, 4] + [4] * 1000)
+        texts = iter(["第一段", "第三段"])  # 密码管理器复制的那次根本不读
+        skips = iter([False, True, False])
+        clips.start((lambda: next(seq), lambda: next(skips), lambda: next(texts)), interval=0.01)
+        for _ in range(100):
+            if len(clips.items) == 2:
+                break
+            time.sleep(0.01)
+        self.assertEqual([i["text"] for i in clips.items], ["第三段", "第一段"])
+        with mock.patch.dict(os.environ, {"FRIDAY_CLIPBOARD": "off"}):
+            self.assertFalse(clips.add("关掉了"))
+
+    def test_quick_and_tool(self):
+        import friday_quick
+
+        clips_path = os.path.join(self.tmp, "c.json")
+        import friday_clipboard
+
+        clips = friday_clipboard.ClipHistory(clips_path)
+        clips.add("https://shop.example/item")
+        clips.add("开会笔记")
+        quick = friday_quick.QuickCommands(SimpleNamespace())
+        quick.clips = clips
+        self.assertIn("#2 https://shop.example/item", quick.handle("剪贴板历史"))
+        self.assertIn("开会笔记", quick.handle("剪贴板里找开会"))
+        written = []
+        with mock.patch("friday_desktop.write_clipboard", lambda t: written.append(t) or True):
+            quick.handle("刚才复制的网址")
+            quick.handle("复制第2个")
+        self.assertEqual(written, ["https://shop.example/item", "开会笔记"])
+        box = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m.json")), lambda a: True)
+        box.clips = clips
+        text, error = box._clipboard_history({"action": "list"}, print)
+        self.assertIn("开会笔记", text)
+
+
+class HabitsTest(TempDirTest):
+    def make(self):
+        import friday_habits
+
+        self.now = datetime.datetime(2026, 11, 10, 9, 0)
+        return friday_habits.Habits(os.path.join(self.tmp, "h.json"), clock=lambda: self.now)
+
+    def test_check_in_streak_and_report(self):
+        habits = self.make()
+        habits.add("吃药", 2, ["09:00", "21:00"])
+        self.assertIn("1/2", habits.check_in("药"))
+        self.assertIn("完成了", habits.check_in("吃药"))
+        self.now += datetime.timedelta(days=1)
+        habits.check_in("吃药", 2)
+        self.assertIn("连续 2 天", habits.report())
+        self.assertIn("吃药 2/3 天达标", habits.week_line())  # 星期一到星期三
+        self.assertIn("撤销", habits.undo("吃药"))
+        with self.assertRaises(ValueError):
+            habits.check_in("跑步")
+        with self.assertRaises(ValueError):
+            habits.add("喝水", 1, ["25:00"])
+
+    def test_reminders_follow_progress(self):
+        habits = self.make()
+        habits.add("喝水", 8, ["10:00", "14:00"], "杯")
+        self.assertEqual(habits.due("老板"), [])  # 还没到 10 点
+        self.now = datetime.datetime(2026, 11, 10, 10, 5)
+        said = habits.due("老板")
+        self.assertIn("该喝水了(今天 0/8 杯)", said[0])
+        self.assertEqual(habits.due("老板"), [])
+        habits.check_in("喝水", 8)
+        self.now = datetime.datetime(2026, 11, 10, 14, 1)
+        self.assertEqual(habits.due("老板"), [])  # 已经喝够了
+        self.now = datetime.datetime(2026, 11, 11, 17, 0)
+        self.assertEqual(habits.due("老板"), [])  # 过了 2 小时就不补了
+
+    def test_quick(self):
+        import friday_quick
+
+        habits = self.make()
+        habits.add("喝水", 8, [], "杯")
+        habits.add("运动", 1)
+        quick = friday_quick.QuickCommands(SimpleNamespace())
+        quick.habits = habits
+        self.assertIn("1/8", quick.handle("水喝了"))
+        self.assertIn("3/8", quick.handle("喝了两杯水"))
+        self.assertIn("完成了", quick.handle("运动打卡"))
+        self.assertIn("今天的习惯", quick.handle("今天打卡情况"))
+        self.assertIsNone(quick.handle("水喝了吗"))
+
+
+class NetTest(TempDirTest):
+    def test_outage_detection(self):
+        import friday_net
+
+        state = {"up": True, "t": 1000.0}
+        watch = friday_net.NetWatch(os.path.join(self.tmp, "n.json"), probe=lambda: state["up"],
+                                    clock=lambda: state["t"], interval=20)
+
+        def step(up):
+            state["up"] = up
+            state["t"] += 20
+            return watch.tick()
+        self.assertIsNone(step(True))
+        self.assertIsNone(step(False))
+        self.assertEqual(step(False)[0], "down")
+        for _ in range(5):
+            self.assertIsNone(step(False))
+        kind, text = step(True)
+        self.assertEqual(kind, "up")
+        self.assertIn("2 分钟", text)
+        self.assertEqual(len(watch.outages), 1)
+        self.assertIsNone(step(False))
+        self.assertEqual(step(False)[0], "down")
+        self.assertIsNone(step(True))  # 不到一分钟:不记
+
+    def test_sleep_gap_is_not_outage(self):
+        import friday_net
+
+        state = {"up": False, "t": 1000.0}
+        watch = friday_net.NetWatch(os.path.join(self.tmp, "n.json"), probe=lambda: state["up"],
+                                    clock=lambda: state["t"], interval=20)
+        watch.tick()
+        state["t"] += 3600  # 电脑睡了一小时
+        self.assertIsNone(watch.tick())
+        state["up"] = True
+        state["t"] += 20
+        self.assertIsNone(watch.tick())
+        self.assertEqual(watch.outages, [])
+
+    def test_measure_and_describe(self):
+        import friday_net
+
+        clock = {"t": 0.0}
+
+        class Response:
+            def __init__(self, size):
+                self.left = size
+
+            def read(self, n=None):
+                clock["t"] += 0.5 if n else 0.02
+                if n is None:
+                    return b""
+                chunk = b"x" * min(n, self.left)
+                self.left -= len(chunk)
+                return chunk
+
+        class Conn:
+            def request(self, method, path, body=None, headers=None):
+                self.size = int(path.split("=")[1]) if "bytes=" in path else 0
+                if body:
+                    clock["t"] += 2.0
+
+            def getresponse(self):
+                return Response(self.size)
+
+            def close(self):
+                pass
+        result = friday_net.measure(Conn, clock=lambda: clock["t"])
+        self.assertEqual(result["ping"], 20)
+        self.assertGreater(result["down"], 1)
+        self.assertAlmostEqual(result["up"], 32.0, delta=0.5)
+        self.assertIn("延迟 20 毫秒(很低", friday_net.describe_speed(result))
+
+    def test_speed_test_background(self):
+        import friday_net
+
+        done = threading.Event()
+        said = []
+        test = friday_net.SpeedTest(run=lambda: {"ping": 80, "jitter": 30, "down": 5.0, "up": 2.0})
+        self.assertIn("开始测网速", test.start(lambda text: (said.append(text), done.set())))
+        self.assertTrue(done.wait(5))
+        self.assertIn("下载很慢", said[0])
+        self.assertIn("不太稳", said[0])
+
+
+class FxTest(TempDirTest):
+    def rates(self, table=None):
+        import friday_fx
+
+        table = table or {"MYR": 4.4, "SGD": 1.3, "CNY": 7.1, "JPY": 150.0}
+        self.fetched = []
+
+        def fetch(url):
+            self.fetched.append(url)
+            return {"rates": dict(table), "time_last_update_unix": 1_762_732_800}
+        return friday_fx.Rates(fetch=fetch, clock=lambda: 100.0)
+
+    def test_convert_and_parse(self):
+        import friday_fx
+
+        rates = self.rates()
+        self.assertIn("RM 440.00", rates.convert(100, "USD", "MYR"))
+        self.assertIn("1 日元 = RM 0.0293", rates.convert(10000, "JPY", "MYR"))
+        rates.rate("SGD", "MYR")
+        self.assertEqual(len(self.fetched), 1)  # 一小时内用缓存
+        self.assertEqual(friday_fx.parse_convert("100美金是多少马币"), (100.0, "USD", "MYR"))
+        self.assertEqual(friday_fx.parse_convert("1000马币换人民币多少"), (1000.0, "MYR", "CNY"))
+        self.assertEqual(friday_fx.parse_convert("1万日元是多少"), (10000.0, "JPY", "MYR"))
+        self.assertIsNone(friday_fx.parse_convert("100马币是多少"))
+        self.assertEqual(friday_fx.parse_alert("新币到3.5告诉我"), ("SGD", 3.5, "MYR", ""))
+        self.assertEqual(friday_fx.parse_alert("美金跌破4.3提醒我")[3], "below")
+
+    def test_alerts_fire_once(self):
+        import friday_fx
+
+        table = {"MYR": 4.4, "SGD": 1.3}
+        rates = self.rates(table)
+        alerts = friday_fx.FxAlerts(os.path.join(self.tmp, "fx.json"), rates)
+        self.assertIn("涨到 RM 3.40 以上", alerts.add("SGD", 3.4))
+        self.assertEqual(alerts.check("老板"), [])
+        rates.table["MYR"] = 4.5  # 新币涨了:4.5/1.3 = 3.46
+        said = alerts.check("老板")
+        self.assertIn("新币汇率到了", said[0])
+        self.assertEqual(alerts.items, [])
+        with self.assertRaises(ValueError):
+            alerts.add("XXX", 1)
+
+    def test_offline(self):
+        import friday_fx
+
+        def fetch(url):
+            raise OSError("offline")
+        with self.assertRaises(ValueError):
+            friday_fx.Rates(fetch=fetch).rate("USD", "MYR")
+
+
 if __name__ == "__main__":
     unittest.main()

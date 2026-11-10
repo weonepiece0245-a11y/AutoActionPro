@@ -589,6 +589,9 @@ function fillSettings() {
     const dl = hl.downloads;
     $("downloadsNote").textContent = dl ? `下载文件夹:${dl.files} 个文件,${dl.gb}GB${dl.messy ? " ⚠ 有点乱" : ""}` : "下载文件夹";
   }
+  const cb = s.clipboard;
+  $("clipRow").hidden = !cb;
+  if (cb) { $("setClip").checked = cb.enabled; $("clipClear").textContent = `清空(${cb.count} 段)`; }
   const df = s.defender;
   $("virusQuick").parentElement.parentElement.hidden = !df;
   if (df) {
@@ -867,6 +870,8 @@ $("photoSort").onclick = () => {
   if (!confirm(`把${folder ? "“" + folder + "”" : "“图片”文件夹"}最上层的照片和视频,按拍摄月份分进“2026-11”这样的子文件夹?整理错了可以撤销。`)) return;
   saveSetting({ sort_photos: folder }, 6000);
 };
+$("setClip").onchange = (e) => saveSetting({ clipboard: e.target.checked });
+$("clipClear").onclick = () => { if (confirm("清空剪贴板历史?")) saveSetting({ clipboard_clear: true }); };
 $("virusQuick").onclick = () => saveSetting({ virus_scan: "quick" }, 5000);
 $("virusFull").onclick = () => {
   if (!confirm("全面扫描要一两个小时甚至更久,这段时间电脑会慢一点。扫完会告诉你,也会推到手机。要开始吗?")) return;
