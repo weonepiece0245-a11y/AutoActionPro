@@ -8270,12 +8270,60 @@ class SpotifyTest(TempDirTest):
             ("GET", "/me/player/devices"): (200, {"devices": [{"id": "PC", "type": "Computer"}]}),
         }
         spotify = self.make(routes)
+        spotify.sleep = lambda seconds: None
         with mock.patch.dict(os.environ, {"FRIDAY_SPOTIFY_CLIENT_ID": "c" * 32}):
             self.login(spotify)
             text = spotify.play("歌")
         self.assertIn("点一下播放", text)
         self.assertEqual(self.opened, ["spotify:track:9"])
         self.assertTrue(any("device_id=PC" in url for _, url, _ in self.calls))
+
+    def test_waits_for_freshly_opened_spotify(self):
+        """刚打开的 Spotify 要十几秒才连上:等它,转过去,再放。"""
+        seen = {"devices": 0}
+
+        def devices(body):
+            seen["devices"] += 1
+            return (200, {"devices": []}) if seen["devices"] < 5 else (200, {"devices": [{"id": "PC", "type": "Computer"}]})
+        plays = []
+
+        def play(body):
+            plays.append(body)
+            return (404, {"error": {"reason": "NO_ACTIVE_DEVICE"}}) if len(plays) < 3 else (204, {})
+        routes = {
+            ("POST", "/api/token"): (200, {"access_token": "AT", "refresh_token": "RT", "expires_in": 3600}),
+            ("GET", "/search"): (200, {"tracks": {"items": [{"uri": "spotify:track:7", "name": "那天下雨了",
+                                                            "artists": [{"name": "周杰伦"}]}]}}),
+            ("PUT", "/me/player/play"): play,
+            ("GET", "/me/player/devices"): devices,
+            ("PUT", "/me/player"): (204, {}),
+        }
+        spotify = self.make(routes)
+        waits = []
+        spotify.sleep = waits.append
+        with mock.patch.dict(os.environ, {"FRIDAY_SPOTIFY_CLIENT_ID": "c" * 32}):
+            self.login(spotify)
+            text = spotify.play("那天下雨了")
+        self.assertEqual(text, "好,放周杰伦的《那天下雨了》。")
+        self.assertEqual(self.opened, ["spotify:"])  # 只打开了 Spotify,没退回“请你点播放”
+        self.assertTrue(any(m == "PUT" and url.endswith("/me/player") for m, url, _ in self.calls))  # 先转到这台电脑
+        self.assertLessEqual(sum(waits), 30)
+
+    def test_gives_up_after_waiting(self):
+        routes = {
+            ("POST", "/api/token"): (200, {"access_token": "AT", "refresh_token": "RT", "expires_in": 3600}),
+            ("GET", "/search"): (200, {"tracks": {"items": [{"uri": "spotify:track:7", "name": "歌", "artists": []}]}}),
+            ("PUT", "/me/player/play"): (404, {"error": {"reason": "NO_ACTIVE_DEVICE"}}),
+            ("GET", "/me/player/devices"): (200, {"devices": []}),
+        }
+        spotify = self.make(routes)
+        waits = []
+        spotify.sleep = waits.append
+        with mock.patch.dict(os.environ, {"FRIDAY_SPOTIFY_CLIENT_ID": "c" * 32}):
+            self.login(spotify)
+            text = spotify.play("歌")
+        self.assertIn("点一下播放", text)
+        self.assertEqual(sum(waits), 20.0)
 
     def test_callback_route_needs_no_token(self):
         ctx = friday_web.WebContext(friday_web.Hub(), queue.Queue(), friday_web.WebApprover(friday_web.Hub()),

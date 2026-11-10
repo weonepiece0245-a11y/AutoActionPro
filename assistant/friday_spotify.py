@@ -59,6 +59,7 @@ class Spotify:
         self.request = request
         self.open_uri = open_uri or (lambda uri: os.startfile(uri))  # noqa: S606
         self.clock = clock
+        self.sleep = time.sleep  # 测试时换掉,不真的等
         self.pending: dict[str, str] = {}  # state -> code_verifier(登录进行中)
         self.lock = threading.Lock()
         try:
@@ -163,13 +164,21 @@ class Spotify:
         status, data = self.api("PUT", "/me/player/play", body=body)
         if status in (200, 202, 204):
             return f"好,放{label}。"
-        reason = (data.get("error") or {}).get("reason", "") if isinstance(data.get("error"), dict) else ""
+        reason = self._reason(data)
         if status == 404 or reason == "NO_ACTIVE_DEVICE":
+            # 电脑上的 Spotify 刚打开、还没放过歌时,Spotify 当它“没在用”:
+            # 等它连上服务器,先把播放转到这台电脑,再放(刚转过去时偶尔要再试一两次)
             device = self._device()
             if device:
-                status, data = self.api("PUT", "/me/player/play", {"device_id": device}, body=body)
-                if status in (200, 202, 204):
-                    return f"好,放{label}。"
+                self.api("PUT", "/me/player", body={"device_ids": [device], "play": False})
+                for attempt in range(3):
+                    self.sleep(1.0 + attempt)
+                    status, data = self.api("PUT", "/me/player/play", {"device_id": device}, body=body)
+                    reason = self._reason(data)
+                    if status in (200, 202, 204):
+                        return f"好,放{label}。"
+                    if status == 403 or reason == "PREMIUM_REQUIRED":
+                        break
         if status == 403 or reason == "PREMIUM_REQUIRED":
             if fallback_uri:
                 self.open_uri(fallback_uri)
@@ -177,23 +186,37 @@ class Spotify:
             return "Spotify 只让 Premium 账号用程序直接播放。"
         if fallback_uri:
             self.open_uri(fallback_uri)
-            return f"Spotify 没在播放的设备,我把{label}在 Spotify 里打开了,点一下播放。"
-        return "Spotify 没有在用的播放设备,先打开 Spotify 再说一次。"
+            return (f"电脑上的 Spotify 还没连上(刚打开的 Spotify 要先放过一次歌才算“在用”),"
+                    f"我把{label}在 Spotify 里打开了,点一下播放;之后我就能直接控制。")
+        return "Spotify 没有在用的播放设备,先打开 Spotify 放一下歌,再跟我说一次。"
 
-    def _device(self) -> str | None:
-        for attempt in range(2):
+    @staticmethod
+    def _reason(data: dict) -> str:
+        error = data.get("error") if isinstance(data, dict) else None
+        return error.get("reason", "") if isinstance(error, dict) else ""
+
+    def _device(self, wait: float = 20.0) -> str | None:
+        """找这台电脑上的 Spotify;没开就打开它,最多等 20 秒让它连上 Spotify。"""
+        opened = False
+        waited = 0.0
+        while True:
             status, data = self.api("GET", "/me/player/devices")
-            devices = data.get("devices") or [] if status == 200 else []
+            devices = (data.get("devices") or []) if status == 200 else []
+            devices = [d for d in devices if not d.get("is_restricted")]
             if devices:
-                active = [d for d in devices if d.get("is_active")] or [d for d in devices if d.get("type") == "Computer"] or devices
-                return active[0].get("id")
-            if attempt == 0:
+                pick = ([d for d in devices if d.get("is_active")] or [d for d in devices if d.get("type") == "Computer"]
+                        or devices)
+                return pick[0].get("id")
+            if not opened:
                 try:
-                    self.open_uri("spotify:")  # 打开电脑上的 Spotify,等它连上
+                    self.open_uri("spotify:")  # 打开电脑上的 Spotify
                 except OSError:
                     return None
-                time.sleep(5)
-        return None
+                opened = True
+            if waited >= wait:
+                return None
+            self.sleep(2.0)
+            waited += 2.0
 
     def play(self, query: str) -> str:
         query = query.strip()
