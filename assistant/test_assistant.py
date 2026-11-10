@@ -85,6 +85,7 @@ import friday_budget  # noqa: E402
 import friday_backup  # noqa: E402
 import friday_desktop  # noqa: E402
 import friday_locks  # noqa: E402
+import friday_images  # noqa: E402
 import friday_wake  # noqa: E402
 import friday_cloud  # noqa: E402
 import friday_care  # noqa: E402
@@ -6230,6 +6231,68 @@ class LocksTest(TempDirTest):
                                                            session, env, save))
             app.apply_lock_settings({"lock_minutes": 10}, session, env, save)
             self.assertTrue(session.window_lock.enabled())
+
+
+class PhotoTest(TempDirTest):
+    def jpeg(self, size=(3000, 2000)):
+        from PIL import Image
+
+        out = io.BytesIO()
+        Image.new("RGB", size, (200, 100, 50)).save(out, "JPEG")
+        return out.getvalue()
+
+    def test_prepare_shrinks_photos(self):
+        from PIL import Image
+
+        block = friday_images.prepare(self.jpeg())
+        self.assertEqual(block["source"]["media_type"], "image/jpeg")
+        image = Image.open(io.BytesIO(base64.b64decode(block["source"]["data"])))
+        self.assertEqual(max(image.size), friday_images.MAX_SIDE)
+        self.assertIsNone(friday_images.prepare(b"not an image"))
+
+    def test_photo_is_sent_once_then_replaced(self):
+        client = FakeClient(FakeStream(["已记账:午饭 RM 15"]), FakeStream(["好的"]))
+        bot = app.Assistant(client=client)
+        block = friday_images.prepare(self.jpeg((100, 100)))
+        bot.ask("帮我记账", lambda t: None, images=[block])
+        sent = client.calls[0]["messages"][-1]["content"]
+        self.assertEqual([b["type"] for b in sent], ["image", "text"])
+        bot.ask("谢谢", lambda t: None)
+        history = client.calls[1]["messages"][0]["content"]
+        self.assertNotIn("image", [b["type"] for b in history])  # 第二次提问不再带着照片(省钱)
+        self.assertIn("照片", history[0]["text"])
+        self.assertIn("附了 1 张照片", bot.exchanges[0]["q"])
+
+    def test_discord_photo_reaches_claude(self):
+        asked = []
+
+        class FakeAssistant:
+            toolbox = SimpleNamespace(approve=None)
+
+            def ask(self, question, on_text, on_status, images=None):
+                asked.append((question, images))
+                return "已记账"
+
+        replies = []
+        message = dmod.DiscordMessage("", replies.append, lambda q: True, images=[self.jpeg((200, 300))])
+        app.handle_discord(message, FakeAssistant(), app.default_persona())
+        question, images = asked[0]
+        self.assertIn("附了 1 张照片", question)
+        self.assertEqual(images[0]["type"], "image")
+        self.assertEqual(replies, ["已记账"])
+        bad = dmod.DiscordMessage("", replies.append, lambda q: True, images=[b"xx"])
+        app.handle_discord(bad, FakeAssistant(), app.default_persona())
+        self.assertIn("打不开", replies[-1])
+
+    def test_gate_passes_photos(self):
+        events = queue.Queue()
+        Path(self.tmp, "d.json").write_text(json.dumps({"owners": [{"id": 42, "name": "me"}]}))
+        gate = dmod.DiscordGate(Path(self.tmp, "d.json"), events, lambda ch, t: None, lambda t: None)
+        gate.handle(42, "me", True, "", "dm", images=[b"JPEG"])
+        self.assertEqual(events.get_nowait()[1].images, [b"JPEG"])
+        self.assertTrue(dmod.is_image_attachment("IMG_1.JPG", None))
+        self.assertTrue(dmod.is_image_attachment("x", "image/png"))
+        self.assertFalse(dmod.is_image_attachment("a.ogg", "audio/ogg"))
 
 
 if __name__ == "__main__":

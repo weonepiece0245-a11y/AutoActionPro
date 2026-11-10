@@ -70,6 +70,15 @@ def invite_url(bot_id: str) -> str:
 
 AUDIO_SUFFIXES = (".ogg", ".oga", ".opus", ".mp3", ".m4a", ".wav", ".webm", ".aac", ".flac")
 MAX_AUDIO_BYTES = 20 * 1024 * 1024
+IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_IMAGES = 4
+
+
+def is_image_attachment(filename: str, content_type: str | None) -> bool:
+    kind = (content_type or "").lower().split(";")[0]
+    return kind in IMAGE_TYPES or (not kind and filename.lower().endswith(IMAGE_SUFFIXES))
 
 
 def is_audio_attachment(filename: str, content_type: str | None) -> bool:
@@ -84,7 +93,8 @@ class DiscordMessage:
 
     def __init__(self, text: str, reply: Callable[[str], None], ask: Callable[[str], bool],
                  audio: bytes | None = None, reply_voice: Callable[[str], None] | None = None,
-                 private: bool = True) -> None:
+                 private: bool = True, images: list[bytes] | None = None) -> None:
+        self.images = images or []  # 手机发来的照片(原始文件)
         self.private = private  # 私信;False 表示在服务器频道里,别人也看得到回答
         self.text = text
         self.reply = reply
@@ -189,7 +199,8 @@ class DiscordGate:
 
     # ---- 收到私信 ----
     def handle(self, author_id: int, author_name: str, is_dm: bool, text: str, channel,
-               mentioned: bool = False, named_channel: bool = False, audio: bytes | None = None) -> None:
+               mentioned: bool = False, named_channel: bool = False, audio: bytes | None = None,
+               images: list[bytes] | None = None) -> None:
         """is_dm:私信;mentioned:消息里 @ 了机器人;named_channel:频道名带 friday / 星期五。
 
         服务器频道里只有 @ 机器人,或在专用频道里说话时才处理,免得和朋友聊天时它插嘴。
@@ -200,7 +211,7 @@ class DiscordGate:
         if author_id not in self.owners:
             self._stranger(author_id, author_name, is_dm, text, channel)
             return
-        if not text and not audio:
+        if not text and not audio and not images:
             return
         if self.waiting_for == author_id:
             self.answers.put(audio if audio and not text else text)
@@ -217,22 +228,23 @@ class DiscordGate:
                     if result == "ok":
                         self.send(channel, "🔓 已解锁,2 小时内不用再输入。")
                         if self.held is not None and self.held[0] == author_id:
-                            _, text, audio, held_dm, mentioned = self.held
+                            _, text, audio, held_dm, mentioned, images = self.held
                             self.held = None
-                            self._queue(author_id, text, channel, held_dm, audio)
+                            self._queue(author_id, text, channel, held_dm, audio, images)
                         return
                     if result == "paused":
                         self.send(channel, "🔒 验证码错太多次,手机遥控已暂停。请在电脑上恢复。")
                         return
                     self.send(channel, "验证码不对,再看一下验证器 App 里“星期五”的 6 位数字。")
                     return
-                self.held = (author_id, text, audio, is_dm, mentioned)
+                self.held = (author_id, text, audio, is_dm, mentioned, images)
                 self.send(channel, "🔒 手机遥控已上锁。请私信我验证器 App 里“星期五”现在的 6 位数字,解锁后接着处理你刚才的消息。")
                 return
             lock.touch()
-        self._queue(author_id, text, channel, is_dm, audio)
+        self._queue(author_id, text, channel, is_dm, audio, images)
 
-    def _queue(self, author_id: int, text: str, channel, is_dm: bool, audio: bytes | None) -> None:
+    def _queue(self, author_id: int, text: str, channel, is_dm: bool, audio: bytes | None,
+               images: list[bytes] | None = None) -> None:
         send_voice = self.send_voice
         self.events.put(("discord", DiscordMessage(
             text,
@@ -241,6 +253,7 @@ class DiscordGate:
             audio=audio,
             reply_voice=(lambda answer: send_voice(channel, answer)) if send_voice else None,
             private=is_dm,
+            images=images,
         )))
 
     def _stranger(self, author_id: int, author_name: str, is_dm: bool, text: str, channel) -> None:
@@ -384,15 +397,18 @@ class DiscordBridge:
             mentioned = client.user in message.mentions
             text = re.sub(rf"<@!?{client.user.id}>", "", message.content or "").strip()
             audio = None
-            for attachment in message.attachments:  # 语音消息是一个音频附件
-                if is_audio_attachment(attachment.filename, attachment.content_type):
+            images = []
+            for attachment in message.attachments:  # 语音消息是一个音频附件;照片最多 4 张
+                if audio is None and is_audio_attachment(attachment.filename, attachment.content_type):
                     if attachment.size <= MAX_AUDIO_BYTES:
                         audio = await attachment.read()
-                    break
+                elif is_image_attachment(attachment.filename, attachment.content_type) and len(images) < MAX_IMAGES:
+                    if attachment.size <= MAX_IMAGE_BYTES:
+                        images.append(await attachment.read())
             self.gate.handle(
                 message.author.id, str(message.author), isinstance(message.channel, discord.DMChannel), text,
                 message.channel, mentioned=mentioned, named_channel=is_friday_channel(getattr(message.channel, "name", "")),
-                audio=audio,
+                audio=audio, images=images,
             )
 
         return client
