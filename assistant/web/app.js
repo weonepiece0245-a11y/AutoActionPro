@@ -275,20 +275,82 @@ $("setSpeak").onchange = (e) => setSpeak(e.target.checked);
 $("setFollowUp").onchange = (e) => { followUpOn = e.target.checked; savePrefs("friday-followup", followUpOn); };
 $("setBarge").onchange = (e) => { bargeOn = e.target.checked; savePrefs("friday-barge", bargeOn); if (!bargeOn) stopBargeWatch(); };
 
+// ---------- 附件:贴截图、拖文件、点回形针 ----------
+const MAX_FILES = 4, MAX_FILE_MB = 20;
+let pending = [];
+function showAttachments() {
+  const box = $("attachList");
+  box.replaceChildren();
+  pending.forEach((file, i) => {
+    const chip = document.createElement("span");
+    chip.className = "attach-chip";
+    const size = file.size >= 1048576 ? (file.size / 1048576).toFixed(1) + "MB" : Math.max(1, Math.round(file.size / 1024)) + "KB";
+    chip.textContent = `📎 ${file.name} · ${size}`;
+    const x = document.createElement("button");
+    x.type = "button"; x.textContent = "×"; x.title = "拿掉";
+    x.onclick = () => { pending.splice(i, 1); showAttachments(); };
+    chip.append(x);
+    box.append(chip);
+  });
+  box.hidden = !pending.length;
+}
+function addFiles(list) {
+  for (const file of list) {
+    if (pending.length >= MAX_FILES) { toast(`一次最多 ${MAX_FILES} 个附件`); break; }
+    if (file.size > MAX_FILE_MB * 1048576) { toast(`${file.name} 太大了(最多 ${MAX_FILE_MB}MB)`); continue; }
+    const named = file.name ? file : new File([file], `截图_${new Date().toTimeString().slice(0, 8).replace(/:/g, "")}.png`, { type: file.type });
+    pending.push(named);
+  }
+  showAttachments();
+  $("input").focus();
+}
+$("attachBtn").onclick = () => $("attachInput").click();
+$("attachInput").onchange = (e) => { addFiles(e.target.files); e.target.value = ""; };
+document.addEventListener("paste", (e) => {
+  if (isLocked || !$("settings").hidden) return;
+  const files = [...(e.clipboardData?.items || [])].filter((it) => it.kind === "file").map((it) => it.getAsFile()).filter(Boolean);
+  if (files.length) { e.preventDefault(); addFiles(files); }
+});
+let dragDepth = 0;
+window.addEventListener("dragenter", (e) => { if (isLocked || !e.dataTransfer?.types?.includes("Files")) return; e.preventDefault(); dragDepth++; $("dropZone").hidden = false; });
+window.addEventListener("dragover", (e) => { if (e.dataTransfer?.types?.includes("Files")) e.preventDefault(); });
+window.addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; $("dropZone").hidden = true; } });
+window.addEventListener("drop", (e) => {
+  e.preventDefault(); dragDepth = 0; $("dropZone").hidden = true;
+  if (!isLocked && e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files);
+});
+async function uploadPending() {
+  const ids = [];
+  for (const file of pending) {
+    const r = await api("/api/attach", file, { "X-File-Name": encodeURIComponent(file.name), "Content-Type": file.type || "application/octet-stream" })
+      .catch(() => ({ error: "上传失败" }));
+    if (r.error) { toast(`${file.name}:${r.error}`, 4000); return null; }
+    ids.push(r.id);
+  }
+  return ids;
+}
+
 async function sendText(text) {
-  if (!text || busy) return;
+  if ((!text && !pending.length) || busy) return;
   ensureAudio();
   stopSpeaking();
   followUpTurn = null;  // 打字问的,不用接着听
   removeChips();
   beep(660, 0.06);
-  const r = await api("/api/ask", { text, speak: speakOn });
+  let attachments = [];
+  if (pending.length) {
+    const ids = await uploadPending();
+    if (!ids) return;
+    attachments = ids;
+    pending = []; showAttachments();
+  }
+  const r = await api("/api/ask", { text, speak: speakOn, attachments });
   if (r.error) toast(r.error);
 }
 $("form").onsubmit = (e) => {
   e.preventDefault();
   const text = $("input").value.trim();
-  if (!text || busy) return;
+  if ((!text && !pending.length) || busy) return;
   $("input").value = "";
   sendText(text);
 };

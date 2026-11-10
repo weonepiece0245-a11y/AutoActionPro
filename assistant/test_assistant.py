@@ -4219,6 +4219,20 @@ class WebServerTest(TempDirTest):
         self.assertEqual(self.request("POST", "/api/unlock", json.dumps({"pin": "2468"}), self.auth())[0], 200)
         self.assertEqual(self.request("POST", "/api/ask", json.dumps({"text": "x"}), self.auth())[0], 202)
 
+    def test_attach_then_ask(self):
+        status, body = self.request("POST", "/api/attach", b"%PDF-1.4", self.auth(
+            {"X-File-Name": "%E6%8A%A5%E5%91%8A.pdf", "Content-Type": "application/pdf"}))
+        self.assertEqual(status, 200)
+        upload = json.loads(body)
+        self.assertEqual(upload["name"], "报告.pdf")
+        self.request("POST", "/api/ask", json.dumps({"text": "总结一下", "attachments": [upload["id"]]}), self.auth())
+        kind, event = self.events.get_nowait()
+        self.assertEqual(event["files"], [("报告.pdf", "application/pdf", b"%PDF-1.4")])
+        self.assertEqual(self.ctx.uploads, {})  # 用过就清掉
+        self.request("POST", "/api/ask", json.dumps({"text": "", "attachments": [upload["id"]]}), self.auth())
+        self.assertTrue(self.events.empty())  # 同一个附件不能用两次,也没有文字:不发
+        self.assertEqual(self.request("POST", "/api/attach", b"x")[0], 403)  # 没口令
+
     def test_ask_and_command_go_to_main_loop(self):
         status, _ = self.request("POST", "/api/ask", json.dumps({"text": " 你好 ", "speak": True}), self.auth())
         self.assertEqual(status, 202)
@@ -6263,7 +6277,7 @@ class PhotoTest(TempDirTest):
         history = client.calls[1]["messages"][0]["content"]
         self.assertNotIn("image", [b["type"] for b in history])  # 第二次提问不再带着照片(省钱)
         self.assertIn("照片", history[0]["text"])
-        self.assertIn("附了 1 张照片", bot.exchanges[0]["q"])
+        self.assertIn("附了 1 个照片或文件", bot.exchanges[0]["q"])
 
     def test_photo_turn_drops_its_now_invalid_thinking(self):
         thinking = SimpleNamespace(type="thinking", thinking="", signature="sig")
@@ -6541,6 +6555,56 @@ class SendToPhoneTest(TempDirTest):
         app.handle_discord(public, FakeAssistant(), app.default_persona())
         self.assertEqual(len(sent_here), 1)  # 频道里不发
         self.assertTrue(any("只能私信" in r for r in replies))
+
+
+class WindowAttachmentTest(TempDirTest):
+    def docx(self, text):
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w") as archive:
+            archive.writestr("word/document.xml", f"<w:document><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p>"
+                                                  "<w:p><w:r><w:t>第二段 &amp; 结尾</w:t></w:r></w:p></w:body></w:document>")
+        return out.getvalue()
+
+    def test_file_blocks(self):
+        from PIL import Image
+
+        png = io.BytesIO()
+        Image.new("RGB", (40, 40)).save(png, "PNG")
+        blocks, problems = friday_images.file_blocks([
+            ("截图.png", "image/png", png.getvalue()),
+            ("报告.pdf", "application/pdf", b"%PDF-1.4"),
+            ("合同.docx", "application/octet-stream", self.docx("第一段")),
+            ("笔记.txt", "text/plain", "你好".encode("gb18030")),
+            ("音乐.mp3", "audio/mpeg", b"ID3"),
+        ])
+        self.assertEqual([b["type"] for b in blocks], ["image", "document", "document", "document"])
+        self.assertEqual(blocks[1]["source"]["media_type"], "application/pdf")
+        self.assertEqual(blocks[2]["source"]["data"], "第一段\n第二段 & 结尾")
+        self.assertEqual(blocks[3]["source"]["data"], "你好")
+        self.assertEqual(len(problems), 1)
+        self.assertIn("音乐.mp3", problems[0])
+
+    def test_window_question_with_files(self):
+        asked = []
+
+        class FakeAssistant:
+            toolbox = None
+
+            def ask(self, question, on_text, on_status, images=None):
+                asked.append((question, images))
+                return "这是一份报告"
+
+        session = app.WebSession(FakeAssistant(), app.default_persona(), friday_web.Hub())
+        result = session.ask("总结一下", files=[("报告.pdf", "application/pdf", b"%PDF-1.4")])
+        self.assertEqual(result, "这是一份报告")
+        question, blocks = asked[0]
+        self.assertIn("附了 1 个照片或文件:报告.pdf", question)
+        self.assertTrue(question.endswith("总结一下"))
+        self.assertEqual(blocks[0]["type"], "document")
+        users = [e["text"] for e in session.hub.history if e["type"] == "user"]
+        self.assertEqual(users, ["📎 报告.pdf\n总结一下"])
+        self.assertIsNone(session.ask("", files=[("a.mp3", "audio/mpeg", b"x")]))  # 全都看不了:不问 Claude
+        self.assertEqual(len(asked), 1)
 
 
 if __name__ == "__main__":

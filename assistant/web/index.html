@@ -32,6 +32,7 @@
     <div class="lock-error" id="lockError"></div>
   </div>
 </div>
+<div id="dropZone" hidden><div>放开就加进去 📎<small>图片、PDF、Word、文字文件</small></div></div>
 <header class="topbar">
   <div class="brand">
     <span class="brand-mark">五</span>
@@ -83,11 +84,16 @@
 <main class="console">
   <div class="banner" id="banner" hidden></div>
   <div class="log" id="log" aria-live="polite"></div>
+  <div class="attach-list" id="attachList" hidden></div>
   <form class="inputbar" id="form" autocomplete="off">
     <button type="button" class="icon-btn mic" id="micBtn" title="语音输入(说完停顿 2 秒自动结束)" aria-label="语音输入">
       <svg viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/><path d="M19 11a7 7 0 0 1-14 0M12 18v3"/></svg>
     </button>
-    <input id="input" type="text" placeholder="对星期五说点什么……(回车发送)" maxlength="4000">
+    <button type="button" class="icon-btn" id="attachBtn" title="附加图片或文件(也可以直接贴上截图、把文件拖进窗口)" aria-label="附加文件">
+      <svg viewBox="0 0 24 24"><path d="M21 12.5l-8.5 8.5a5 5 0 0 1-7-7L14 5.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4L15.5 8.6"/></svg>
+    </button>
+    <input type="file" id="attachInput" multiple hidden accept="image/*,.pdf,.docx,.txt,.md,.csv,.json,.log">
+    <input id="input" type="text" placeholder="对星期五说点什么……(回车发送;可以贴截图、拖文件进来)" maxlength="4000">
     <button type="submit" class="send" id="sendBtn">发送 <span>SEND</span></button>
     <button type="button" class="icon-btn toggle" id="speakBtn" title="朗读回答" aria-label="朗读回答" aria-pressed="true">
       <svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path class="wave" d="M16 8.5a4.5 4.5 0 0 1 0 7M18.5 6a8 8 0 0 1 0 12"/></svg>

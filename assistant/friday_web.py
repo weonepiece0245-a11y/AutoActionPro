@@ -37,6 +37,7 @@ STATIC_FILES = {
 APPROVAL_TIMEOUT = 300  # 秒:确认请求等这么久没人点,就当拒绝
 ALLOW_ALL_SECONDS = 10 * 60  # 点了“这段时间都允许”:只管 10 分钟,之后又会逐一询问
 MAX_UPLOAD = 25 * 1024 * 1024
+MAX_ATTACHMENTS = 4
 HISTORY_TYPES = {"user", "done", "status", "error", "reminder", "cleared"}  # 重新打开窗口时补发的事件
 
 
@@ -310,6 +311,7 @@ class WebContext:
         self.settings: Callable[[dict], dict] | None = None  # 齿轮设定:保存设置,返回 {"ok"/"error", "message"}
         self.activity = {"listening": False, "speaking": False}  # 窗口正在录音/朗读(唤醒功能要暂停)
         self.lock = None  # 窗口锁(friday_locks.WindowLock);锁着时只能解锁
+        self.uploads: dict[str, tuple] = {}  # 贴进来、拖进来的文件:id -> (文件名, 类型, 内容, 时间)
 
     def locked(self) -> bool:
         return self.lock is not None and self.lock.locked
@@ -437,6 +439,22 @@ def make_handler(ctx: WebContext):
                     ctx.activity.update(listening=False, speaking=False)
                 self.close_connection = True
 
+        def _attach(self, body: bytes) -> None:
+            from urllib.parse import unquote
+
+            name = unquote(self.headers.get("X-File-Name") or "附件")[:120].replace("/", "_").replace("\\", "_")
+            mime = (self.headers.get("Content-Type") or "application/octet-stream").split(";")[0].strip().lower()
+            if not body:
+                return self._json(400, {"error": "文件是空的"})
+            now = time.time()
+            for key in [k for k, v in ctx.uploads.items() if now - v[3] > 600]:  # 10 分钟没用就丢掉
+                ctx.uploads.pop(key, None)
+            if len(ctx.uploads) >= 8:
+                return self._json(429, {"error": "附件太多了,先发出去再加"})
+            upload_id = uuid.uuid4().hex
+            ctx.uploads[upload_id] = (name, mime, body, now)
+            return self._json(200, {"id": upload_id, "name": name, "size": len(body)})
+
         def _lock_request(self, path: str, body: bytes) -> None:
             if ctx.lock is None:
                 return self._json(404, {"error": "没有设置窗口锁"})
@@ -481,14 +499,21 @@ def make_handler(ctx: WebContext):
             try:
                 if url.path == "/api/voice":
                     return self._voice(body)
+                if url.path == "/api/attach":
+                    return self._attach(body)
                 data = json.loads(body or b"{}")
             except (ValueError, UnicodeDecodeError):
                 return self._json(400, {"error": "请求格式不对"})
             if url.path == "/api/ask":
                 text = str(data.get("text") or "").strip()
-                if not text:
+                ids = [str(i) for i in (data.get("attachments") or [])][:MAX_ATTACHMENTS]
+                files = [ctx.uploads.pop(i)[:3] for i in ids if i in ctx.uploads]
+                if not text and not files:
                     return self._json(400, {"error": "内容是空的"})
-                ctx.events.put(("web", {"text": text, "speak": bool(data.get("speak")), "source": "web"}))
+                event = {"text": text, "speak": bool(data.get("speak")), "source": "web"}
+                if files:
+                    event["files"] = files
+                ctx.events.put(("web", event))
                 return self._json(202, {"ok": True})
             if url.path == "/api/approve":
                 ok = ctx.approver.answer(str(data.get("id") or ""), str(data.get("answer") or "no"))
