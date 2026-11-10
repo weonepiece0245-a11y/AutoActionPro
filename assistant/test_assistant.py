@@ -6062,5 +6062,54 @@ class SelectToAskTest(unittest.TestCase):
         self.assertFalse(session.speak_enabled)
 
 
+class AuditFixesTest(TempDirTest):
+    def test_allow_all_expires_and_resets(self):
+        now = [100.0]
+        approver = friday_web.WebApprover(friday_web.Hub(), clock=lambda: now[0])
+        approver.allow_all = True
+        self.assertTrue(approver("执行命令:dir"))
+        now[0] += friday_web.ALLOW_ALL_SECONDS + 1
+        self.assertFalse(approver.allow_all)  # 10 分钟后又要逐一询问(没开窗口时直接拒绝)
+        self.assertFalse(approver("执行命令:dir"))
+        approver.allow_all = True
+        approver.reset_allow_all()
+        self.assertFalse(approver.allow_all)
+
+    def test_log_rotates(self):
+        log = Path(self.tmp, "friday.log")
+        log.write_bytes(b"x" * (app.LOG_MAX_BYTES + 1))
+        old_out, old_err = sys.stdout, sys.stderr
+        try:
+            app.redirect_output(str(log))
+            print("hello")
+            sys.stdout.flush()
+            stream = sys.stdout
+        finally:
+            sys.stdout, sys.stderr = old_out, old_err
+        stream.close()
+        self.assertTrue(Path(str(log) + ".old").exists())
+        self.assertLess(log.stat().st_size, 1000)
+
+    def test_channel_messages_are_marked_and_cannot_approve(self):
+        asked, replies = [], []
+
+        class FakeAssistant:
+            def __init__(self):
+                self.toolbox = SimpleNamespace(approve=friday_web.WebApprover(friday_web.Hub()))
+
+            def ask(self, question, on_text, on_status):
+                asked.append(question)
+                ok = self.toolbox.approve("执行命令:dir")
+                return "做了" if ok else "没做"
+
+        message = dmod.DiscordMessage("帮我看看邮件", replies.append, lambda q: True, private=False)
+        bot = FakeAssistant()
+        app.handle_discord(message, bot, app.default_persona())
+        self.assertTrue(asked[0].startswith(app.CHANNEL_TAG))
+        self.assertTrue(any("私信" in r for r in replies))
+        self.assertIn("没做", replies)
+        self.assertIsNone(bot.toolbox.approve.remote)  # 用完就恢复
+
+
 if __name__ == "__main__":
     unittest.main()

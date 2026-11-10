@@ -130,6 +130,8 @@ FRIDAY_PROMPT = """你是“星期五”,{call_me}的私人 AI 助手。
   做早报时可以顺便看看今天的日历、待办和未读邮件。
 - 消息以“[来自手机 Discord 语音]”开头时,是{call_me}在手机上发的语音消息(已转成文字,可能有同音字),
   你的回答会被读成语音发回去:像说话一样口语化、简短,不要用列表和符号。
+- 消息以“[来自 Discord 服务器频道”开头时,频道里的其他人也看得到你的回答:不要说出邮件、日历、记忆、记账、
+  联系人、文件内容这些私人信息,也不要做需要确认的操作;要用到这些就请{call_me}改用私信找你。
 - 消息以“[来自手机 Discord]”开头时,{call_me}在用手机远程找你,人不在电脑前:回答简短,适合在手机上看;
   需要确认的操作会发到 Discord 请{call_me}确认。看屏幕时要把看到的内容说清楚,因为{call_me}看不到电脑屏幕。
 - {call_me}让你看屏幕时用 screen;必须在界面上点来点去才能办的事,用 control 控制鼠标键盘,
@@ -698,6 +700,9 @@ def answer(assistant: Assistant, persona: Persona, question: str, voice, reply=N
     return keep_going
 
 
+CHANNEL_TAG = "[来自 Discord 服务器频道,频道里的其他人也看得到你的回答]"
+
+
 def handle_discord(message, assistant: Assistant, persona: Persona, transcribe=None) -> bool:
     """处理主人从手机 Discord 发来的消息:回答发回 Discord,需要确认的操作也去 Discord 问。
 
@@ -705,7 +710,8 @@ def handle_discord(message, assistant: Assistant, persona: Persona, transcribe=N
     """
     text = message.text
     reply = message.reply
-    tag = "[来自手机 Discord]"
+    private = getattr(message, "private", True)
+    tag = "[来自手机 Discord]" if private else CHANNEL_TAG
     if getattr(message, "audio", None):
         print("\n\n  📱 Discord 语音消息,识别中……")
         try:
@@ -722,11 +728,18 @@ def handle_discord(message, assistant: Assistant, persona: Persona, transcribe=N
         message.reply(f"🎤 听到:{heard}")
         text = f"{text}\n{heard}".strip() if text else heard
         reply = message.reply_voice
-        tag = "[来自手机 Discord 语音]"
+        tag = "[来自手机 Discord 语音]" if private else CHANNEL_TAG
     print(f"\n\n  📱 Discord:{text}")
     approver = getattr(assistant.toolbox, "approve", None)
     if hasattr(approver, "remote"):
-        approver.remote = message.ask
+        if private:
+            approver.remote = message.ask
+        else:  # 频道里大家都看得到:要确认的操作一律不做,请主人私信
+            def refuse(question: str) -> bool:
+                message.reply("这一步要你确认,频道里别人也看得到,我先不做。请私信我再说一次。")
+                return False
+
+            approver.remote = refuse
     try:
         return answer(assistant, persona, f"{tag}{text}", None, reply=reply)
     finally:
@@ -1274,7 +1287,8 @@ def web_discord(message, session: WebSession, transcribe=None) -> None:
     if session.assistant is None:
         reply(session.startup_error or "星期五还没准备好")
         return
-    quick = session._quick_reply(message.text) if message.text and getattr(message, "audio", None) is None else None
+    quick = (session._quick_reply(message.text)
+             if message.text and getattr(message, "audio", None) is None and getattr(message, "private", True) else None)
     if quick:
         hub.broadcast({"type": "status", "text": "⚡ 电脑上直接办好了,没有问 Claude(不花钱)"})
         session.assistant.remember_local("[来自手机 Discord]" + message.text, quick)
@@ -1303,6 +1317,9 @@ def web_loop(session: WebSession, events: queue.Queue, transcribe=None) -> None:
         elif kind == "command" and payload == "clear":
             if session.assistant is not None:
                 session.assistant.reset()
+                approver = getattr(session.assistant.toolbox, "approve", None)
+                if hasattr(approver, "reset_allow_all"):
+                    approver.reset_allow_all()  # 新话题:之前的“都允许”作废
             session.hub.broadcast({"type": "cleared"})
         elif kind == "command" and str(payload).startswith("model:"):
             router = getattr(session, "router", None)
@@ -2148,8 +2165,16 @@ def web_state(session: WebSession, toolbox: Toolbox, discord, cache: dict) -> di
             "settings": settings_state(session, meter)}
 
 
+LOG_MAX_BYTES = 5 * 1024 * 1024
+
+
 def redirect_output(log_file: str) -> None:
     """没有黑色窗口时(pythonw),把输出写进日志文件,出问题时方便排查。"""
+    try:  # 太大了就换一个新的(旧的留一份 .old),免得越积越大
+        if os.path.getsize(log_file) > LOG_MAX_BYTES:
+            os.replace(log_file, log_file + ".old")
+    except OSError:
+        pass
     stream = open(log_file, "a", encoding="utf-8", buffering=1)
     sys.stdout = sys.stderr = stream
     print(f"\n==== 星期五启动 {datetime.datetime.now():%Y-%m-%d %H:%M:%S} ====")
@@ -2310,7 +2335,7 @@ def run_web(args) -> None:
         GoogleWatcher(account, google_notice).start()
 
     url = friday_web.app_url(ctx.port, token)
-    print(f"星期五界面已启动:{url}", flush=True)
+    print(f"星期五界面已启动:http://127.0.0.1:{ctx.port}/(口令不写进记录)", flush=True)
     if not args.no_browser:
         friday_web.open_window(url, profile_dir)
 

@@ -35,6 +35,7 @@ STATIC_FILES = {
     "/orb.js": ("orb.js", "text/javascript; charset=utf-8"),
 }
 APPROVAL_TIMEOUT = 300  # 秒:确认请求等这么久没人点,就当拒绝
+ALLOW_ALL_SECONDS = 10 * 60  # 点了“这段时间都允许”:只管 10 分钟,之后又会逐一询问
 MAX_UPLOAD = 25 * 1024 * 1024
 HISTORY_TYPES = {"user", "done", "status", "error", "reminder", "cleared"}  # 重新打开窗口时补发的事件
 
@@ -230,10 +231,11 @@ class WebApprover:
     remote 不为空时(正在回答手机 Discord 的消息),改为在 Discord 上问。
     """
 
-    def __init__(self, hub: Hub, timeout: float = APPROVAL_TIMEOUT) -> None:
+    def __init__(self, hub: Hub, timeout: float = APPROVAL_TIMEOUT, clock: Callable[[], float] = time.monotonic) -> None:
         self.hub = hub
         self.timeout = timeout
-        self.allow_all = False
+        self.clock = clock
+        self.allow_until = 0.0  # “这段时间都允许”到什么时候
         self.remote: Callable[[str], bool] | None = None
         self.lock = threading.Lock()
         self.pending: dict[str, list] = {}
@@ -244,6 +246,18 @@ class WebApprover:
         if self.allow_all:
             return True
         return self._ask(action, always=False)
+
+    @property
+    def allow_all(self) -> bool:
+        return self.clock() < self.allow_until
+
+    @allow_all.setter
+    def allow_all(self, on: bool) -> None:
+        self.allow_until = self.clock() + ALLOW_ALL_SECONDS if on else 0.0
+
+    def reset_allow_all(self) -> None:
+        """换新话题时:之前的“都允许”作废。"""
+        self.allow_until = 0.0
 
     def confirm(self, action: str) -> bool:
         if self.remote is not None:
@@ -263,7 +277,7 @@ class WebApprover:
             answer = self.pending.pop(request_id, [None, None])[1]
         self.hub.broadcast({"type": "approval_done", "id": request_id, "answer": answer or "timeout"})
         if answer == "all" and not always:
-            self.allow_all = True
+            self.allow_until = self.clock() + ALLOW_ALL_SECONDS
         return answer in ("yes", "all")
 
     def answer(self, request_id: str, value: str) -> bool:

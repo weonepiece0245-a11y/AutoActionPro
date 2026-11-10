@@ -909,7 +909,7 @@ function showApproval(ev) {
   $("approvalNote").textContent = ev.always ? "这一步每次都要确认。" : "5 分钟内不处理会自动拒绝。";
   $("approval").hidden = false;
   beep(520, 0.2);
-  $("approveYes").focus();
+  $("approveNo").focus(); // 默认停在“拒绝”:正在打字时按到 Enter / 空格,不会误点允许
 }
 function hideApproval() { $("approval").hidden = true; approvalId = null; }
 async function answerApproval(answer) {

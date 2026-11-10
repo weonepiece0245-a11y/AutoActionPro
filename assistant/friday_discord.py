@@ -83,7 +83,9 @@ class DiscordMessage:
     """
 
     def __init__(self, text: str, reply: Callable[[str], None], ask: Callable[[str], bool],
-                 audio: bytes | None = None, reply_voice: Callable[[str], None] | None = None) -> None:
+                 audio: bytes | None = None, reply_voice: Callable[[str], None] | None = None,
+                 private: bool = True) -> None:
+        self.private = private  # 私信;False 表示在服务器频道里,别人也看得到回答
         self.text = text
         self.reply = reply
         self.ask = ask
@@ -208,6 +210,7 @@ class DiscordGate:
             ask=lambda question: self.ask(channel, question, author_id),
             audio=audio,
             reply_voice=(lambda answer: send_voice(channel, answer)) if send_voice else None,
+            private=is_dm,
         )))
 
     def _stranger(self, author_id: int, author_name: str, is_dm: bool, text: str, channel) -> None:
