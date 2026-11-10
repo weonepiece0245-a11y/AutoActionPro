@@ -6414,6 +6414,22 @@ class WatchTest(TempDirTest):
         with self.assertRaises(ValueError):
             watch.add_steam("https://store.steampowered.com/app/570940/DARK_SOULS/")  # 已经在追踪
 
+    def test_steam_search_by_chinese_name(self):
+        asked = []
+
+        def fetch(url):
+            asked.append(url)
+            if "storesearch" in url:
+                hit = "schinese" in url
+                return json.dumps({"items": [{"id": 570940, "name": "影之刃零"}] if hit else []}).encode()
+            return self.fetch(url)
+
+        self.assertEqual(friday_watch.steam_find("影之刃零", fetch), (570940, "影之刃零"))
+        self.assertIn("l=english", asked[0])
+        with self.assertRaises(ValueError) as ctx:
+            friday_watch.steam_find("不存在的游戏", lambda url: b'{"items": []}')
+        self.assertIn("web_search", str(ctx.exception))
+
     def test_steam_target_price(self):
         watch = self.make()
         watch.add_steam("dark souls", target=50)

@@ -22,7 +22,7 @@ from typing import Callable
 CHECK_EVERY = 2 * 60 * 60  # 每样东西隔这么久看一次
 MAX_WATCHES = 20
 MAX_PAGE = 2 * 1024 * 1024
-STEAM_SEARCH = "https://store.steampowered.com/api/storesearch/?term={term}&l=english&cc=MY"
+STEAM_SEARCH = "https://store.steampowered.com/api/storesearch/?term={term}&l={lang}&cc=MY"
 STEAM_DETAILS = "https://store.steampowered.com/api/appdetails?appids={appid}&cc=my&filters=price_overview,basic"
 STEAM_URL = re.compile(r"store\.steampowered\.com/app/(\d+)")
 
@@ -75,11 +75,12 @@ def steam_find(name_or_url: str, fetcher: Fetch = fetch) -> tuple[int, str]:
     found = STEAM_URL.search(name_or_url)
     if found:
         return int(found.group(1)), ""
-    data = json.loads(fetcher(STEAM_SEARCH.format(term=urllib.parse.quote(name_or_url))))
-    items = data.get("items") or []
-    if not items:
-        raise ValueError(f"Steam 上找不到“{name_or_url}”,试试英文名")
-    return int(items[0]["id"]), items[0].get("name", "")
+    term = urllib.parse.quote(name_or_url)
+    for lang in ("english", "schinese", "tchinese"):  # 英文名找不到就用简体、繁体中文名再找
+        items = json.loads(fetcher(STEAM_SEARCH.format(term=term, lang=lang))).get("items") or []
+        if items:
+            return int(items[0]["id"]), items[0].get("name", "")
+    raise ValueError(f"Steam 上找不到“{name_or_url}”:可以先用 web_search 查它的英文名或 Steam 商店链接再试")
 
 
 def steam_price(appid: int, fetcher: Fetch = fetch) -> dict:
