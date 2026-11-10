@@ -545,6 +545,14 @@ function fillSettings() {
     const dl = hl.downloads;
     $("downloadsNote").textContent = dl ? `下载文件夹:${dl.files} 个文件,${dl.gb}GB${dl.messy ? " ⚠ 有点乱" : ""}` : "下载文件夹";
   }
+  const sc = s.scenes;
+  $("sceneGroup").hidden = !sc;
+  if (sc && !$("sceneGroup").contains(document.activeElement)) {
+    $("sceneHelp").textContent = "每行写一步,能用的写法:" + sc.help + "。说出任何一种“说法”就会执行(也可以说“开启XX模式”)。";
+    const list = $("sceneList");
+    list.replaceChildren();
+    for (const scene of sc.list) list.append(sceneCard(scene));
+  }
   const mt = s.memtidy;
   $("memtidyGroup").hidden = !mt;
   if (mt) {
@@ -750,6 +758,27 @@ $("pinSave").onclick = async () => {
     for (const id of ["pinOld", "pinNew", "pinNew2"]) $(id).value = "";
 };
 $("setLockMinutes").onchange = (e) => saveSetting({ lock_minutes: Number(e.target.value) });
+function sceneCard(scene) {
+  const card = document.createElement("div");
+  card.className = "scene-card";
+  const name = Object.assign(document.createElement("input"), { className: "mini-input", value: scene.name || "", placeholder: "名字,例如 睡觉" });
+  const triggers = Object.assign(document.createElement("input"), { className: "mini-input wide", value: (scene.triggers || []).join(", "), placeholder: "说法,例如 我要睡了, 晚安" });
+  const steps = Object.assign(document.createElement("textarea"), { className: "scene-steps", value: scene.steps || "", rows: 4, placeholder: "说 晚安,老板\n静音\n锁屏" });
+  const row = document.createElement("div");
+  row.className = "set-ctl";
+  const button = (label, onclick) => Object.assign(document.createElement("button"), { type: "button", className: "mini-btn", textContent: label, onclick });
+  row.append(
+    button("保存", () => saveSetting({ scene_save: { name: name.value, triggers: triggers.value, steps: steps.value, old_name: scene.name || "" } }, 4000)),
+    button("试一下", () => scene.name ? saveSetting({ scene_run: scene.name }, 5000) : toast("先保存")),
+    button("删除", () => { if (!scene.name) { card.remove(); return; } if (confirm(`删掉“${scene.name}”场景?`)) saveSetting({ scene_remove: scene.name }); }),
+  );
+  const head = document.createElement("div");
+  head.className = "scene-head";
+  head.append(name, triggers);
+  card.append(head, steps, row);
+  return card;
+}
+$("sceneAdd").onclick = () => { const card = sceneCard({}); $("sceneList").append(card); card.querySelector("input").focus(); };
 $("memtidyRun").onclick = async () => {
   const btn = $("memtidyRun"); btn.disabled = true; btn.textContent = "整理中…";
   await saveSetting({ memtidy_run: true }, 5000);

@@ -635,6 +635,27 @@ EXPENSE_TOOL = {
     },
 }
 
+SCENE_TOOL = {
+    "name": "scene",
+    "description": (
+        "场景模式:一句话在电脑上做好几件事(用户说出场景的说法时,星期五会直接执行,不经过你)。"
+        "list 看有哪些场景;set 新建或修改(name 名字,triggers 触发的说法用逗号分开,steps 一行一步);"
+        "remove 删掉;run 马上执行一次。steps 能用的写法:说 一句话 / 音量 30 / 静音 / 暂停音乐 / 下一首 / "
+        "打开 程序名 / 打开网址 https://… / 关掉 程序1, 程序2 / 游戏模式 / 锁屏 / 显示桌面 / 深色模式 / 浅色模式 / 等 3 秒。"
+        "不能关机、重启、睡眠、执行命令。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["list", "set", "remove", "run"]},
+            "name": {"type": "string"},
+            "triggers": {"type": "string", "description": "set:触发的说法,逗号分开,例如 我要睡了, 晚安"},
+            "steps": {"type": "string", "description": "set:一行一步"},
+        },
+        "required": ["action"],
+    },
+}
+
 SPENDING_TOOL = {
     "name": "ai_spending",
     "description": ("星期五自己这个月用 Claude 花了多少钱(马币):总数、预算用了几成、花得最多的几天、各模型、照这个速度月底多少。"
@@ -758,6 +779,7 @@ class Toolbox:
         self.phone_override = None  # 正在回答手机消息时:发回那段对话
         self.mailwatch = None  # 重要邮件提醒(friday_mailwatch.MailWatch),接了 Google 才有
         self.meter = None  # 花费统计(给 ai_spending 用)
+        self.scenes = None  # 场景模式(friday_scenes.Scenes)
         self.budget = None
         if ledger is not None and google is not None:
             from friday_ledger import sheet_sync
@@ -797,6 +819,7 @@ class Toolbox:
             "send_to_phone": self._send_to_phone,
             "mail_alert": self._mail_alert,
             "ai_spending": self._ai_spending,
+            "scene": self._scene,
         }
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
 
@@ -822,6 +845,8 @@ class Toolbox:
             tools = tools + [MAIL_ALERT_TOOL]
         if self.meter is not None:
             tools = tools + [SPENDING_TOOL]
+        if self.scenes is not None and self.local_tools:
+            tools = tools + [SCENE_TOOL]
         if self.todos is not None and self.google is None:  # 接了 Google 就用 Google Tasks 当待办清单
             tools = tools + [TODO_TOOL]
         if self.computer is not None and self.computer.available:
@@ -915,6 +940,29 @@ class Toolbox:
                 return ledger.summary(args.get("month") or ""), False
             if action == "delete":
                 return ledger.delete(args.get("id") or "last"), False
+        except ValueError as e:
+            return str(e), True
+        return f"不支持的 action:{action}", True
+
+    def _scene(self, args, on_status):
+        import friday_scenes
+
+        scenes = self.scenes
+        action = args.get("action")
+        try:
+            if action == "list":
+                return scenes.describe(), False
+            if action == "set":
+                return scenes.set_scene(args.get("name", ""), args.get("triggers", ""), args.get("steps", "")), False
+            if action == "remove":
+                return scenes.remove(str(args.get("name") or "")), False
+            if action == "run":
+                scene = next((s for s in scenes.scenes if s["name"] == args.get("name")), None)
+                if scene is None:
+                    return f"没有“{args.get('name')}”这个场景", True
+                said, done = friday_scenes.run(scene, self.computer)
+                on_status(f"执行场景:{scene['name']}")
+                return (f"说:{said};" if said else "") + "做了:" + ";".join(done), False
         except ValueError as e:
             return str(e), True
         return f"不支持的 action:{action}", True

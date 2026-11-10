@@ -53,6 +53,9 @@ class QuickCommands:
         self.toolbox = toolbox
         self.meter = meter  # 花费统计(“这个月钱花在哪里”)
         self.budget = budget
+        self.scenes = None  # 场景模式(friday_scenes.Scenes)
+        self.on_say = None  # 场景里“说”的那一步:马上读出来
+        self.silent = False  # 这次的回答已经读过了(场景模式),不用再读
         self.clock = clock
         self.rules: list[tuple[re.Pattern, Callable]] = [
             (re.compile(r"^(现在)?(几点了?|几点钟|什么时间了?|现在时间)$"), self._time),
@@ -77,11 +80,16 @@ class QuickCommands:
         ]
 
     def handle(self, text: str) -> str | None:
+        self.silent = False
         if not quick_enabled() or not text or len(text) > 30:
             return None
         sentence = clean(text)
         if not sentence:
             return None
+        if self.scenes is not None:
+            scene = self.scenes.find(text) or self.scenes.find(sentence)
+            if scene is not None:
+                return self._scene(scene)
         for pattern, action in self.rules:
             found = pattern.match(sentence)
             if found:
@@ -152,6 +160,15 @@ class QuickCommands:
             return None
         result = self._computer().do("open_app", name)
         return result + "。" if result.startswith("已打开") else None  # 没找到:交给 Claude(它会试游戏、网页)
+
+    # ---------- 场景 ----------
+    def _scene(self, scene: dict) -> str:
+        import friday_scenes
+
+        said, done = friday_scenes.run(scene, getattr(self.toolbox, "computer", None), on_say=self.on_say)
+        self.silent = self.on_say is not None
+        summary = f"「{scene['name']}」场景:" + (";".join(done) if done else "做好了")
+        return (said + "\n" + summary) if said else summary
 
     # ---------- 花费 ----------
     def _spending(self, found):

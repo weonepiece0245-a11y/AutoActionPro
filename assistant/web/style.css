@@ -329,3 +329,11 @@ body.locked > *:not(#lockScreen) { visibility: hidden !important; }
 .tidy-item { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 1.5; padding: 6px 8px; border: 1px solid var(--cyan-line); border-radius: 6px; background: rgba(34,211,238,.03); cursor: pointer; }
 .tidy-item input { margin-top: 3px; accent-color: var(--accent); }
 .nowrap { white-space: nowrap; }
+#sceneList { display: flex; flex-direction: column; gap: 10px; margin: 6px 0; }
+.scene-card { display: flex; flex-direction: column; gap: 6px; padding: 10px; border: 1px solid var(--cyan-line); border-radius: 8px; background: rgba(34,211,238,.03); }
+.scene-head { display: flex; gap: 6px; flex-wrap: wrap; }
+.scene-head .mini-input:first-child { width: 110px; }
+.scene-head .mini-input.wide { flex: 1; min-width: 160px; width: auto; }
+.scene-steps { font: inherit; font-size: 13px; line-height: 1.5; color: var(--text); background: rgba(0,0,0,.35); border: 1px solid var(--cyan-line); border-radius: 6px; padding: 6px 8px; resize: vertical; }
+.scene-steps:focus { outline: none; border-color: var(--accent); }
+.scene-card .set-ctl { justify-content: flex-end; }

@@ -90,6 +90,7 @@ import friday_events  # noqa: E402
 import friday_watch  # noqa: E402
 import friday_mailwatch  # noqa: E402
 import friday_memtidy  # noqa: E402
+import friday_scenes  # noqa: E402
 import friday_wake  # noqa: E402
 import friday_cloud  # noqa: E402
 import friday_care  # noqa: E402
@@ -6775,6 +6776,99 @@ class ApiKeyTailTest(unittest.TestCase):
             self.assertNotIn("sk-ant-usr", state)  # 整把钥匙不会送到窗口
         with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}):
             self.assertIsNone(app.api_key_tail())
+
+
+class ScenesTest(TempDirTest):
+    def computer(self):
+        calls = []
+
+        class FakeComputer:
+            available = True
+
+            def do(self, action, value=""):
+                calls.append((action, value))
+                return {"lock_screen": "已锁屏", "open_app": f"已打开 {value}"}.get(action, "ok")
+
+            def close_programs(self, names):
+                calls.append(("close", tuple(names)))
+                return ["chrome"]
+
+        return FakeComputer(), calls
+
+    def test_parse_steps(self):
+        steps = friday_scenes.parse_steps("说 晚安,老板\n等 3 秒\n音量 20\n静音\n关掉 chrome、spotify\n打开网址 https://x.com\n"
+                                          "打开 Spotify\n锁屏\n# 注释\n")
+        self.assertEqual([a for a, _ in steps], ["say", "wait", "volume", "silence", "close", "open_url", "open_app",
+                                                 "lock_screen"])
+        for bad in ("关机", "执行 rm -rf", "音量 300", "等 60 秒", ""):
+            with self.assertRaises(ValueError):
+                friday_scenes.parse_steps(bad)
+
+    def test_run_in_order_and_speak_first(self):
+        computer, calls = self.computer()
+        spoken = []
+        scene = {"name": "睡觉", "triggers": ["我要睡了"], "steps": "说 晚安\n等 1 秒\n静音\n关掉 chrome, explorer\n锁屏"}
+        said, done = friday_scenes.run(scene, computer, sleep=lambda s: calls.append(("wait", s)),
+                                       on_say=lambda t: calls.append(("say", t)) or spoken.append(t))
+        self.assertEqual(said, "")
+        self.assertEqual(calls, [("say", "晚安"), ("wait", 1), ("volume_down", "100"), ("close", ("chrome",)),
+                                 ("lock_screen", "")])  # explorer 不能关
+        self.assertIn("关掉了 chrome", done)
+
+    def test_triggers_and_editing(self):
+        scenes = friday_scenes.Scenes(os.path.join(self.tmp, "s.json"))
+        self.assertEqual([s["name"] for s in scenes.scenes], ["睡觉", "开工"])  # 第一次有两个范例
+        self.assertEqual(scenes.find("我要睡了!")["name"], "睡觉")
+        self.assertEqual(scenes.find("开启开工模式")["name"], "开工")
+        self.assertIsNone(scenes.find("我要睡了吗还是"))
+        with self.assertRaises(ValueError):
+            scenes.set_scene("打游戏", "晚安", "游戏模式")  # “晚安”已经是睡觉的说法
+        with self.assertRaises(ValueError):
+            scenes.set_scene("打游戏", "", "游戏模式")
+        self.assertIn("说“开黑”", scenes.set_scene("打游戏", "开黑, 打游戏了", "游戏模式\n音量 60"))
+        scenes.set_scene("睡觉了", "我要睡了", "锁屏", old_name="睡觉")  # 改名
+        reopened = friday_scenes.Scenes(os.path.join(self.tmp, "s.json"))
+        self.assertEqual([s["name"] for s in reopened.scenes], ["睡觉了", "开工", "打游戏"])
+        self.assertIn("删掉", reopened.remove("开工"))
+
+    def test_quick_command_runs_scene_without_claude(self):
+        computer, calls = self.computer()
+        quick = friday_quick.QuickCommands(SimpleNamespace(computer=computer))
+        quick.scenes = friday_scenes.Scenes(os.path.join(self.tmp, "s.json"))
+        spoken = []
+        quick.on_say = spoken.append
+        self.enterContext(mock.patch.object(friday_scenes.time, "sleep", lambda s: None))
+        reply = quick.handle("我要睡了")
+        self.assertIn("「睡觉」场景", reply)
+        self.assertTrue(quick.silent)  # 已经读过“晚安”,回答不再读一次
+        self.assertEqual(spoken, ["晚安,老板,早点休息。"])
+        self.assertIn(("lock_screen", ""), calls)
+        quick.on_say = None
+        self.assertTrue(quick.handle("开工").startswith("开工了,今天也加油。"))
+        self.assertFalse(quick.silent)
+
+    def test_tool_and_settings(self):
+        computer, calls = self.computer()
+        toolbox = self.make_toolbox()
+        toolbox.computer = computer
+        toolbox.scenes = friday_scenes.Scenes(os.path.join(self.tmp, "s.json"))
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+        result = toolbox.run(tool_use("scene", {"action": "set", "name": "电影", "triggers": "看电影",
+                                                "steps": "音量 50\n深色模式"}), lambda s: None)
+        self.assertNotIn("is_error", result)
+        self.assertIn("「电影」", toolbox.run(tool_use("scene", {"action": "list"}), lambda s: None)["content"])
+        self.assertTrue(toolbox.run(tool_use("scene", {"action": "set", "name": "x", "triggers": "y",
+                                                       "steps": "关机"}), lambda s: None)["is_error"])
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.quick = SimpleNamespace(scenes=toolbox.scenes, on_say=None)
+        env = str(Path(self.tmp, ".env"))
+        out = app.apply_settings({"scene_save": {"name": "电影", "triggers": "看电影, 电影时间", "steps": "音量 40",
+                                                 "old_name": "电影"}}, session, toolbox, env)
+        self.assertTrue(out["ok"])
+        self.assertIn("「电影」", app.apply_settings({"scene_run": "电影"}, session, toolbox, env)["message"])
+        self.assertIn("error", app.apply_settings({"scene_save": {"name": "a", "triggers": "b", "steps": "乱写"}},
+                                                  session, toolbox, env))
+        self.assertEqual(app.scenes_state(session)["list"][-1]["triggers"], ["看电影", "电影时间"])
 
 
 if __name__ == "__main__":

@@ -1182,7 +1182,8 @@ class WebSession:
         if quick:
             hub.broadcast({"type": "status", "text": "⚡ 电脑上直接办好了,没有问 Claude(不花钱)"})
             hub.broadcast({"type": "delta", "text": quick})
-            stream = self._new_stream() if speak else None
+            already_spoken = getattr(self.quick, "silent", False)
+            stream = self._new_stream() if speak and not already_spoken else None
             if stream is not None:
                 stream.feed(quick)
             hub.broadcast({"type": "done", "text": quick, "source": source,
@@ -1615,6 +1616,15 @@ def apply_lock_settings(payload: dict, session, env: Path, save_env_value) -> di
     return {"done": done}
 
 
+def scenes_state(session) -> dict | None:
+    import friday_scenes
+
+    scenes = getattr(getattr(session, "quick", None), "scenes", None)
+    if scenes is None:
+        return None
+    return {"list": scenes.scenes, "help": friday_scenes.STEP_HELP}
+
+
 def memtidy_state(session) -> dict | None:
     tidy = getattr(session, "memtidy", None)
     if tidy is None:
@@ -1736,6 +1746,7 @@ def settings_state(session, meter=None) -> dict:
         "event_lead": __import__("friday_events").lead_minutes() if google_ready(session) else None,
         "mail_alert": mail_alert_state(session),
         "memtidy": memtidy_state(session),
+        "scenes": scenes_state(session),
         "weekly_report": __import__("friday_alerts").weekly_enabled(),
         "quick": __import__("friday_quick").quick_enabled() if getattr(session, "quick", None) is not None else None,
         "wake": wake_state(session),
@@ -1883,6 +1894,28 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         done.extend(lock_result.get("done", []))
         if "secret" in lock_result:
             return {"ok": True, "message": "按下面的步骤加到验证器 App 里", "secret": lock_result["secret"]}
+    if "scene_save" in payload or "scene_remove" in payload or "scene_run" in payload:
+        import friday_scenes
+
+        scenes = getattr(getattr(session, "quick", None), "scenes", None)
+        if scenes is None:
+            return {"error": "场景模式没有开"}
+        try:
+            if "scene_save" in payload:
+                data = payload["scene_save"] if isinstance(payload["scene_save"], dict) else {}
+                done.append(scenes.set_scene(data.get("name", ""), data.get("triggers", ""), data.get("steps", ""),
+                                             old_name=str(data.get("old_name") or "")))
+            elif "scene_remove" in payload:
+                done.append(scenes.remove(str(payload["scene_remove"])))
+            else:
+                scene = next((x for x in scenes.scenes if x["name"] == payload["scene_run"]), None)
+                if scene is None:
+                    return {"error": "没有这个场景"}
+                said, steps = friday_scenes.run(scene, getattr(toolbox, "computer", None),
+                                                on_say=getattr(session.quick, "on_say", None))
+                done.append(f"「{scene['name']}」:" + (";".join(steps) or "做好了"))
+        except ValueError as e:
+            return {"error": str(e)}
     if payload.get("memtidy_run") or "memtidy_apply" in payload or payload.get("memtidy_dismiss"):
         tidy = getattr(session, "memtidy", None)
         if tidy is None:
@@ -2787,6 +2820,10 @@ def run_web(args) -> None:
 
     session.quick = friday_quick.QuickCommands(toolbox, meter=session.meter, budget=getattr(session, "budget", None))
     toolbox.meter, toolbox.budget = session.meter, getattr(session, "budget", None)
+    import friday_scenes
+
+    toolbox.scenes = session.quick.scenes = friday_scenes.Scenes(os.path.join(data_dir, "friday_scenes.json"))
+    session.quick.on_say = lambda text: session.speak(text) if session.speak_enabled else None
     toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
     try:
         web_loop(session, events, voice_module.transcribe_audio)
