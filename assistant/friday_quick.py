@@ -56,6 +56,7 @@ class QuickCommands:
         self.scenes = None  # 场景模式(friday_scenes.Scenes)
         self.screentime = None  # 电脑使用时间(friday_screentime.ScreenTime)
         self.notes = None  # 速记本(friday_notes.Notes)
+        self.dates = None  # 生日和纪念日(friday_dates.Dates)
         self.on_say = None  # 场景里“说”的那一步:马上读出来
         self.silent = False  # 这次的回答已经读过了(场景模式),不用再读
         self.clock = clock
@@ -75,6 +76,7 @@ class QuickCommands:
             (re.compile(r"^(记账|记一笔|记)?(?P<item>[一-鿿A-Za-z][一-鿿A-Za-z ]{0,14}?)(花了|用了)?"
                         r"(rm|RM|Rm)?(?P<amount>\d{1,6}(\.\d{1,2})?)(块钱|块|元|令吉|马币|rm|ringgit)$"), self._expense),
             (re.compile(r"^打开(?P<app>[一-鿿A-Za-z0-9 ]{1,20})$"), self._open_app),
+            (re.compile(r"^(最近|接下来|这个月|下个月)?(有)?(谁|什么人)?(过)?(生日|的生日|纪念日|重要的日子)(吗|呢)?$"), self._dates),
             (re.compile(r"^(我)?(?P<when>今天|昨天|这周|这个星期|本周)?(用了?多久电脑|电脑用了?多久|玩了多久(游戏)?|打了多久游戏|"
                         r"游戏玩了多久|使用时间|屏幕时间|用电脑多久了?)$"), self._screen_time),
             (re.compile(r"^(你|星期五|AI|ai|Claude|claude)(这个月|本月|这月)?(的)?(钱|花费|费用|用量)?(都)?"
@@ -196,6 +198,12 @@ class QuickCommands:
             return None
         result = self._computer().do("open_app", name)
         return result + "。" if result.startswith("已打开") else None  # 没找到:交给 Claude(它会试游戏、网页)
+
+    # ---------- 生日 ----------
+    def _dates(self, found):
+        if self.dates is None or not (found.group(1) or found.group(3)):
+            return None  # 只说“生日”太含糊
+        return self.dates.describe_upcoming(30)
 
     # ---------- 使用时间 ----------
     def _screen_time(self, found):

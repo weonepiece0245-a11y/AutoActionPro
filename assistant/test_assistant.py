@@ -95,6 +95,7 @@ import friday_screentime  # noqa: E402
 import friday_cleanup  # noqa: E402
 import friday_notes  # noqa: E402
 import friday_guard  # noqa: E402
+import friday_dates  # noqa: E402
 import friday_wake  # noqa: E402
 import friday_cloud  # noqa: E402
 import friday_care  # noqa: E402
@@ -7125,6 +7126,59 @@ class KeyAndCreditAlertTest(TempDirTest):
         self.assertEqual(len(sent), 2)
         self.assertIn("钥匙失效", sent[0])
         self.assertIn("余额用完", sent[1])
+
+
+class DatesTest(TempDirTest):
+    def make(self, now, contacts=None):
+        self.now = [now]
+        return friday_dates.Dates(os.path.join(self.tmp, "d.json"), contacts=contacts, clock=lambda: self.now[0])
+
+    def test_reminds_three_days_before_and_on_the_day(self):
+        contacts_calls = []
+
+        def contacts():
+            contacts_calls.append(1)
+            return [{"name": "阿明", "month": 11, "day": 15, "year": 1995}]
+
+        dates = self.make(datetime.datetime(2026, 11, 10, 7, 0), contacts)
+        self.assertIn("记好了", dates.add("妈妈", 11, 13, "生日", 1961))
+        dates.add("我和老婆的结婚", 2, 29, "纪念日", 2020)
+        self.assertEqual(dates.due("老板"), [])  # 早上 8 点前不提醒
+        self.now[0] = datetime.datetime(2026, 11, 10, 9, 0)
+        said = dates.due("老板")
+        self.assertEqual(said, ["老板,3 天后(11/13)是妈妈的生日(65 岁)。要准备礼物或者想祝福的话,跟我说一声。"])
+        self.assertEqual(dates.due("老板"), [])  # 只说一次
+        self.now[0] = datetime.datetime(2026, 11, 12, 9, 0)
+        self.assertIn("3 天后(11/15)是阿明的生日(31 岁)", dates.due("老板")[0])
+        self.now[0] = datetime.datetime(2026, 11, 13, 9, 0)
+        self.assertEqual(dates.due("老板"), ["老板,今天是妈妈的生日(65 岁)。要我帮你想几句祝福的话吗?"])
+        self.assertEqual(len(contacts_calls), 3)  # 一天最多读一次 Google 联系人
+        text = dates.describe_upcoming(10)
+        self.assertIn("11/13 妈妈的生日(65 岁)(今天)", text)
+        self.assertIn("11/15 阿明的生日", text)
+        self.assertEqual(friday_dates.next_occurrence(2, 29, datetime.date(2026, 11, 13)), datetime.date(2027, 2, 28))
+        with self.assertRaises(ValueError):
+            dates.add("x", 13, 1)
+        self.assertIn("删掉", dates.remove("妈妈"))
+
+    def test_quick_tool_and_google(self):
+        dates = self.make(datetime.datetime(2026, 11, 10, 9, 0))
+        quick = friday_quick.QuickCommands(SimpleNamespace())
+        quick.dates = dates
+        self.assertIn("接下来 30 天没有", quick.handle("最近有谁生日"))
+        self.assertIsNone(quick.handle("生日"))
+        toolbox = self.make_toolbox()
+        toolbox.dates = dates
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+        result = toolbox.run(tool_use("dates", {"action": "add", "name": "爸爸", "month": 12, "day": 1, "kind": "生日"}),
+                             lambda s: None)
+        self.assertIn("12 月 1 日", result["content"])
+        self.assertIn("爸爸", toolbox.run(tool_use("dates", {"action": "upcoming", "days": 60}), lambda s: None)["content"])
+        account = FakeAccount({"people.connections.list": {"connections": [
+            {"names": [{"displayName": "阿明"}], "birthdays": [{"date": {"month": 11, "day": 15}}]},
+            {"names": [{"displayName": "没生日的人"}]}]}})
+        self.assertEqual(friday_dates.google_birthdays(SimpleNamespace(account=account))(),
+                         [{"name": "阿明", "month": 11, "day": 15, "year": None}])
 
 
 if __name__ == "__main__":

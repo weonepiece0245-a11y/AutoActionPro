@@ -635,6 +635,20 @@ EXPENSE_TOOL = {
     },
 }
 
+DATES_TOOL = {
+    "name": "dates",
+    "description": ("生日和纪念日(提前 3 天和当天会主动提醒用户;Google 联系人里填了生日的也会自动提醒)。"
+                    "用户提到某人的生日、纪念日(结婚、恋爱、忌日等)时,用 add 记下来(同时也可以 remember);"
+                    "upcoming 看接下来的日子(days 天数,默认 30);remove 删掉(name 关键词)。"),
+    "input_schema": {"type": "object", "properties": {
+        "action": {"type": "string", "enum": ["add", "upcoming", "remove"]},
+        "name": {"type": "string", "description": "add:是谁的(例如 妈妈、我和老婆的结婚)"},
+        "month": {"type": "integer"}, "day": {"type": "integer"},
+        "year": {"type": "integer", "description": "可选:出生或开始的年份(用来算几岁、几周年)"},
+        "kind": {"type": "string", "enum": ["生日", "纪念日", "其他"]},
+        "days": {"type": "integer"}}, "required": ["action"]},
+}
+
 NOTES_TOOL = {
     "name": "notes",
     "description": ("用户的速记本(用户说“记一下:……”时星期五已经直接存好了)。add 记一条;search 找笔记"
@@ -812,6 +826,7 @@ class Toolbox:
         self.screentime = None  # 电脑使用时间(friday_screentime.ScreenTime)
         self.cleanup = None  # (scan, list, recycle) 三个函数,由主程序接上
         self.notes = None  # 速记本(friday_notes.Notes)
+        self.dates = None  # 生日和纪念日(friday_dates.Dates)
         self.budget = None
         if ledger is not None and google is not None:
             from friday_ledger import sheet_sync
@@ -855,6 +870,7 @@ class Toolbox:
             "screen_time": self._screen_time,
             "cleanup": self._cleanup,
             "notes": self._notes,
+            "dates": self._dates,
         }
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
 
@@ -888,6 +904,8 @@ class Toolbox:
             tools = tools + [CLEANUP_TOOL]
         if self.notes is not None:
             tools = tools + [NOTES_TOOL]
+        if self.dates is not None:
+            tools = tools + [DATES_TOOL]
         if self.todos is not None and self.google is None:  # 接了 Google 就用 Google Tasks 当待办清单
             tools = tools + [TODO_TOOL]
         if self.computer is not None and self.computer.available:
@@ -981,6 +999,20 @@ class Toolbox:
                 return ledger.summary(args.get("month") or ""), False
             if action == "delete":
                 return ledger.delete(args.get("id") or "last"), False
+        except ValueError as e:
+            return str(e), True
+        return f"不支持的 action:{action}", True
+
+    def _dates(self, args, on_status):
+        action = args.get("action")
+        try:
+            if action == "add":
+                return self.dates.add(args.get("name", ""), args.get("month"), args.get("day"),
+                                      args.get("kind") or "生日", args.get("year")), False
+            if action == "upcoming":
+                return self.dates.describe_upcoming(int(args.get("days") or 30)), False
+            if action == "remove":
+                return self.dates.remove(str(args.get("name") or "")), False
         except ValueError as e:
             return str(e), True
         return f"不支持的 action:{action}", True

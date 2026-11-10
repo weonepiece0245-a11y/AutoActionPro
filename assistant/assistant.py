@@ -146,6 +146,7 @@ FRIDAY_PROMPT = """你是“星期五”,{call_me}的私人 AI 助手。
   {call_me}想等某个游戏降价、等网页有货或有变化,用 watch 追踪,星期五会在后台定时去看。
 - {call_me}在手机上想看电脑现在的画面(“截个图给我”),或要电脑上的文件(“把桌面上的报告发给我”),用 send_to_phone;
   只是要你自己看屏幕回答问题时用 screen。
+- {call_me}提到谁的生日、纪念日,用 dates 记下来(会提前 3 天和当天提醒);Google 联系人里的生日也会自动提醒。
 - {call_me}的速记本:“记一下:……”星期五会直接存;问“我上周记的那个……”“笔记里有没有……”用 notes 找。
 - {call_me}说“以后 XX 的邮件马上告诉我”“标题有 XX 的邮件提醒我”,用 mail_alert 加规则(新邮件一到就在电脑上说、推到手机)。{reminder_note}
 - 消息以“[定时任务]”开头时,是之前设好的任务到点了,{call_me}可能不在电脑前:
@@ -2481,6 +2482,21 @@ def start_memory_tidy(session, toolbox: Toolbox, data_dir: str):
     return session.memtidy
 
 
+def start_date_reminders(session, toolbox: Toolbox, interval: float = 15 * 60) -> None:
+    """生日和纪念日:每 15 分钟看一次,提前 3 天和当天提醒(早上 8 点后)。"""
+    def loop() -> None:
+        time.sleep(120)
+        while True:
+            def check() -> None:
+                for text in toolbox.dates.due(_call_me(session)):
+                    announce(session, text, "🎂", text)
+
+            _quietly(check)
+            time.sleep(interval)
+
+    threading.Thread(target=loop, daemon=True, name="friday-dates").start()
+
+
 def start_heartbeat(events: queue.Queue, data_dir: str, interval: float = 30) -> None:
     """每 30 秒往主循环送一个心跳;主循环处理到了就写心跳文件(主循环卡住,心跳就停,守护会发现)。"""
     def loop() -> None:
@@ -2971,6 +2987,12 @@ def run_web(args) -> None:
     import friday_notes
 
     toolbox.notes = session.quick.notes = friday_notes.Notes(os.path.join(data_dir, "friday_notes.json"))
+    import friday_dates
+
+    toolbox.dates = session.quick.dates = friday_dates.Dates(
+        os.path.join(data_dir, "friday_dates.json"),
+        contacts=friday_dates.google_birthdays(toolbox.google) if toolbox.google is not None else None)
+    start_date_reminders(session, toolbox)
     if toolbox.google is not None:  # 登录了 Google:笔记同时抄到 Google 文档(在后台抄,不拖慢)
         append = friday_notes.docs_sync(toolbox.google, toolbox.notes)
         toolbox.notes.sync = lambda line: threading.Thread(target=lambda: _quietly(lambda: append(line)),
