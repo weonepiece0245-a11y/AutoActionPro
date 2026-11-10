@@ -94,6 +94,7 @@ import friday_scenes  # noqa: E402
 import friday_screentime  # noqa: E402
 import friday_cleanup  # noqa: E402
 import friday_notes  # noqa: E402
+import friday_guard  # noqa: E402
 import friday_wake  # noqa: E402
 import friday_cloud  # noqa: E402
 import friday_care  # noqa: E402
@@ -7026,6 +7027,104 @@ class NotesTest(TempDirTest):
         insert = account.log[-1][1]["body"]["requests"][0]["insertText"]
         self.assertEqual(insert, {"location": {"index": 19}, "text": "[11-10] 周末去关丹\n"})
         self.assertEqual(friday_notes.Notes(os.path.join(self.tmp, "n.json")).doc_id, "doc1")
+
+
+class GuardTest(TempDirTest):
+    def make(self, alive=True):
+        self.now = [1000.0]
+        self.launched, self.killed = [], []
+        self.alive = [alive]
+        return friday_guard.Guard(Path(self.tmp), clock=lambda: self.now[0], alive=lambda pid: self.alive[0],
+                                  killer=self.killed.append, launcher=self.launched.append)
+
+    def beat(self, state="running", age=0):
+        data = {"time": self.now[0] - age, "pid": 4242, "state": state, "exe": "pythonw", "argv": ["--web", "--port", "47800"],
+                "script": "assistant.py"}
+        Path(self.tmp, friday_guard.HEARTBEAT).write_text(json.dumps(data))
+
+    def test_normal_running_and_quit(self):
+        guard = self.make()
+        self.beat()
+        self.assertEqual(guard.step(), "ok")
+        self.beat("quit")
+        self.assertEqual(guard.step(), "stop")
+        Path(self.tmp, friday_guard.HEARTBEAT).unlink()
+        self.assertEqual(guard.step(), "stop")
+        self.assertEqual(self.launched, [])
+
+    def test_crash_and_hang_restart_with_limit(self):
+        guard = self.make(alive=False)
+        self.beat()
+        self.assertEqual(guard.step(), "restarted")  # 进程不见了
+        self.assertEqual(friday_guard.read_heartbeat(Path(self.tmp))["state"], "restarting")
+        self.assertEqual(guard.step(), "ok")  # 等新的起来
+        self.assertEqual(friday_guard.take_crash_note(Path(self.tmp)), "星期五意外关掉了")
+        self.assertIsNone(friday_guard.take_crash_note(Path(self.tmp)))  # 只说一次
+        self.alive[0] = True
+        self.beat(age=friday_guard.HANG_SECONDS + 1)
+        self.assertEqual(guard.step(), "restarted")  # 卡死
+        self.assertEqual(self.killed, [4242])
+        self.beat(state="restarting", age=friday_guard.RESTART_WAIT + 1)
+        self.assertEqual(guard.step(), "restarted")  # 新的没起来
+        self.beat(age=friday_guard.HANG_SECONDS + 1)
+        self.assertEqual(guard.step(), "gave_up")  # 15 分钟内第 4 次:不再重开
+        self.assertEqual(len(self.launched), 3)
+        self.assertIn("先停下来了", friday_guard.take_crash_note(Path(self.tmp)))
+
+    def test_update_restart_waits(self):
+        guard = self.make(alive=False)
+        self.beat("restarting", age=30)
+        self.assertEqual(guard.step(), "ok")
+        self.assertEqual(self.launched, [])
+
+    def test_relaunch_command(self):
+        launched = []
+        with mock.patch.object(friday_guard.subprocess, "Popen", lambda cmd, **kw: launched.append(cmd)):
+            friday_guard.relaunch({"exe": "pythonw", "script": "/x/assistant.py",
+                                   "argv": ["--persona", "friday", "--web", "--no-browser", "--port", "47800"]})
+        self.assertEqual(launched[0], ["pythonw", "/x/assistant.py", "--persona", "friday", "--web", "--no-browser"])
+
+    def test_heartbeat_event_in_main_loop(self):
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        events = queue.Queue()
+        events.put(("heartbeat", self.tmp))
+        events.put(("eof", None))
+        app.web_loop(session, events)
+        self.assertEqual(friday_guard.read_heartbeat(Path(self.tmp))["state"], "running")
+
+
+class KeyAndCreditAlertTest(TempDirTest):
+    def test_key_expiry_and_low_credit(self):
+        state = friday_alerts.AlertState(os.path.join(self.tmp, "a.json"))
+        with mock.patch.dict(os.environ, {"FRIDAY_KEY_EXPIRES": "2026-12-10"}):
+            self.assertIsNone(friday_alerts.key_expiry_message(state, datetime.date(2026, 12, 5), "老板"))
+            text = friday_alerts.key_expiry_message(state, datetime.date(2026, 12, 7), "老板")
+            self.assertIn("3 天后(12/10)到期", text)
+            self.assertIsNone(friday_alerts.key_expiry_message(state, datetime.date(2026, 12, 7), "老板"))  # 一天一次
+            self.assertIn("明天到期", friday_alerts.key_expiry_message(state, datetime.date(2026, 12, 9), "老板"))
+            self.assertIn("今天到期", friday_alerts.key_expiry_message(state, datetime.date(2026, 12, 10), "老板"))
+            self.assertIn("已经过期", friday_alerts.key_expiry_message(state, datetime.date(2026, 12, 11), "老板"))
+            self.assertIsNone(friday_alerts.key_expiry_message(state, datetime.date(2026, 12, 20), "老板"))
+        budget = SimpleNamespace(remaining_usd=lambda: 2.4)
+        text = friday_alerts.low_credit_message(state, datetime.date(2026, 11, 20), budget, "老板")
+        self.assertIn("US$2.40", text)
+        self.assertIsNone(friday_alerts.low_credit_message(state, datetime.date(2026, 11, 20), budget, "老板"))
+        self.assertIsNone(friday_alerts.low_credit_message(state, datetime.date(2026, 11, 21),
+                                                           SimpleNamespace(remaining_usd=lambda: 10.0), "老板"))
+
+    def test_serious_api_errors_reach_phone(self):
+        sent = []
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.discord = SimpleNamespace(notify_owners=lambda text: sent.append(text))
+        session._alerted = {}
+        with mock.patch.object(app.threading, "Thread", lambda target, daemon=None, **kw: SimpleNamespace(start=target)):
+            session._alert_serious(anthropic.AuthenticationError("invalid x-api-key", status_code=401))
+            session._alert_serious(anthropic.AuthenticationError("invalid x-api-key", status_code=401))  # 6 小时内不重复
+            session._alert_serious(anthropic.APIStatusError("Your credit balance is too low", status_code=400))
+            session._alert_serious(anthropic.APIStatusError("overloaded", status_code=529))
+        self.assertEqual(len(sent), 2)
+        self.assertIn("钥匙失效", sent[0])
+        self.assertIn("余额用完", sent[1])
 
 
 if __name__ == "__main__":

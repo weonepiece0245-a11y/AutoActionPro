@@ -278,6 +278,8 @@
       <div class="set-row"><label for="setRate">汇率(本月花费用)</label>
         <span class="set-ctl">1 美元 = <input class="mini-input short" id="setRate" inputmode="decimal"> 马币<button type="button" class="mini-btn" id="saveRate">保存</button></span></div>
       <div class="set-row" id="apiKeyRow" hidden><span>Claude 钥匙 <b class="mono nowrap" id="apiKeyTail">—</b></span><span class="set-note">对照 Console“API 密钥”页里那串的最后 4 个字</span></div>
+      <div class="set-row"><label for="setKeyExpires">Claude 钥匙到期日(提前提醒,也推到手机)</label>
+        <span class="set-ctl"><input class="mini-input date" id="setKeyExpires" type="date"><button type="button" class="mini-btn" id="saveKeyExpires">保存</button></span></div>
       <div class="set-row"><span>版本 <b id="versionText">—</b></span><button type="button" class="mini-btn" id="updateBtn" title="从 GitHub 下载最新的星期五并自动重启">检查更新</button></div>
     </div>
     <div class="modal-note">设定会保存起来,下次打开还在。</div>

@@ -61,3 +61,6 @@ assistant/friday_tidy.json
 assistant/friday_scenes.json
 assistant/friday_screentime.json
 assistant/friday_notes.json*
+assistant/friday_heartbeat.json*
+assistant/friday_crash.json
+assistant/friday_guard.lock

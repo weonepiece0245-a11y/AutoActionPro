@@ -1220,6 +1220,7 @@ class WebSession:
             message = described[0] if described else f"出错了:{type(e).__name__}: {e}"
             print(f"回答出错:{type(e).__name__}: {e}", flush=True)
             hub.broadcast({"type": "error", "text": message})
+            self._alert_serious(e)
             return None
         # turn:这次回答的朗读编号(窗口用来知道什么时候说完,好接着听)
         hub.broadcast({"type": "done", "text": result, "source": source,
@@ -1229,6 +1230,26 @@ class WebSession:
         return result
 
     quick = None  # 简单指令(friday_quick.QuickCommands),run_web 设置
+    _alerted: dict = {}
+
+    def _alert_serious(self, error: BaseException) -> None:
+        """钥匙失效、余额用完这种要你处理的错:推到手机(同一种 6 小时最多一次)。"""
+        text = str(getattr(error, "message", "") or error).lower()
+        if isinstance(error, anthropic.AuthenticationError) or getattr(error, "status_code", None) == 401:
+            kind, alert = "key", ("🔑 星期五的 Claude 钥匙失效了(可能过期或被删了),现在没办法回答问题。"
+                                  "去 Console 建一把新钥匙,换进 Windows 环境变量 ANTHROPIC_API_KEY,再重开星期五。")
+        elif "credit balance" in text or "billing" in text:
+            kind, alert = "credit", "💳 Claude 账户的余额用完了,星期五暂时没办法回答。去 Console 的“账单与付款”充值就好。"
+        else:
+            return
+        now = time.time()
+        if now - self._alerted.get(kind, 0) < 6 * 3600:
+            return
+        self._alerted = {**self._alerted, kind: now}
+        phone_alert(self, alert)
+        import friday_security
+
+        friday_security.record("api_" + kind, alert, "warn")
 
     def _quick_reply(self, text: str) -> str | None:
         if self.quick is None:
@@ -1405,6 +1426,11 @@ def web_loop(session: WebSession, events: queue.Queue, transcribe=None) -> None:
         if kind == "eof":
             session.hub.broadcast({"type": "status", "text": "星期五已关闭"})
             return
+        if kind == "heartbeat":  # 主循环还活着:告诉守护程序
+            import friday_guard
+
+            friday_guard.write_heartbeat(Path(payload), "running")
+            continue
         if kind == "status":
             session.hub.broadcast({"type": "status", "text": payload})
         elif kind == "web":
@@ -1785,6 +1811,7 @@ def settings_state(session, meter=None) -> dict:
         "remind_calendar": remind_calendar_state(session),
         "security": security_state(session),
         "api_key_tail": api_key_tail(),
+        "key_expires": os.environ.get("FRIDAY_KEY_EXPIRES", "").strip(),
         "health": health_state(session),
         "rain_alert": __import__("friday_alerts").rain_time(),
         "event_lead": __import__("friday_events").lead_minutes() if google_ready(session) else None,
@@ -2014,6 +2041,16 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         save_env_value(env, "FRIDAY_EVENT_LEAD", str(lead))
         os.environ["FRIDAY_EVENT_LEAD"] = str(lead)
         done.append(f"日历上的活动开始前 {lead} 分钟提醒你" if lead else "不再提前提醒日历上的活动")
+    if "key_expires" in payload:
+        value = str(payload["key_expires"] or "").strip()
+        if value:
+            try:
+                datetime.date.fromisoformat(value)
+            except ValueError:
+                return {"error": "日期格式不对"}
+        save_env_value(env, "FRIDAY_KEY_EXPIRES", value)
+        os.environ["FRIDAY_KEY_EXPIRES"] = value
+        done.append(f"钥匙 {value} 到期,提前 3 天、1 天和当天会提醒你(也推到手机)" if value else "不提醒钥匙到期了")
     if "rain_alert" in payload:
         import friday_alerts
 
@@ -2444,6 +2481,28 @@ def start_memory_tidy(session, toolbox: Toolbox, data_dir: str):
     return session.memtidy
 
 
+def start_heartbeat(events: queue.Queue, data_dir: str, interval: float = 30) -> None:
+    """每 30 秒往主循环送一个心跳;主循环处理到了就写心跳文件(主循环卡住,心跳就停,守护会发现)。"""
+    def loop() -> None:
+        while True:
+            time.sleep(interval)
+            events.put(("heartbeat", data_dir))
+
+    threading.Thread(target=loop, daemon=True, name="friday-heartbeat").start()
+
+
+def phone_alert(session, text: str, delay: float = 0) -> None:
+    """重要的事:不管推送设定,一律推到手机(Discord 还没连上就等一下再推)。"""
+    def send() -> None:
+        if delay:
+            time.sleep(delay)
+        discord = getattr(session, "discord", None)
+        if discord is not None:
+            discord.notify_owners(text)
+
+    threading.Thread(target=lambda: _quietly(send), daemon=True).start()
+
+
 def start_daily_checks(session, toolbox: Toolbox, data_dir: str, interval: float = 300) -> None:
     """每 5 分钟看一次:月底记账汇总、下雨提醒、每周花费报告。"""
     import friday_alerts
@@ -2461,6 +2520,14 @@ def start_daily_checks(session, toolbox: Toolbox, data_dir: str, interval: float
             announce(session, text, "🖥", "电脑健康提醒在窗口里")
 
     tidy = start_memory_tidy(session, toolbox, data_dir)
+
+    def check_key_and_credit() -> None:
+        today = datetime.date.today()
+        for text in (friday_alerts.key_expiry_message(state, today, _call_me(session)),
+                     friday_alerts.low_credit_message(state, today, getattr(session, "budget", None), _call_me(session))):
+            if text:
+                session.hub.broadcast({"type": "reminder", "text": "🔑 " + text})
+                phone_alert(session, "🔑 " + text)
 
     def check_memory() -> None:
         if tidy is None or not tidy.due():
@@ -2483,6 +2550,7 @@ def start_daily_checks(session, toolbox: Toolbox, data_dir: str, interval: float
             _quietly(lambda: weekly_report(session, toolbox, state))
             _quietly(check_health)
             _quietly(check_memory)
+            _quietly(check_key_and_credit)
             time.sleep(interval)
 
     threading.Thread(target=loop, daemon=True, name="friday-daily-checks").start()
@@ -2665,6 +2733,12 @@ def run_web(args) -> None:
         print("星期五已经在运行,把它的窗口叫到了前面")
         return
     import friday_backup
+    import friday_guard
+
+    friday_guard.write_heartbeat(Path(data_dir), "running")
+    crash_reason = friday_guard.take_crash_note(Path(data_dir))
+    if os.environ.get("FRIDAY_GUARD", "on") != "off":
+        friday_guard.start_guard(Path(data_dir), ORIGINAL_ENV)  # 崩溃或卡死时自动重开
 
     restored = friday_backup.apply_pending_restore(Path(data_dir))  # 上次点了“从备份还原”
 
@@ -2720,6 +2794,7 @@ def run_web(args) -> None:
         def budget_notice(text: str) -> None:
             hub.broadcast({"type": "reminder", "text": "💰 " + text})
             notify_popup("星期五", text)
+            phone_alert(session, "💰 " + text)
 
         budget = attach_budget(assistant, meter, router, budget_notice)
     session.budget = budget
@@ -2799,6 +2874,7 @@ def run_web(args) -> None:
         def google_notice(text: str) -> None:
             hub.broadcast({"type": "reminder", "text": "⚠ " + text})
             notify_popup("星期五", text)
+            phone_alert(session, "⚠ " + text)
 
         GoogleWatcher(account, google_notice).start()
 
@@ -2872,6 +2948,10 @@ def run_web(args) -> None:
     start_care(session, ctx, hub, toolbox, voice_module)
     start_daily_checks(session, toolbox, data_dir)
     start_security(session, data_dir)
+    start_heartbeat(events, data_dir)
+    if crash_reason:
+        hub.broadcast({"type": "error", "text": f"🛡 {crash_reason},守护程序已经自动把我重新打开了。"})
+        phone_alert(session, f"🛡 {crash_reason},守护程序已经自动把星期五重新打开了。", delay=60)
     ctx.lock = session.window_lock
     import friday_quick
 
@@ -2899,6 +2979,9 @@ def run_web(args) -> None:
     try:
         web_loop(session, events, voice_module.transcribe_audio)
     finally:
+        import friday_guard
+
+        friday_guard.write_heartbeat(Path(data_dir), "restarting" if session.restart else "quit")
         session.wake.stop()
         if session.cloud is not None:
             session.cloud.stop()

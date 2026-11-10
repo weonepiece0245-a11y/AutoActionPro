@@ -677,6 +677,7 @@ function fillSettings() {
     $("googleState").textContent = (g.state === "ok" ? "正常" : g.label) + left;
     $("googleState").className = "google-state " + (g.state === "ok" ? "ok" : "warn");
   }
+  if (document.activeElement !== $("setKeyExpires")) $("setKeyExpires").value = s.key_expires || "";
   $("apiKeyRow").hidden = !s.api_key_tail;
   if (s.api_key_tail) $("apiKeyTail").textContent = "…" + s.api_key_tail;
   $("setAutostart").checked = !!s.autostart;
@@ -832,6 +833,7 @@ $("memtidyApply").onclick = () => {
 };
 $("memtidyDismiss").onclick = () => saveSetting({ memtidy_dismiss: true });
 $("discordPair").onclick = () => saveSetting({ discord_pair: true }, 8000);
+$("saveKeyExpires").onclick = () => saveSetting({ key_expires: $("setKeyExpires").value });
 $("setRain").onchange = (e) => saveSetting({ rain_alert: e.target.value });
 $("setEventLead").onchange = (e) => saveSetting({ event_lead: Number(e.target.value) });
 $("mailSave").onclick = () => saveSetting({ mail_alert: { senders: $("mailSenders").value, words: $("mailWords").value,

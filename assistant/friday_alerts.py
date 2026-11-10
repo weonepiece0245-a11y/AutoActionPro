@@ -217,3 +217,36 @@ def month_report(meter, today: datetime.date, budget=None) -> str:
         lines.append("大部分钱花在 Opus 上:齿轮设定里选“自动选模型”,日常的事会改用便宜一半的 Sonnet。")
     return "".join(lines)
 
+
+def key_expiry_message(state: AlertState, today: datetime.date, name: str) -> str | None:
+    """API 钥匙快到期:提前 3 天、1 天和当天各提醒一次(到期日在齿轮设定里填)。"""
+    raw = os.environ.get("FRIDAY_KEY_EXPIRES", "").strip()
+    try:
+        expires = datetime.date.fromisoformat(raw)
+    except ValueError:
+        return None
+    days = (expires - today).days
+    if days not in (3, 1, 0) and days >= 0 or days < -1:
+        return None
+    key = f"key_{expires.isoformat()}_{days}"
+    if state.get("key_expiry") == key:
+        return None
+    state.set("key_expiry", key)
+    if days < 0:
+        return f"{name},Claude 钥匙昨天已经过期了,星期五可能已经没办法回答。去 Console 建一把新的,换进环境变量 ANTHROPIC_API_KEY。"
+    when = "今天" if days == 0 else ("明天" if days == 1 else f"{days} 天后({expires.month}/{expires.day})")
+    return (f"{name},星期五用的 Claude 钥匙{when}到期。去 Console 建一把新的,换进 Windows 环境变量 ANTHROPIC_API_KEY,"
+            "再到齿轮设定 → 其他 更新到期日。")
+
+
+def low_credit_message(state: AlertState, today: datetime.date, budget, name: str, below_usd: float = 3.0) -> str | None:
+    """余额快用完(低于 US$3):一天提醒一次。余额是按你在齿轮设定里填的充值金额估算的。"""
+    if budget is None:
+        return None
+    remaining = budget.remaining_usd()
+    if remaining is None or remaining >= below_usd or state.get("low_credit") == today.isoformat():
+        return None
+    state.set("low_credit", today.isoformat())
+    return (f"{name},Claude 账户余额大约只剩 US${max(remaining, 0):.2f},快用完了。去 Console 的“账单与付款”充值,"
+            "充完在齿轮设定 → 预算和余额 里更新充值金额。")
+
