@@ -55,6 +55,7 @@ class QuickCommands:
         self.budget = budget
         self.scenes = None  # 场景模式(friday_scenes.Scenes)
         self.screentime = None  # 电脑使用时间(friday_screentime.ScreenTime)
+        self.notes = None  # 速记本(friday_notes.Notes)
         self.on_say = None  # 场景里“说”的那一步:马上读出来
         self.silent = False  # 这次的回答已经读过了(场景模式),不用再读
         self.clock = clock
@@ -82,9 +83,41 @@ class QuickCommands:
                         r"|^(这个月|本月)?花费(明细|报告)$"), self._spending),
         ]
 
+    NOTE_ADD = re.compile(r"^\s*(星期五[,,\s]*)?(帮我)?(记一下|记下来|记下|备忘一下|备忘|速记)\s*[::,,]?\s*(?P<text>.+)$", re.S)
+    NOTE_FIND = re.compile(r"^\s*(帮我)?(找|查|搜)(一下)?(我的)?笔记\s*[::,,]?\s*(?P<q>.+?)\s*$|"
+                           r"^\s*笔记里(有没有|找一下|找)\s*(?P<q2>.+?)(吗|的)?\s*[??]?$")
+    NOTE_RECENT = re.compile(r"^\s*(看一?下|看看|打开)?(我的|最近的?)?笔记(本)?\s*[??!!。]?$")
+    NOTE_DELETE = re.compile(r"^\s*(删掉|删除|撤销)(刚才|刚刚|上一|最后一)(那|一)?条笔记\s*[。!!]?$")
+
+    def _notes(self, text: str) -> str | None:
+        notes = self.notes
+        if notes is None:
+            return None
+        if self.NOTE_DELETE.match(text):
+            return notes.delete("last")
+        found = self.NOTE_FIND.match(text)
+        if found:
+            query = found.group("q") or found.group("q2") or ""
+            return notes.describe(notes.search(query), f"笔记里没有“{query}”")
+        if self.NOTE_RECENT.match(text):
+            return notes.describe(notes.search(limit=10), "笔记本还是空的。说“记一下:……”就能记。")
+        found = self.NOTE_ADD.match(text)
+        if found and not found.group("text").startswith(("住", "账")):  # “记住”是长期记忆,“记账”是记账
+            return notes.add(found.group("text"))
+        return None
+
     def handle(self, text: str) -> str | None:
         self.silent = False
-        if not quick_enabled() or not text or len(text) > 30:
+        if not quick_enabled() or not text:
+            return None
+        if self.notes is not None and len(text) <= 2000:
+            try:
+                reply = self._notes(text)
+            except ValueError as e:
+                reply = str(e)
+            if reply:
+                return reply
+        if len(text) > 30:
             return None
         sentence = clean(text)
         if not sentence:

@@ -93,6 +93,7 @@ import friday_memtidy  # noqa: E402
 import friday_scenes  # noqa: E402
 import friday_screentime  # noqa: E402
 import friday_cleanup  # noqa: E402
+import friday_notes  # noqa: E402
 import friday_wake  # noqa: E402
 import friday_cloud  # noqa: E402
 import friday_care  # noqa: E402
@@ -6972,6 +6973,59 @@ class CleanupTest(TempDirTest):
         toolbox.confirm = lambda text: True
         toolbox.run(tool_use("cleanup", {"action": "recycle", "ids": [1]}), lambda s: None)
         self.assertEqual(recycled, [[1]])
+
+
+class NotesTest(TempDirTest):
+    def make(self):
+        self.now = [datetime.datetime(2026, 11, 1, 9, 0)]
+        return friday_notes.Notes(os.path.join(self.tmp, "n.json"), clock=lambda: self.now[0])
+
+    def test_add_search_delete(self):
+        notes = self.make()
+        synced = []
+        notes.sync = synced.append
+        self.assertEqual(notes.add(":买猫粮"), "记好了(#1)。")
+        self.now[0] = datetime.datetime(2026, 11, 9, 20, 0)
+        notes.add("灵感:做一个记账小游戏")
+        self.assertEqual(synced, ["[2026-11-01 09:00] 买猫粮", "[2026-11-09 20:00] 灵感:做一个记账小游戏"])
+        self.assertEqual([n["id"] for n in notes.search("灵感")], [2])
+        self.assertEqual([n["id"] for n in notes.search(days=3)], [2])  # 最近 3 天
+        self.assertEqual([n["id"] for n in notes.search()], [2, 1])  # 新的在前
+        reopened = friday_notes.Notes(os.path.join(self.tmp, "n.json"))
+        self.assertIn("删掉了 #2", reopened.delete("last"))
+        with self.assertRaises(ValueError):
+            reopened.delete("99")
+        with self.assertRaises(ValueError):
+            reopened.add("  ")
+
+    def test_quick_commands(self):
+        quick = friday_quick.QuickCommands(SimpleNamespace(ledger=None))
+        quick.notes = self.make()
+        self.assertEqual(quick.handle("记一下:明天打电话给阿明, 问他车子的事"), "记好了(#1)。")
+        self.assertEqual(quick.notes.items[0]["text"], "明天打电话给阿明, 问他车子的事")  # 标点和空格都保留
+        long_note = "记下 " + "很长的想法" * 20
+        self.assertEqual(quick.handle(long_note), "记好了(#2)。")  # 长的也行
+        self.assertIn("阿明", quick.handle("笔记里有没有阿明"))
+        self.assertIn("#2", quick.handle("我的笔记"))
+        self.assertIn("删掉了 #2", quick.handle("删掉刚才那条笔记"))
+        self.assertIsNone(quick.handle("记住我喜欢咖啡"))  # 这是长期记忆
+        self.assertEqual(len(quick.notes.items), 1)
+
+    def test_tool_and_docs_sync(self):
+        toolbox = self.make_toolbox()
+        toolbox.notes = self.make()
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+        toolbox.run(tool_use("notes", {"action": "add", "text": "周末去关丹"}), lambda s: None)
+        self.assertIn("关丹", toolbox.run(tool_use("notes", {"action": "search", "query": "关丹"}), lambda s: None)["content"])
+        account = FakeAccount({"documents.create": {"documentId": "doc1"},
+                               "documents.get": {"body": {"content": [{"endIndex": 1}, {"endIndex": 20}]}},
+                               "documents.batchUpdate": {}})
+        friday_notes.docs_sync(SimpleNamespace(account=account), toolbox.notes)("[11-10] 周末去关丹")
+        names = [name for name, _ in account.log]
+        self.assertEqual(names, ["documents.create", "documents.get", "documents.batchUpdate"])
+        insert = account.log[-1][1]["body"]["requests"][0]["insertText"]
+        self.assertEqual(insert, {"location": {"index": 19}, "text": "[11-10] 周末去关丹\n"})
+        self.assertEqual(friday_notes.Notes(os.path.join(self.tmp, "n.json")).doc_id, "doc1")
 
 
 if __name__ == "__main__":

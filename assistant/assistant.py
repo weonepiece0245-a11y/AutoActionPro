@@ -146,6 +146,7 @@ FRIDAY_PROMPT = """你是“星期五”,{call_me}的私人 AI 助手。
   {call_me}想等某个游戏降价、等网页有货或有变化,用 watch 追踪,星期五会在后台定时去看。
 - {call_me}在手机上想看电脑现在的画面(“截个图给我”),或要电脑上的文件(“把桌面上的报告发给我”),用 send_to_phone;
   只是要你自己看屏幕回答问题时用 screen。
+- {call_me}的速记本:“记一下:……”星期五会直接存;问“我上周记的那个……”“笔记里有没有……”用 notes 找。
 - {call_me}说“以后 XX 的邮件马上告诉我”“标题有 XX 的邮件提醒我”,用 mail_alert 加规则(新邮件一到就在电脑上说、推到手机)。{reminder_note}
 - 消息以“[定时任务]”开头时,是之前设好的任务到点了,{call_me}可能不在电脑前:
   直接把事情做完,结果说得简短清楚;需要确认的操作不能做,留到{call_me}回来再说。
@@ -2887,6 +2888,13 @@ def run_web(args) -> None:
         toolbox.screentime = session.quick.screentime = session.care.screentime
     toolbox.cleanup = (lambda: cleanup_scan(session, toolbox), lambda: session.cleanup_items,
                        lambda ids: cleanup_recycle(session, toolbox, ids))
+    import friday_notes
+
+    toolbox.notes = session.quick.notes = friday_notes.Notes(os.path.join(data_dir, "friday_notes.json"))
+    if toolbox.google is not None:  # 登录了 Google:笔记同时抄到 Google 文档(在后台抄,不拖慢)
+        append = friday_notes.docs_sync(toolbox.google, toolbox.notes)
+        toolbox.notes.sync = lambda line: threading.Thread(target=lambda: _quietly(lambda: append(line)),
+                                                           daemon=True).start()
     toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
     try:
         web_loop(session, events, voice_module.transcribe_audio)

@@ -635,6 +635,17 @@ EXPENSE_TOOL = {
     },
 }
 
+NOTES_TOOL = {
+    "name": "notes",
+    "description": ("用户的速记本(用户说“记一下:……”时星期五已经直接存好了)。add 记一条;search 找笔记"
+                    "(query 关键词,可空;days 只看最近几天,例如“上周记的”用 7~14);delete 删一条(id 或 last)。"
+                    "笔记是用户自己的随手记录,和长期记忆(remember)、待办、提醒不一样。"),
+    "input_schema": {"type": "object", "properties": {
+        "action": {"type": "string", "enum": ["add", "search", "delete"]},
+        "text": {"type": "string"}, "query": {"type": "string"}, "days": {"type": "integer"},
+        "id": {"type": "string"}}, "required": ["action"]},
+}
+
 CLEANUP_TOOL = {
     "name": "cleanup",
     "description": ("找大文件和重复文件(在用户的下载、桌面、文档、视频、图片、音乐文件夹里):scan 扫描(要一两分钟),"
@@ -800,6 +811,7 @@ class Toolbox:
         self.scenes = None  # 场景模式(friday_scenes.Scenes)
         self.screentime = None  # 电脑使用时间(friday_screentime.ScreenTime)
         self.cleanup = None  # (scan, list, recycle) 三个函数,由主程序接上
+        self.notes = None  # 速记本(friday_notes.Notes)
         self.budget = None
         if ledger is not None and google is not None:
             from friday_ledger import sheet_sync
@@ -842,6 +854,7 @@ class Toolbox:
             "scene": self._scene,
             "screen_time": self._screen_time,
             "cleanup": self._cleanup,
+            "notes": self._notes,
         }
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
 
@@ -873,6 +886,8 @@ class Toolbox:
             tools = tools + [SCREEN_TIME_TOOL]
         if self.cleanup is not None and self.local_tools:
             tools = tools + [CLEANUP_TOOL]
+        if self.notes is not None:
+            tools = tools + [NOTES_TOOL]
         if self.todos is not None and self.google is None:  # 接了 Google 就用 Google Tasks 当待办清单
             tools = tools + [TODO_TOOL]
         if self.computer is not None and self.computer.available:
@@ -966,6 +981,21 @@ class Toolbox:
                 return ledger.summary(args.get("month") or ""), False
             if action == "delete":
                 return ledger.delete(args.get("id") or "last"), False
+        except ValueError as e:
+            return str(e), True
+        return f"不支持的 action:{action}", True
+
+    def _notes(self, args, on_status):
+        notes = self.notes
+        action = args.get("action")
+        try:
+            if action == "add":
+                return notes.add(str(args.get("text") or "")), False
+            if action == "search":
+                found = notes.search(str(args.get("query") or ""), int(args.get("days") or 0), limit=30)
+                return notes.describe(found), False
+            if action == "delete":
+                return notes.delete(str(args.get("id") or "last")), False
         except ValueError as e:
             return str(e), True
         return f"不支持的 action:{action}", True
