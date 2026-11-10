@@ -125,6 +125,15 @@ $("miniBtn").onclick = () => {
   else openMini();
 };
 let lastActivity = "";
+// 桌面小光球开着时,把声音大小告诉星期五(大约每秒 8 次),小光球跟着跳
+let levelSentAt = 0, levelSent = -1;
+function sendLevel(level) {
+  if (!(settingsState && settingsState.floatorb && settingsState.floatorb.on)) return;
+  const now = performance.now();
+  if (now - levelSentAt < 120 || Math.abs(level - levelSent) < 0.04) return;
+  levelSentAt = now; levelSent = level;
+  api("/api/activity", { level }).catch(() => {});
+}
 function refreshMode() {
   // 告诉星期五窗口正在录音/朗读,唤醒功能这时暂停,免得听到自己的声音
   const accent = getComputedStyle(document.body).getPropertyValue("--cyan").trim();  // 桌面小光球跟着主题变色
@@ -1256,7 +1265,7 @@ function playNext() {
     levelLoop = true;
     const loop = () => {
       if (!speaking) { levelLoop = false; return; }
-      orbState.level = Math.min(1, rms(analyser) * 4.5);
+      orbState.level = Math.min(1, rms(analyser) * 4.5); sendLevel(orbState.level);
       requestAnimationFrame(loop);
     };
     loop();
@@ -1333,7 +1342,7 @@ function readerPlayNext() {
     levelLoop = true;
     const loop = () => {
       if (!speaking) { levelLoop = false; return; }
-      orbState.level = Math.min(1, rms(analyser) * 4.5);
+      orbState.level = Math.min(1, rms(analyser) * 4.5); sendLevel(orbState.level);
       requestAnimationFrame(loop);
     };
     loop();
@@ -1387,7 +1396,7 @@ async function listen({ followUp = false, stream = null, spoke = false } = {}) {
     const timer = setInterval(() => {
       if (!recorder) { clearInterval(timer); return; }
       const level = rms(micAnalyser);
-      orbState.level = Math.min(1, level * 6);
+      orbState.level = Math.min(1, level * 6); sendLevel(orbState.level);
       btn.style.setProperty("--mic", orbState.level.toFixed(2));
       const now = performance.now();
       if (level > 0.035) { spoke = true; quietSince = now; }

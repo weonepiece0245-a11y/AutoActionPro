@@ -3387,6 +3387,7 @@ def start_floatorb(session, ctx, data_dir: str) -> None:
     session.floatorb = friday_floatorb.FloatOrb(
         os.path.join(data_dir, "friday_floatorb.json"), mode=mode,
         color=lambda: ctx.activity.get("accent", "#22d3ee"),
+        level=lambda: ctx.activity.get("level") if time.monotonic() - ctx.activity.get("level_at", 0) < 0.6 else None,
         on_click=lambda: session.hub.broadcast({"type": "listen"}), on_close=closed)
     session.quick.floatorb = lambda on: floatorb_switch(session, on)
     if os.environ.get("FRIDAY_FLOATORB", "off") == "on":

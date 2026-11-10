@@ -20,8 +20,10 @@ from typing import Callable
 
 SIZE = 132  # 窗口大小(像素),光球在正中间
 RADIUS = 30
-FPS = 15
-FRAMES = 30  # 一圈动画几帧
+FPS = 24
+FRAMES = 48  # 一圈动画几帧(2 秒)
+LIVE_MODES = ("listening", "speaking")  # 跟着声音动:每一帧现画(一帧只要两三毫秒)
+CHECK_EVERY = 48  # 每 2 秒检查一次:有没有被收起来、被盖住
 DRAG_PIXELS = 4
 
 
@@ -40,23 +42,38 @@ def parse_color(text: str, default=(34, 211, 238)) -> tuple[int, int, int]:
     return default
 
 
-def render_frame(color: tuple[int, int, int], mode: str, phase: float):
-    """一帧光球(RGBA,背景完全透明)。phase:0~1,动画走到哪里。"""
+def render_frame(color: tuple[int, int, int], mode: str, phase: float, level: float = 0.0):
+    """一帧光球(RGBA,背景完全透明)。phase:0~1,动画走到哪里;level:0~1,现在的声音有多大。"""
     from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
-    wave = 0.5 + 0.5 * math.sin(phase * 2 * math.pi)
-    scale, glow = 1.0, 0.55
-    if mode == "idle":
-        scale, glow = 0.94 + 0.06 * wave, 0.45 + 0.2 * wave
-    elif mode == "listening":
-        scale, glow = 0.9 + 0.14 * wave, 0.65 + 0.35 * wave
-    elif mode == "speaking":
-        scale, glow = 0.96 + 0.08 * abs(math.sin(phase * 6 * math.pi)), 0.7 + 0.25 * wave
-    elif mode == "thinking":
-        scale, glow = 0.97, 0.6
-    radius = RADIUS * scale
-    cx = cy = SIZE / 2
+    two_pi = 2 * math.pi
+    wave = 0.5 + 0.5 * math.sin(phase * two_pi)
+    level = max(0.0, min(1.0, level))
     r, g, b = color
+    cx = cy = SIZE / 2
+    squash = 0.0  # 说话时像果冻一样一扁一圆
+    rings: list[tuple[float, float]] = []  # (半径倍数, 透明度):往外散的声波
+    dots = 0  # 想事情时绕着转的小点
+    if mode == "idle":
+        scale, glow = 0.94 + 0.05 * wave, 0.42 + 0.18 * wave
+        cy += 2.5 * math.sin(phase * two_pi)  # 慢慢上下漂
+    elif mode == "listening":
+        lively = max(level, 0.15 + 0.15 * wave)
+        scale, glow = 0.92 + 0.16 * lively, 0.6 + 0.4 * lively
+        rings = [(1.25 + 0.12 * math.sin(phase * two_pi * 2), 90 + 120 * lively)]  # 一圈在“收音”的环
+        cy += 1.5 * math.sin(phase * two_pi)
+    elif mode == "speaking":
+        lively = max(level, 0.25 + 0.25 * abs(math.sin(phase * two_pi * 3)))
+        scale, glow = 0.93 + 0.17 * lively, 0.65 + 0.35 * lively
+        squash = 0.08 * lively * math.sin(phase * two_pi * 4)
+        for k in range(3):  # 三圈声波一直往外散
+            progress = (phase * 2 + k / 3) % 1
+            rings.append((1.05 + 0.95 * progress, (1 - progress) * (70 + 150 * lively)))
+    else:  # thinking
+        scale, glow = 0.97, 0.6
+        dots = 3
+    radius = RADIUS * scale
+    rx, ry = radius * (1 + squash), radius * (1 - squash)
 
     # 外面的光晕
     halo = Image.new("RGBA", (SIZE, SIZE), (r, g, b, 0))
@@ -64,24 +81,42 @@ def render_frame(color: tuple[int, int, int], mode: str, phase: float):
     outer = radius * 1.55
     draw.ellipse([cx - outer, cy - outer, cx + outer, cy + outer], fill=(r, g, b, int(150 * glow)))
     halo = halo.filter(ImageFilter.GaussianBlur(radius * 0.45))
+    if rings:
+        wave_layer = Image.new("RGBA", (SIZE, SIZE), (r, g, b, 0))
+        draw = ImageDraw.Draw(wave_layer)
+        for factor, alpha in rings:
+            ring = radius * factor
+            if ring * 2 < SIZE - 2:
+                draw.ellipse([cx - ring, cy - ring, cx + ring, cy + ring], outline=(r, g, b, int(min(255, alpha))), width=2)
+        halo = Image.alpha_composite(halo, wave_layer.filter(ImageFilter.GaussianBlur(0.8)))
+    if dots:
+        dot_layer = Image.new("RGBA", (SIZE, SIZE), (r, g, b, 0))
+        draw = ImageDraw.Draw(dot_layer)
+        for k in range(dots):
+            angle = phase * two_pi * 1.5 + k * two_pi / dots
+            px, py = cx + math.cos(angle) * radius * 1.5, cy + math.sin(angle) * radius * 1.5
+            size = 3.2 - k * 0.6
+            dot = tuple(int(c * 0.55 + 255 * 0.45) for c in color)  # 带一点主题颜色,浅色桌面上也看得到
+            draw.ellipse([px - size, py - size, px + size, py + size], fill=(*dot, 240))
+        halo = Image.alpha_composite(halo, dot_layer.filter(ImageFilter.GaussianBlur(0.6)))
 
     # 球:从边缘的颜色到亮点的白色,一圈一圈画
     ball = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
     draw = ImageDraw.Draw(ball)
-    angle = -math.pi * 0.75 + (phase * 2 * math.pi if mode == "thinking" else 0)  # 想事情时亮点转圈
+    angle = -math.pi * 0.75 + (phase * two_pi if mode == "thinking" else 0)  # 想事情时亮点转圈
     hx, hy = cx + math.cos(angle) * radius * 0.35, cy + math.sin(angle) * radius * 0.35
     steps = 28
     for i in range(steps):
         t = i / (steps - 1)  # 0 外圈 -> 1 亮点
-        rr = radius * (1 - t * 0.92)
+        sx, sy = rx * (1 - t * 0.92), ry * (1 - t * 0.92)
         px, py = cx + (hx - cx) * t, cy + (hy - cy) * t
         edge = 0.62  # 外圈暗一点,有立体感
         mix = t ** 1.6
         col = tuple(int(c * (edge + (1 - edge) * min(1, t * 1.6)) * (1 - mix) + 255 * mix) for c in color)
-        draw.ellipse([px - rr, py - rr, px + rr, py + rr], fill=(*col, 255))
+        draw.ellipse([px - sx, py - sy, px + sx, py + sy], fill=(*col, 255))
     ball = ball.filter(ImageFilter.GaussianBlur(0.8))
     mask = Image.new("L", (SIZE, SIZE), 0)
-    ImageDraw.Draw(mask).ellipse([cx - radius, cy - radius, cx + radius, cy + radius], fill=255)
+    ImageDraw.Draw(mask).ellipse([cx - rx, cy - ry, cx + rx, cy + ry], fill=255)
     ball.putalpha(ImageChops.multiply(ball.getchannel("A"), mask.filter(ImageFilter.GaussianBlur(0.7))))
     return Image.alpha_composite(halo, ball)
 
@@ -101,7 +136,9 @@ class Frames:
     def __init__(self) -> None:
         self.cache: dict[tuple, list[bytes]] = {}
 
-    def get(self, color: tuple[int, int, int], mode: str, index: int) -> bytes:
+    def get(self, color: tuple[int, int, int], mode: str, index: int, level: float | None = None) -> bytes:
+        if mode in LIVE_MODES:  # 在听、在说:跟着声音大小现画
+            return premultiplied_bgra(render_frame(color, mode, (index % FRAMES) / FRAMES, level or 0.0))
         key = (color, mode)
         if key not in self.cache:
             if len(self.cache) > 12:
@@ -117,9 +154,10 @@ class Frames:
 class FloatOrb:
     def __init__(self, state_path: str | os.PathLike, mode: Callable[[], str] = lambda: "idle",
                  color: Callable[[], str] = lambda: "#22d3ee", on_click: Callable[[], None] = lambda: None,
-                 on_close: Callable[[], None] = lambda: None) -> None:
+                 on_close: Callable[[], None] = lambda: None, level: Callable[[], float | None] = lambda: None) -> None:
         self.state_path = Path(state_path)
         self.mode = mode
+        self.level = level  # 现在的声音有多大(窗口传来的,0~1;没有就是 None)
         self.color = color
         self.on_click = on_click
         self.on_close = on_close
@@ -217,7 +255,14 @@ class FloatOrb:
         gdi32.DeleteDC.argtypes = [wintypes.HDC]
         kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 
-        if self.x is None:  # 第一次:放在右下角、工作列上面一点
+        user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                        ctypes.c_int, wintypes.UINT]
+        user32.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+        user32.MonitorFromPoint.restype = wintypes.HANDLE
+        HWND_TOPMOST = wintypes.HWND(-1)
+        on_screen = self.x is not None and user32.MonitorFromPoint(
+            wintypes.POINT(int(self.x) + SIZE // 2, int(self.y) + SIZE // 2), 0)  # MONITOR_DEFAULTTONULL
+        if not on_screen:  # 第一次,或记住的位置不在任何屏幕上(换了屏幕):放在右下角、工作列上面一点
             self.x = user32.GetSystemMetrics(0) - SIZE - 40
             self.y = user32.GetSystemMetrics(1) - SIZE - 120
 
@@ -237,7 +282,11 @@ class FloatOrb:
                 mode = self.mode() or "idle"
             except Exception:
                 color, mode = parse_color(""), "idle"
-            data = self.frames.get(color, mode, self.index)
+            try:
+                level = self.level()
+            except Exception:
+                level = None
+            data = self.frames.get(color, mode, self.index, level)
             ctypes.memmove(bits, data, len(data))
             where = wintypes.POINT(int(self.x), int(self.y))
             user32.UpdateLayeredWindow(hwnd, screen_dc, ctypes.byref(where), ctypes.byref(size), mem_dc,
@@ -248,10 +297,26 @@ class FloatOrb:
             user32.GetCursorPos(ctypes.byref(point))
             return point.x, point.y
 
+        def keep_visible(hwnd) -> None:
+            """被“显示桌面”收起来、被别的置顶程序盖住:自己出来,回到最上面。"""
+            if user32.IsIconic(hwnd) or not user32.IsWindowVisible(hwnd):
+                user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
+            user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)  # 不动大小、位置、焦点
+
         def proc(hwnd, msg, wparam, lparam):
+            try:
+                return handle(hwnd, msg, wparam, lparam)
+            except Exception:  # 出错也不能让小光球卡死
+                return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+        def handle(hwnd, msg, wparam, lparam):
             if msg == 0x0113:  # WM_TIMER:下一帧
                 self.index += 1
                 draw(hwnd)
+                if self.index % CHECK_EVERY == 0:
+                    keep_visible(hwnd)
+                return 0
+            if msg == 0x0112 and (wparam & 0xFFF0) == 0xF020:  # 有人叫它最小化(显示桌面):不理
                 return 0
             if msg == 0x0201:  # 左键按下
                 self._press = (*cursor(), self.x, self.y)

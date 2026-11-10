@@ -9220,7 +9220,12 @@ class FloatOrbTest(TempDirTest):
         self.assertEqual(len(data), friday_floatorb.SIZE ** 2 * 4)
         self.assertEqual(data[:4], b"\x00\x00\x00\x00")  # 透明的点颜色也是 0(先乘过透明度)
         frames = friday_floatorb.Frames()
-        self.assertIs(frames.get((1, 2, 3), "listening", 5), frames.get((1, 2, 3), "listening", 5 + friday_floatorb.FRAMES))
+        self.assertIs(frames.get((1, 2, 3), "idle", 5), frames.get((1, 2, 3), "idle", 5 + friday_floatorb.FRAMES))
+        quiet = friday_floatorb.render_frame((251, 191, 36), "speaking", 0.1, level=0.0)
+        loud = friday_floatorb.render_frame((251, 191, 36), "speaking", 0.1, level=1.0)
+        opaque = lambda image: sum(1 for a in image.getchannel("A").getdata() if a > 200)  # noqa: E731
+        self.assertGreater(opaque(loud), opaque(quiet))  # 声音大:球变大
+        self.assertEqual(loud.getpixel((0, 0))[3], 0)  # 声波也不会碰到边
         self.assertEqual(friday_floatorb.parse_color("rgb(251, 191, 36)"), (251, 191, 36))
         self.assertEqual(friday_floatorb.parse_color("#a78bfa"), (167, 139, 250))
 
