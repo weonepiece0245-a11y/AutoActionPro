@@ -8596,5 +8596,66 @@ class OpenAppReliablyTest(unittest.TestCase):
         self.assertIn("notepad", pcmod.app_hints("记事本", "记事本", "Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"))
 
 
+
+class SpotifyPauseThenNextTest(TempDirTest):
+    """先“暂停”再“下一首”:都要直接叫 Spotify,而且切过去会接着放。"""
+
+    def make(self, player, replies=None):
+        import friday_spotify
+
+        self.calls = []
+
+        def request(method, url, headers, body=None):
+            path = url.split("v1")[-1]
+            self.calls.append((method, path))
+            if path == "/me/player" and method == "GET":
+                return player()
+            return (replies or {}).get((method, path), (204, {}))
+        spotify = friday_spotify.Spotify(self.tmp, 47999, request=request, clock=lambda: 2_000_000.0)
+        spotify.tokens = {"access_token": "AT", "refresh_token": "RT", "expires_at": 10 ** 12}
+        return spotify
+
+    def test_paused_by_hand_then_next(self):
+        # 你自己在 Spotify 按了暂停(5 分钟前):说“下一首”还是叫 Spotify,切过去接着放
+        spotify = self.make(lambda: (200, {"is_playing": False, "timestamp": (2_000_000 - 300) * 1000}))
+        with mock.patch.dict(os.environ, {"FRIDAY_SPOTIFY_CLIENT_ID": "c" * 32}):
+            self.assertEqual(spotify.media("next_track"), "Spotify 已切到下一首,接着放了。")
+        self.assertEqual(self.calls[1:], [("POST", "/me/player/next"), ("PUT", "/me/player/play")])
+
+    def test_long_paused_goes_to_media_keys(self):
+        spotify = self.make(lambda: (200, {"is_playing": False, "timestamp": (2_000_000 - 7200) * 1000}))
+        with mock.patch.dict(os.environ, {"FRIDAY_SPOTIFY_CLIENT_ID": "c" * 32}):
+            self.assertIsNone(spotify.media("next_track"))  # 两小时没动:多半在用别的程序
+
+    def test_never_presses_media_key_after_calling_spotify(self):
+        import friday_quick
+
+        spotify = self.make(lambda: (200, {"is_playing": True}), replies={("PUT", "/me/player/pause"): (500, {})})
+        keys = []
+        computer = SimpleNamespace(available=True, do=lambda action, value="": keys.append(action) or "ok")
+        quick = friday_quick.QuickCommands(SimpleNamespace(computer=computer))
+        quick.spotify = spotify
+        with mock.patch.dict(os.environ, {"FRIDAY_SPOTIFY_CLIENT_ID": "c" * 32}):
+            self.assertIn("没反应", quick.handle("暂停"))
+        self.assertEqual(keys, [])  # 已经叫过 Spotify:不再按媒体键(免得暂停了又被按回去)
+
+    def test_success_with_odd_body(self):
+        import friday_spotify
+
+        class Response:
+            status = 200
+
+            def read(self):
+                return b"\x00not json"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        with mock.patch("urllib.request.urlopen", lambda request, timeout=15: Response()):
+            self.assertEqual(friday_spotify._request("PUT", "https://api.spotify.com/v1/me/player/pause", {}), (200, {}))
+
+
 if __name__ == "__main__":
     unittest.main()
