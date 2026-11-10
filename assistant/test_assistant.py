@@ -6727,5 +6727,43 @@ class MemoryTidyTest(TempDirTest):
         self.assertEqual(tidy.run(), 0)  # 像命令的话不会被当成记忆
 
 
+class SpendingReportTest(TempDirTest):
+    def meter(self):
+        clock = [datetime.datetime(2026, 11, 3, 10, 0)]
+        meter = friday_usage.UsageMeter(os.path.join(self.tmp, "u.json"), clock=lambda: clock[0], usd_to_myr=4.5)
+        usage = SimpleNamespace(input_tokens=1_000_000, output_tokens=0, cache_creation_input_tokens=0,
+                                cache_read_input_tokens=0, server_tool_use=None)
+        meter.add(usage, "claude-opus-5-5")
+        clock[0] = datetime.datetime(2026, 11, 10, 10, 0)
+        meter.add(usage, "claude-opus-5-5")
+        meter.add(usage, "claude-sonnet-5-5")
+        meter.add_local()
+        return meter
+
+    def test_month_report(self):
+        budget = SimpleNamespace(month_myr=lambda: (60.0, "console"), budget_myr=100)
+        text = friday_alerts.month_report(self.meter(), datetime.date(2026, 11, 10), budget)
+        self.assertIn("11 月 1 日到今天", text)
+        self.assertIn("Console 上的实际花费是 RM 60.00", text)
+        self.assertIn("预算 RM 100,已经用了 60%", text)
+        self.assertIn("花得最多的几天:11/10", text)
+        self.assertIn("按模型:Opus", text)
+        self.assertIn("问了 Claude 3 次,另外有 1 次简单指令", text)
+        self.assertIn("整个月大约 RM 180", text)  # 60 / 10 天 × 30 天
+        self.assertIn("自动选模型", text)  # 大部分花在 Opus
+
+    def test_free_phrases_and_tool(self):
+        meter = self.meter()
+        quick = friday_quick.QuickCommands(SimpleNamespace(), meter=meter,
+                                           clock=lambda: datetime.datetime(2026, 11, 10, 18, 0))
+        self.assertIn("星期五用 Claude 花了", quick.handle("花费明细"))
+        self.assertIn("星期五用 Claude 花了", quick.handle("这个月 AI 花费"))
+        self.assertIsNone(quick.handle("这个月花了多少钱"))  # 可能是问自己记的账:交给 Claude 判断
+        toolbox = self.make_toolbox()
+        toolbox.meter = meter
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+        self.assertIn("星期五用 Claude 花了", toolbox.run(tool_use("ai_spending", {}), lambda s: None)["content"])
+
+
 if __name__ == "__main__":
     unittest.main()

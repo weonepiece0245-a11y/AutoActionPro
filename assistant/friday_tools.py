@@ -635,6 +635,13 @@ EXPENSE_TOOL = {
     },
 }
 
+SPENDING_TOOL = {
+    "name": "ai_spending",
+    "description": ("星期五自己这个月用 Claude 花了多少钱(马币):总数、预算用了几成、花得最多的几天、各模型、照这个速度月底多少。"
+                    "用户问“你/星期五/AI 花了多少”时用;问他自己记的账用 expense。"),
+    "input_schema": {"type": "object", "properties": {}, "required": []},
+}
+
 MAIL_ALERT_TOOL = {
     "name": "mail_alert",
     "description": (
@@ -750,6 +757,8 @@ class Toolbox:
         self.phone = None  # (文字, [(文件名, 内容)]) -> 私信到手机 Discord;没连 Discord 就是 None
         self.phone_override = None  # 正在回答手机消息时:发回那段对话
         self.mailwatch = None  # 重要邮件提醒(friday_mailwatch.MailWatch),接了 Google 才有
+        self.meter = None  # 花费统计(给 ai_spending 用)
+        self.budget = None
         if ledger is not None and google is not None:
             from friday_ledger import sheet_sync
 
@@ -787,6 +796,7 @@ class Toolbox:
             "watch": self._watch,
             "send_to_phone": self._send_to_phone,
             "mail_alert": self._mail_alert,
+            "ai_spending": self._ai_spending,
         }
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
 
@@ -810,6 +820,8 @@ class Toolbox:
             tools = tools + [PHONE_TOOL]
         if self.mailwatch is not None:
             tools = tools + [MAIL_ALERT_TOOL]
+        if self.meter is not None:
+            tools = tools + [SPENDING_TOOL]
         if self.todos is not None and self.google is None:  # 接了 Google 就用 Google Tasks 当待办清单
             tools = tools + [TODO_TOOL]
         if self.computer is not None and self.computer.available:
@@ -906,6 +918,11 @@ class Toolbox:
         except ValueError as e:
             return str(e), True
         return f"不支持的 action:{action}", True
+
+    def _ai_spending(self, args, on_status):
+        import friday_alerts
+
+        return friday_alerts.month_report(self.meter, datetime.date.today(), self.budget), False
 
     def _mail_alert(self, args, on_status):
         watch = self.mailwatch

@@ -48,8 +48,11 @@ def quick_enabled() -> bool:
 class QuickCommands:
     """handle(句子) -> 已经办好的回答;认不出来返回 None(交给 Claude)。"""
 
-    def __init__(self, toolbox, clock: Callable[[], datetime.datetime] = datetime.datetime.now) -> None:
+    def __init__(self, toolbox, clock: Callable[[], datetime.datetime] = datetime.datetime.now,
+                 meter=None, budget=None) -> None:
         self.toolbox = toolbox
+        self.meter = meter  # 花费统计(“这个月钱花在哪里”)
+        self.budget = budget
         self.clock = clock
         self.rules: list[tuple[re.Pattern, Callable]] = [
             (re.compile(r"^(现在)?(几点了?|几点钟|什么时间了?|现在时间)$"), self._time),
@@ -67,6 +70,10 @@ class QuickCommands:
             (re.compile(r"^(记账|记一笔|记)?(?P<item>[一-鿿A-Za-z][一-鿿A-Za-z ]{0,14}?)(花了|用了)?"
                         r"(rm|RM|Rm)?(?P<amount>\d{1,6}(\.\d{1,2})?)(块钱|块|元|令吉|马币|rm|ringgit)$"), self._expense),
             (re.compile(r"^打开(?P<app>[一-鿿A-Za-z0-9 ]{1,20})$"), self._open_app),
+            (re.compile(r"^(你|星期五|AI|ai|Claude|claude)(这个月|本月|这月)?(的)?(钱|花费|费用|用量)?(都)?"
+                        r"(花在哪里?了?|花了多少钱?|用了多少钱?|花费|用量|明细|花费明细)$"
+                        r"|^(这个月|本月|这月)?(的)?(AI|ai|Claude|claude) ?(花费|费用|用量)(明细|报告)?$"
+                        r"|^(这个月|本月)?花费(明细|报告)$"), self._spending),
         ]
 
     def handle(self, text: str) -> str | None:
@@ -145,6 +152,14 @@ class QuickCommands:
             return None
         result = self._computer().do("open_app", name)
         return result + "。" if result.startswith("已打开") else None  # 没找到:交给 Claude(它会试游戏、网页)
+
+    # ---------- 花费 ----------
+    def _spending(self, found):
+        if self.meter is None:
+            return None
+        import friday_alerts
+
+        return friday_alerts.month_report(self.meter, self.clock().date(), self.budget)
 
     # ---------- 记账 ----------
     def _expense(self, found):

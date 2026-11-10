@@ -2778,7 +2778,9 @@ def run_web(args) -> None:
     ctx.lock = session.window_lock
     import friday_quick
 
-    session.quick = friday_quick.QuickCommands(toolbox)
+    session.quick = friday_quick.QuickCommands(toolbox, meter=session.meter, budget=getattr(session, "budget", None))
+    toolbox.meter, toolbox.budget = session.meter, getattr(session, "budget", None)
+    toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
     try:
         web_loop(session, events, voice_module.transcribe_audio)
     finally:

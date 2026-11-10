@@ -176,3 +176,44 @@ def weekly_report(meter, ledger, week: tuple[datetime.date, datetime.date], name
             top = "、".join(f"{c} RM {v:.2f}" for c, v in sorted(by_category.items(), key=lambda kv: -kv[1])[:3])
             lines.append(f"你自己记的账:这周 {len(entries)} 笔,共 RM {total:,.2f},最多的是 {top}。")
     return "".join(lines)
+
+
+def month_report(meter, today: datetime.date, budget=None) -> str:
+    """这个月的钱花在哪里(不问 Claude):总数、预算、花得最多的几天、各模型、照这个速度月底多少。"""
+    import calendar
+
+    first = today.replace(day=1)
+    usage = meter.between(first.isoformat(), today.isoformat())
+    rate = meter.rate
+    estimate = usage["usd"] * rate
+    lines = [f"这个月({today.month} 月 1 日到今天)星期五用 Claude 花了约 RM {estimate:.2f}。"]
+    if budget is not None:
+        spent, source = budget.month_myr()
+        if source == "console":
+            lines.append(f"Claude Console 上的实际花费是 RM {spent:.2f},以 Console 为准。")
+        if budget.budget_myr:
+            lines.append(f"预算 RM {budget.budget_myr:g},已经用了 {spent / budget.budget_myr:.0%}。")
+        estimate = max(estimate, spent)
+    if usage["days"]:
+        top = sorted(usage["days"].items(), key=lambda kv: -kv[1])[:5]
+        lines.append("花得最多的几天:" + "、".join(f"{d[5:7].lstrip('0')}/{d[8:].lstrip('0')} RM {v * rate:.2f}"
+                                                  for d, v in top) + "。")
+    if usage["models"]:
+        total = sum(usage["models"].values()) or 1
+        parts = "、".join(f"{m} RM {v * rate:.2f}({v / total:.0%})"
+                         for m, v in sorted(usage["models"].items(), key=lambda kv: -kv[1]))
+        lines.append(f"按模型:{parts}。(分模型的记录是从 11/10 的更新之后才开始的)")
+    else:
+        lines.append("分模型的记录从 11/10 的更新之后才开始,之后再问就看得到。")
+    if usage["calls"] or usage["local"]:
+        lines.append(f"问了 Claude {usage['calls']} 次" + (f",另外有 {usage['local']} 次简单指令在电脑上直接办好,没花钱"
+                                                     if usage["local"] else "") + "(这两项也是 11/10 起才开始记)。")
+    days_in_month = calendar.monthrange(today.year, today.month)[1]
+    if today.day >= 3:
+        projected = estimate / today.day * days_in_month
+        lines.append(f"照这个月到现在的速度,整个月大约 RM {projected:.0f}。")
+    opus = usage["models"].get("Opus", 0.0)
+    if usage["usd"] and opus / usage["usd"] > 0.6:
+        lines.append("大部分钱花在 Opus 上:齿轮设定里选“自动选模型”,日常的事会改用便宜一半的 Sonnet。")
+    return "".join(lines)
+
