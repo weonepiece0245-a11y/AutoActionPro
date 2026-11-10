@@ -100,6 +100,7 @@ function addLine(text, cls = "") {
   el.textContent = text;
   if (current) log.insertBefore(el, current); else log.append(el);
   scrollDown();
+  return el;
 }
 function startAnswer(source) {
   current = addMessage("friday", "", source);
@@ -977,8 +978,9 @@ async function listen({ followUp = false, stream = null, spoke = false } = {}) {
     orbState.level = 0;
     refreshMode();
     if (!spoke) { if (!followUp) toast("没听到声音"); return; }
-    addLine("识别中……");
+    const pendingLine = addLine("识别中……");
     const r = await api("/api/voice", new Blob(chunks, { type: type || "audio/webm" }), { "X-Speak": speakOn ? "1" : "0" });
+    pendingLine.remove(); // 识别完了(听清了会显示你说的话,没听清会提示),这一行不用留着
     if (!r.text) toast(r.error ? `语音识别失败:${r.error}` : "没听清,再说一次?", 3500);
   };
   recorder.start(250);
