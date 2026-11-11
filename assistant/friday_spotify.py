@@ -185,9 +185,9 @@ class Spotify:
     def _play(self, body: dict, device: str | None) -> tuple[int, dict]:
         return self.api("PUT", "/me/player/play", {"device_id": device} if device else None, body=body)
 
-    def _confirm(self) -> dict | None:
+    def _confirm(self, tries: int = 4) -> dict | None:
         """Spotify 说“好”之后,看看是不是真的在放了。在放:播放状态;没在放:None;看不出来:{}。"""
-        for attempt in range(4):
+        for attempt in range(tries):
             if attempt:
                 self.sleep(1.0)
             try:
@@ -202,11 +202,19 @@ class Spotify:
 
     def _started(self, body: dict, label: str, fallback_uri: str | None, device: str | None) -> str:
         state = self._confirm()
-        if state is None and device:  # 说好了却没放出来:把播放转到这个设备再放一次
-            self.api("PUT", "/me/player", body={"device_ids": [device], "play": False})
-            self.sleep(1.0)
-            status, _ = self._play(body, device)
-            state = self._confirm() if status in self.OK else None
+        tried: set[str] = set()
+        while state is None:
+            # 说好了却没放出来(常见:Spotify 刚打开,还没连上,命令跑去了别的设备):
+            # 等这台电脑的 Spotify 连上,把播放转过去再放,多等一会儿看看
+            target = device if device and device not in tried else self._device(prefer_computer=True)
+            if not target or target in tried:
+                break
+            tried.add(target)
+            self.api("PUT", "/me/player", body={"device_ids": [target], "play": False})
+            self.sleep(1.5)
+            status, data = self._play(body, target)
+            print(f"Spotify 重放{label}:设备 {target[:6]}… HTTP {status} {self._reason(data)}", flush=True)
+            state = self._confirm(tries=8) if status in self.OK else None
         if state is None:
             print(f"Spotify 说开始放{label}了,可是没有真的放出来", flush=True)
             if fallback_uri:
@@ -254,7 +262,7 @@ class Spotify:
         error = data.get("error") if isinstance(data, dict) else None
         return error.get("reason", "") if isinstance(error, dict) else ""
 
-    def _device(self, wait: float = 20.0) -> str | None:
+    def _device(self, wait: float = 20.0, prefer_computer: bool = False) -> str | None:
         """找这台电脑上的 Spotify;没开就打开它,最多等 20 秒让它连上 Spotify。"""
         opened = False
         waited = 0.0
@@ -263,8 +271,9 @@ class Spotify:
             devices = (data.get("devices") or []) if status == 200 else []
             devices = [d for d in devices if not d.get("is_restricted")]
             if devices:
-                pick = ([d for d in devices if d.get("is_active")] or [d for d in devices if d.get("type") == "Computer"]
-                        or devices)
+                active = [d for d in devices if d.get("is_active")]
+                computers = [d for d in devices if d.get("type") == "Computer"]
+                pick = (computers or active or devices) if prefer_computer else (active or computers or devices)
                 return pick[0].get("id")
             if not opened:
                 try:

@@ -8490,6 +8490,33 @@ class SpotifyTest(TempDirTest):
         self.assertIn(("PUT", "https://api.spotify.com/v1/me/player"), [(m, u) for m, u, _ in self.calls])
         self.assertEqual(self.opened, [])
 
+    def test_freshly_opened_spotify_not_listed_yet(self):
+        """截图那次:刚打开 Spotify 就叫它放,电脑还没出现在设备列表里,命令没指定设备,Spotify 说好了却没放。"""
+        seen = {"devices": 0, "plays": 0}
+
+        def devices(body):
+            seen["devices"] += 1
+            return (200, {"devices": []}) if seen["devices"] < 3 else (200, {"devices": [{"id": "PC", "type": "Computer"}]})
+
+        def play(body):
+            seen["plays"] += 1
+            return 204, {}
+
+        def player(body):
+            return 200, {"is_playing": seen["plays"] >= 2, "device": {"name": "PC", "type": "Computer"}}
+        routes = self.liked_routes(player)
+        routes[("GET", "/me/player/devices")] = devices
+        routes[("PUT", "/me/player/play")] = play
+        spotify = self.make(routes)
+        spotify.sleep = lambda seconds: None
+        with mock.patch.dict(os.environ, {"FRIDAY_SPOTIFY_CLIENT_ID": "c" * 32}):
+            self.login(spotify)
+            self.assertEqual(spotify.play("我喜欢的歌"), "好,放你喜欢的歌。")
+        plays = [url for m, url, _ in self.calls if m == "PUT" and "/me/player/play" in url]
+        self.assertNotIn("device_id", plays[0])  # 第一次还不知道放哪
+        self.assertIn("device_id=PC", plays[1])  # 等到电脑的 Spotify 连上,转过去再放
+        self.assertEqual(self.opened, ["spotify:"])
+
     def test_never_plays_tells_the_truth(self):
         spotify = self.make(self.liked_routes((200, {"is_playing": False})))
         spotify.sleep = lambda seconds: None
