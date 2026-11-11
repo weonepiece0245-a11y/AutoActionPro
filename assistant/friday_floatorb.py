@@ -463,3 +463,77 @@ def _quiet(job) -> None:
         job()
     except Exception:
         pass
+
+
+# ======================== 自己是一个小程序 ========================
+# 小光球在另一个进程里跑:就算它出问题卡住,也只有它自己卡,不会拖住星期五。
+# 它每 0.12 秒问星期五一次现在的状态;星期五关掉了(问不到超过 10 秒),它也自己结束。
+
+POLL_SECONDS = 0.12
+GIVE_UP_SECONDS = 10
+
+
+def _remote(folder: Path, parent: int | None = None):
+    """照 friday_web.json 连上星期五;不是自己那个星期五(pid 不一样)就抛错,等一下再试。"""
+    import urllib.request
+
+    info = json.loads((folder / "friday_web.json").read_text(encoding="utf-8"))
+    if parent and int(info.get("pid", 0)) != int(parent):
+        raise RuntimeError("星期五还没准备好")
+    base, token = f"http://127.0.0.1:{int(info['port'])}", str(info["token"])
+
+    def call(method: str, path: str, body: dict | None = None) -> dict:
+        data = json.dumps(body).encode() if body is not None else None
+        request = urllib.request.Request(base + path, data=data, method=method,
+                                         headers={"X-Friday-Token": token, "Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=2) as response:  # noqa: S310
+            return json.loads(response.read() or b"{}")
+
+    return call
+
+
+def run_process(folder: Path, parent: int | None = None, connect=None, parent_alive=None,
+                sleep=time.sleep, clock=time.monotonic) -> None:
+    """小光球自己这个小程序:跟着开它的那个星期五(parent),星期五不在了就自己结束。"""
+    connect = connect or (lambda: _remote(folder, parent))
+    if parent_alive is None:
+        import friday_guard
+
+        parent_alive = (lambda: friday_guard.pid_alive(parent)) if parent else (lambda: True)
+    state = {"mode": "idle", "accent": "#22d3ee", "level": None}
+    link = {"call": None}
+
+    def call(method: str, path: str, body: dict | None = None) -> dict:
+        if link["call"] is None:
+            link["call"] = connect()
+        try:
+            return link["call"](method, path, body)
+        except Exception:
+            link["call"] = None  # 下次重新连(星期五刚起来时端口、口令可能还没写好)
+            raise
+
+    act = lambda action: _quiet(lambda: call("POST", "/api/orb", {"action": action}))  # noqa: E731
+    orb = FloatOrb(folder / "friday_floatorb.json", mode=lambda: state["mode"], color=lambda: state["accent"],
+                   level=lambda: state["level"], on_click=lambda: act("click"), on_open=lambda: act("open"),
+                   on_close=lambda: act("hide"))
+    if not orb.start():
+        return
+    last_ok = clock()
+    while orb.running:
+        try:
+            data = call("GET", "/api/orb")
+            state.update({k: data[k] for k in ("mode", "accent", "level") if k in data})
+            last_ok = clock()
+        except Exception:
+            if clock() - last_ok > GIVE_UP_SECONDS or not parent_alive():  # 星期五关掉了:小光球也收起来
+                orb.stop()
+                break
+        sleep(POLL_SECONDS)
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) > 1:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        run_process(Path(sys.argv[1]), int(sys.argv[2]) if len(sys.argv) > 2 else None)

@@ -313,6 +313,8 @@ class WebContext:
         self.lock = None  # 窗口锁(friday_locks.WindowLock);锁着时只能解锁
         self.uploads: dict[str, tuple] = {}  # 贴进来、拖进来的文件:id -> (文件名, 类型, 内容, 时间)
         self.reader = None  # 读给我听(friday_reader.Reader)
+        self.orb_state: Callable[[], dict] | None = None  # 桌面小光球要的状态(在听/在说/颜色/声音大小)
+        self.orb_action: Callable[[str], None] | None = None  # 小光球被点了:click / open / hide
         self.spotify_callback: Callable[[dict], str] | None = None  # Spotify 登录跳回来
 
     def locked(self) -> bool:
@@ -402,6 +404,10 @@ def make_handler(ctx: WebContext):
                                   {"Content-Security-Policy": "default-src 'none'", "Referrer-Policy": "no-referrer"})
             if not self._token_ok(query):
                 return self._send(403, b"forbidden", "text/plain")
+            if url.path == "/api/ping":  # 守护程序看星期五还有没有反应(锁着也回)
+                return self._json(200, {"ok": True})
+            if url.path == "/api/orb" and ctx.orb_state is not None:  # 桌面小光球(另一个小程序)来问现在的状态
+                return self._json(200, ctx.orb_state())
             if ctx.locked():  # 锁着:什么内容都不给看
                 if url.path == "/api/state":
                     return self._json(200, {"locked": True})
@@ -504,6 +510,15 @@ def make_handler(ctx: WebContext):
                 return self._json(413, {"error": str(e)})
             if url.path in ("/api/unlock", "/api/lock"):
                 return self._lock_request(url.path, body)
+            if url.path == "/api/orb" and ctx.orb_action is not None:  # 桌面小光球被点了(锁着也能叫出窗口)
+                try:
+                    action = str(json.loads(body or b"{}").get("action") or "")
+                except ValueError:
+                    action = ""
+                if action not in ("click", "open", "hide"):
+                    return self._json(400, {"error": "不认识"})
+                ctx.orb_action(action)
+                return self._json(200, {"ok": True})
             if ctx.locked():
                 return self._json(423, {"error": "星期五已上锁,先输入 PIN 解锁"})
             try:

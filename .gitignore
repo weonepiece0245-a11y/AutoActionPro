@@ -66,3 +66,6 @@ assistant/friday_crash.json
 assistant/friday_guard.lock
 assistant/friday_dates.json*
 assistant/friday_photo_sort.json
+
+# 更新前留的旧文件(自动退回上一版用)
+assistant/_update_backup/

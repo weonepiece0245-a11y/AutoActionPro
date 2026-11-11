@@ -12,8 +12,10 @@ import datetime
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -80,9 +82,17 @@ def _target(name: str, root: Path) -> Path | None:
     return target
 
 
-def apply(data: bytes, root: Path) -> list[str]:
-    """把 zip 解到 root(仓库根目录);只写有变化的文件,返回改了哪些。"""
+BACKUP_DIR = "_update_backup"
+ROLLBACK_WINDOW = 30 * 60  # 更新完 30 分钟内出问题,才自动退回上一版
+
+
+def apply(data: bytes, root: Path, backup: Path | None = None, added: list[str] | None = None) -> list[str]:
+    """把 zip 解到 root(仓库根目录);只写有变化的文件,返回改了哪些。
+
+    backup:先把要被换掉的旧文件存到这里;原来没有的新文件记进 added。新版本起不来时照着退回去。
+    """
     changed = []
+    added = added if added is not None else []
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         for info in archive.infolist():
             if info.is_dir():
@@ -96,12 +106,58 @@ def apply(data: bytes, root: Path) -> list[str]:
                     continue
             except OSError:
                 pass
+            relative = target.relative_to(root).as_posix()
+            if backup is not None:
+                if target.exists():
+                    saved = Path(backup) / "files" / relative
+                    saved.parent.mkdir(parents=True, exist_ok=True)
+                    saved.write_bytes(target.read_bytes())
+                else:
+                    added.append(relative)
             target.parent.mkdir(parents=True, exist_ok=True)
             temp = target.with_name(target.name + ".friday-update")
             temp.write_bytes(content)
             os.replace(temp, target)
-            changed.append(target.relative_to(root).as_posix())
+            changed.append(relative)
     return changed
+
+
+def rollback(assistant_dir: Path, clock=time.time, max_age: float = ROLLBACK_WINDOW) -> bool:
+    """刚更新完的新版本起不来:把旧文件放回去(只做一次)。退回了返回 True。"""
+    assistant_dir = Path(assistant_dir)
+    backup = assistant_dir / BACKUP_DIR
+    try:
+        manifest = json.loads((backup / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if manifest.get("used") or clock() - float(manifest.get("time", 0)) > max_age:
+        return False
+    root = assistant_dir.parent
+    added = set(manifest.get("added") or [])
+    for relative in manifest.get("changed") or []:
+        target = root / relative
+        try:
+            if relative in added:
+                target.unlink(missing_ok=True)
+            else:
+                saved = backup / "files" / relative
+                if saved.exists():
+                    temp = target.with_name(target.name + ".friday-rollback")
+                    temp.write_bytes(saved.read_bytes())
+                    os.replace(temp, target)
+        except OSError:
+            continue
+    version = manifest.get("version")
+    try:
+        if version:
+            (assistant_dir / VERSION_FILE).write_text(version, encoding="utf-8")
+        else:
+            (assistant_dir / VERSION_FILE).unlink(missing_ok=True)
+    except OSError:
+        pass
+    manifest["used"] = True
+    (backup / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    return True
 
 
 def version_info(assistant_dir: Path) -> dict:
@@ -134,7 +190,21 @@ def update(assistant_dir: Path, fetcher: Fetch = fetch, installer=install_requir
     branch, data = download(fetcher)
     commit = commit_of(data)
     root = assistant_dir.parent
-    changed = apply(data, root)
+    backup = assistant_dir / BACKUP_DIR
+    try:
+        old_version = (assistant_dir / VERSION_FILE).read_text(encoding="utf-8")
+    except OSError:
+        old_version = ""
+    shutil.rmtree(backup, ignore_errors=True)
+    added: list[str] = []
+    changed = apply(data, root, backup=backup, added=added)
+    if changed:  # 留一份清单:新版本起不来时守护程序照着退回去
+        backup.mkdir(parents=True, exist_ok=True)
+        (backup / "manifest.json").write_text(json.dumps({
+            "time": time.time(), "changed": changed, "added": added, "version": old_version,
+            "used": False}, ensure_ascii=False), encoding="utf-8")
+    else:
+        shutil.rmtree(backup, ignore_errors=True)
     if not changed and commit and commit == current_version(assistant_dir):
         return {"status": "latest", "commit": commit, "changed": [], "branch": branch}
     deps_ok = True

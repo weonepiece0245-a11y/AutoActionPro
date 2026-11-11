@@ -1370,7 +1370,8 @@ class WebSession:
     brief = None  # 早安简报(friday_brief.MorningBrief)
     clips = None  # 剪贴板历史(friday_clipboard.ClipHistory)
     folder_backup = None  # 文件夹备份(friday_folderbackup.FolderBackup)
-    floatorb = None  # 桌面小光球(friday_floatorb.FloatOrb)
+    floatorb = None  # 桌面小光球(OrbProcess:另一个小程序)
+    orb_open = None  # 小光球右键“打开星期五窗口”
     env_file = ".env"
     spotify = None  # Spotify(friday_spotify.Spotify)
     alert_state = None  # friday_alerts.json(下雨、每周报告、早安简报共用)
@@ -3363,33 +3364,81 @@ def start_tapo(session, toolbox, install: bool = False) -> str | None:
     return "第一次用 Tapo,要先在后台安装控制组件(一两分钟),装好会在窗口里说找到了哪些设备。"
 
 
+class OrbProcess:
+    """桌面小光球在另一个小程序里跑:它卡住也只有它自己卡,不会拖住星期五。"""
+
+    def __init__(self, data_dir: str, launch=None) -> None:
+        self.data_dir = data_dir
+        self.proc = None
+        self.launch = launch or self._launch
+
+    def _launch(self):
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "friday_floatorb.py")
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        return subprocess.Popen([sys.executable, script, self.data_dir, str(os.getpid())],
+                                cwd=os.path.dirname(script), creationflags=flags,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    @property
+    def running(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    def start(self) -> bool:
+        if self.running:
+            return True
+        try:
+            self.proc = self.launch()
+        except OSError:
+            return False
+        for _ in range(15):  # 等一下:一开就结束的话就是没开成
+            if self.proc.poll() is not None:
+                return False
+            time.sleep(0.1)
+        return True
+
+    def stop(self) -> None:
+        if self.running:
+            self.proc.terminate()
+            try:
+                self.proc.wait(3)
+            except Exception:
+                self.proc.kill()
+
+
 def start_floatorb(session, ctx, data_dir: str) -> None:
-    """桌面小光球(只有 Windows):齿轮设定或说“显示小光球”打开,右键收起。"""
+    """桌面小光球(只有 Windows):齿轮设定或说“显示小光球”打开,右键选单收起。"""
     if os.name != "nt":
         return
-    import friday_floatorb
     from friday_discord import save_env_value
 
-    def mode() -> str:
+    def state() -> dict:
         if ctx.activity.get("listening"):
-            return "listening"
-        if ctx.activity.get("speaking"):
-            return "speaking"
-        return "thinking" if getattr(session, "busy", False) else "idle"
+            mode = "listening"
+        elif ctx.activity.get("speaking"):
+            mode = "speaking"
+        else:
+            mode = "thinking" if getattr(session, "busy", False) else "idle"
+        fresh = time.monotonic() - ctx.activity.get("level_at", 0) < 0.6
+        return {"mode": mode, "accent": ctx.activity.get("accent", "#22d3ee"),
+                "level": ctx.activity.get("level") if fresh else None}
 
-    def closed() -> None:  # 用右键选单收起:下次开星期五也不自动出来
-        os.environ["FRIDAY_FLOATORB"] = "off"
-        _quietly(lambda: save_env_value(Path(session.env_file), "FRIDAY_FLOATORB", "off"))
-        session.hub.broadcast({"type": "floatorb", "on": False})
+    def action(name: str) -> None:
+        if name == "click":
+            session.hub.broadcast({"type": "orb_click"})
+        elif name == "open":
+            opener = getattr(session, "orb_open", None)
+            if opener is not None:
+                threading.Thread(target=lambda: _quietly(opener), daemon=True).start()
+        elif name == "hide":  # 用右键选单收起:下次开星期五也不自动出来
+            os.environ["FRIDAY_FLOATORB"] = "off"
+            _quietly(lambda: save_env_value(Path(session.env_file), "FRIDAY_FLOATORB", "off"))
+            session.hub.broadcast({"type": "floatorb", "on": False})
 
-    session.floatorb = friday_floatorb.FloatOrb(
-        os.path.join(data_dir, "friday_floatorb.json"), mode=mode,
-        color=lambda: ctx.activity.get("accent", "#22d3ee"),
-        level=lambda: ctx.activity.get("level") if time.monotonic() - ctx.activity.get("level_at", 0) < 0.6 else None,
-        on_click=lambda: session.hub.broadcast({"type": "orb_click"}), on_close=closed)
+    ctx.orb_state, ctx.orb_action = state, action
+    session.floatorb = OrbProcess(data_dir)
     session.quick.floatorb = lambda on: floatorb_switch(session, on)
     if os.environ.get("FRIDAY_FLOATORB", "off") == "on":
-        session.floatorb.start()
+        threading.Thread(target=lambda: _quietly(session.floatorb.start), daemon=True).start()
 
 
 def floatorb_switch(session, on: bool) -> str:
@@ -3821,9 +3870,8 @@ def run_web(args) -> None:
                               lambda: hub.broadcast({"type": "listen"}),
                               lambda: friday_web.open_window(url + "&listen=1", profile_dir))
 
-    if getattr(session, "floatorb", None) is not None:  # 小光球右键“打开星期五窗口”
-        session.floatorb.on_open = lambda: (hub.connected and friday_web.focus_window()) or friday_web.open_window(
-            url, profile_dir)
+    # 小光球右键“打开星期五窗口”
+    session.orb_open = lambda: (hub.connected and friday_web.focus_window()) or friday_web.open_window(url, profile_dir)
     session.hotkey = friday_desktop.GlobalHotkey(summon_now)
     if not session.hotkey.start(friday_desktop.hotkey_name()):
         print(f"快捷键没有设置成功:{session.hotkey.error}", flush=True)
@@ -3959,6 +4007,8 @@ def run_web(args) -> None:
         import friday_guard
 
         friday_guard.write_heartbeat(Path(data_dir), "restarting" if session.restart else "quit")
+        if getattr(session, "floatorb", None) is not None:
+            _quietly(session.floatorb.stop)  # 小光球跟着关(重开后会再开)
         session.wake.stop()
         if session.cloud is not None:
             session.cloud.stop()

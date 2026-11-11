@@ -4230,6 +4230,21 @@ class WebServerTest(TempDirTest):
     def auth(self, extra=None):
         return {"X-Friday-Token": "secret", **(extra or {})}
 
+    def test_ping_and_orb_routes(self):
+        self.assertEqual(self.request("GET", "/api/ping")[0], 403)  # 也要口令
+        self.assertEqual(self.request("GET", "/api/ping", headers=self.auth())[0], 200)
+        self.assertEqual(self.request("GET", "/api/orb", headers=self.auth())[0], 404)  # 没开小光球
+        actions = []
+        self.ctx.orb_state = lambda: {"mode": "idle", "accent": "#fff", "level": None}
+        self.ctx.orb_action = actions.append
+        status, body = self.request("GET", "/api/orb", headers=self.auth())
+        self.assertEqual((status, json.loads(body)["mode"]), (200, "idle"))
+        self.assertEqual(self.request("POST", "/api/orb", body=json.dumps({"action": "open"}),
+                                      headers=self.auth({"Content-Type": "application/json"}))[0], 200)
+        self.assertEqual(self.request("POST", "/api/orb", body=json.dumps({"action": "rm -rf"}),
+                                      headers=self.auth({"Content-Type": "application/json"}))[0], 400)
+        self.assertEqual(actions, ["open"])
+
     def test_static_page_and_security(self):
         status, body = self.request("GET", "/")
         self.assertEqual(status, 200)
@@ -7122,6 +7137,161 @@ class GuardTest(TempDirTest):
         events.put(("eof", None))
         app.web_loop(session, events)
         self.assertEqual(friday_guard.read_heartbeat(Path(self.tmp))["state"], "running")
+
+
+import friday_floatorb  # noqa: E402
+
+
+class SelfRescueTest(TempDirTest):
+    """更新出问题自动救回:窗口叫不动 2 分钟就重开;刚更新完就起不来就退回上一版。"""
+
+    def guard(self, answers, rolled=False):
+        self.now = [1000.0]
+        self.killed, self.launched, self.rollbacks = [], [], []
+        answers = iter(answers)
+        guard = friday_guard.Guard(Path(self.tmp), clock=lambda: self.now[0], alive=lambda pid: True,
+                                   killer=self.killed.append, launcher=self.launched.append,
+                                   probe=lambda folder, beat: next(answers),
+                                   rollback=lambda beat: self.rollbacks.append(beat) or rolled)
+        return guard
+
+    def beat(self):
+        Path(self.tmp, friday_guard.HEARTBEAT).write_text(json.dumps(
+            {"time": self.now[0], "pid": 77, "state": "running", "exe": "pythonw", "argv": [], "script": "/x/assistant.py"}))
+
+    def test_window_not_answering_restarts_after_four_tries(self):
+        guard = self.guard([False, False, True, False, False, False, False])
+        self.beat()
+        results = [guard.step() for _ in range(7)]
+        self.assertEqual(results, ["ok"] * 6 + ["restarted"])  # 中间有一次回应:重新数
+        self.assertEqual(self.killed, [77])
+        self.assertIn("2 分钟叫不动", friday_guard.take_crash_note(Path(self.tmp)))
+
+    def test_unknown_answer_does_not_count(self):
+        guard = self.guard([None] * 6)
+        self.beat()
+        self.assertEqual([guard.step() for _ in range(6)], ["ok"] * 6)
+        self.assertEqual(self.killed, [])
+
+    def test_restart_rolls_back_fresh_update(self):
+        guard = self.guard([False] * 4, rolled=True)
+        self.beat()
+        for _ in range(4):
+            result = guard.step()
+        self.assertEqual(result, "restarted")
+        self.assertEqual(len(self.rollbacks), 1)
+        self.assertIn("自动退回上一版", friday_guard.take_crash_note(Path(self.tmp)))
+
+    def test_ping_reads_instance_file(self):
+        beat = {"pid": 77}
+        self.assertIsNone(friday_guard.ping(Path(self.tmp), beat))  # 还没写好
+        Path(self.tmp, "friday_web.json").write_text(json.dumps({"port": 1, "token": "t", "pid": 99}))
+        self.assertIsNone(friday_guard.ping(Path(self.tmp), beat))  # 是上一个星期五留下的
+        Path(self.tmp, "friday_web.json").write_text(json.dumps({"port": 1, "token": "t", "pid": 77}))
+        self.assertFalse(friday_guard.ping(Path(self.tmp), beat))  # 叫不动
+
+    def update_dir(self):
+        root = Path(self.tmp, "repo")
+        folder = root / "assistant"
+        folder.mkdir(parents=True)
+        (folder / "assistant.py").write_text("old")
+        (folder / "keep.py").write_text("same")
+        (folder / ".env").write_text("SECRET=mine")
+        (folder / friday_update.VERSION_FILE).write_text('{"commit": "old1"}')
+        return folder
+
+    def test_update_backup_and_rollback(self):
+        folder = self.update_dir()
+        data = make_archive({"assistant/assistant.py": "broken", "assistant/keep.py": "same",
+                             "assistant/brand_new.py": "x", "assistant/.env": "SECRET=other"})
+        result = friday_update.update(folder, fetcher=lambda url: data, installer=lambda d: True)
+        self.assertEqual(sorted(result["changed"]), ["assistant/assistant.py", "assistant/brand_new.py"])
+        self.assertEqual((folder / "assistant.py").read_text(), "broken")
+        self.assertTrue(friday_update.rollback(folder))
+        self.assertEqual((folder / "assistant.py").read_text(), "old")
+        self.assertFalse((folder / "brand_new.py").exists())  # 新加的文件拿掉
+        self.assertEqual((folder / ".env").read_text(), "SECRET=mine")
+        self.assertEqual(friday_update.current_version(folder), "old1")
+        self.assertFalse(friday_update.rollback(folder))  # 只退一次
+
+    def test_old_backup_is_not_used(self):
+        folder = self.update_dir()
+        data = make_archive({"assistant/assistant.py": "new"})
+        friday_update.update(folder, fetcher=lambda url: data, installer=lambda d: True)
+        later = time.time() + friday_update.ROLLBACK_WINDOW + 60
+        self.assertFalse(friday_update.rollback(folder, clock=lambda: later))  # 用了很久都没事:不是更新的问题
+        self.assertEqual((folder / "assistant.py").read_text(), "new")
+
+    def test_guard_rollback_uses_script_folder(self):
+        folder = self.update_dir()
+        data = make_archive({"assistant/assistant.py": "broken"})
+        friday_update.update(folder, fetcher=lambda url: data, installer=lambda d: True)
+        self.assertTrue(friday_guard.rollback_update({"script": str(folder / "assistant.py")}))
+        self.assertEqual((folder / "assistant.py").read_text(), "old")
+        self.assertFalse(friday_guard.rollback_update({}))
+
+    def test_orb_process_start_and_stop(self):
+        class Proc:
+            def __init__(self, ends):
+                self.ends, self.stopped = ends, False
+
+            def poll(self):
+                return 1 if self.ends or self.stopped else None
+
+            def terminate(self):
+                self.stopped = True
+
+            def wait(self, timeout):
+                return 0
+
+        with mock.patch.object(app.time, "sleep", lambda s: None):
+            orb = app.OrbProcess(self.tmp, launch=lambda: Proc(ends=True))
+            self.assertFalse(orb.start())  # 一开就结束:没开成
+            proc = Proc(ends=False)
+            orb = app.OrbProcess(self.tmp, launch=lambda: proc)
+            self.assertTrue(orb.start())
+            self.assertTrue(orb.running)
+            orb.stop()
+            self.assertTrue(proc.stopped)
+            self.assertFalse(orb.running)
+
+    def test_orb_process_follows_friday(self):
+        calls, alive, now = [], [True], [0.0]
+
+        class FakeOrb:
+            def __init__(self, path, **kw):
+                self.kw, self.running = kw, False
+
+            def start(self):
+                self.running = True
+                return True
+
+            def stop(self):
+                self.running = False
+
+        def connect():
+            def call(method, path, body=None):
+                calls.append((method, path, body))
+                if len(calls) > 2:
+                    raise OSError("星期五没了")
+                return {"mode": "speaking", "accent": "#ff0000", "level": 0.5}
+            return call
+
+        def sleep(seconds):
+            now[0] += 1
+            alive[0] = len(calls) < 4
+
+        with mock.patch.object(friday_floatorb, "FloatOrb", FakeOrb):
+            friday_floatorb.run_process(Path(self.tmp), 5, connect=connect, parent_alive=lambda: alive[0],
+                                        sleep=sleep, clock=lambda: now[0])
+        self.assertEqual(calls[0], ("GET", "/api/orb", None))
+        self.assertLessEqual(len(calls), 6)  # 星期五不在了:小光球自己结束
+
+    def test_remote_needs_the_right_friday(self):
+        Path(self.tmp, "friday_web.json").write_text(json.dumps({"port": 1, "token": "t", "pid": 99}))
+        with self.assertRaises(RuntimeError):
+            friday_floatorb._remote(Path(self.tmp), 5)
+        self.assertTrue(callable(friday_floatorb._remote(Path(self.tmp), 99)))
 
 
 class KeyAndCreditAlertTest(TempDirTest):

@@ -20,6 +20,7 @@ HEARTBEAT = "friday_heartbeat.json"
 CRASH_NOTE = "friday_crash.json"
 CHECK_EVERY = 30
 HANG_SECONDS = 10 * 60
+HANG_PINGS = 4  # 窗口的服务连续 4 次(大约 2 分钟)叫不动:当成卡住
 RESTART_WAIT = 3 * 60  # 更新重启:最多等这么久新版本起来
 MAX_RESTARTS = 3
 RESTART_WINDOW = 15 * 60
@@ -94,16 +95,50 @@ def relaunch(beat: dict) -> None:
     subprocess.Popen(command, cwd=os.path.dirname(beat.get("script") or "."), creationflags=flags)
 
 
+def ping(folder: Path, beat: dict) -> bool | None:
+    """敲一下星期五窗口的服务:有回应 True,叫不动 False,还不知道(刚开、还没写好)None。"""
+    import urllib.request
+
+    try:
+        info = json.loads((Path(folder) / "friday_web.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if int(info.get("pid", 0)) != int(beat.get("pid", -1)):
+        return None  # 不是现在这个星期五的(还在启动)
+    request = urllib.request.Request(f"http://127.0.0.1:{int(info['port'])}/api/ping",
+                                     headers={"X-Friday-Token": str(info.get("token", ""))})
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:  # noqa: S310
+            return response.status == 200
+    except Exception:
+        return False
+
+
+def rollback_update(beat: dict) -> bool:
+    """刚更新完就出问题:退回上一版。"""
+    script = beat.get("script")
+    if not script:
+        return False
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import friday_update
+
+    return friday_update.rollback(Path(os.path.dirname(script)))
+
+
 class Guard:
     """判断该不该重开(和真的进程、时间分开,方便测试)。"""
 
-    def __init__(self, folder: Path, clock=time.time, alive=pid_alive, killer=kill, launcher=relaunch) -> None:
+    def __init__(self, folder: Path, clock=time.time, alive=pid_alive, killer=kill, launcher=relaunch,
+                 probe=ping, rollback=rollback_update) -> None:
         self.folder = Path(folder)
         self.clock = clock
         self.alive = alive
         self.killer = killer
         self.launcher = launcher
+        self.probe = probe
+        self.rollback = rollback
         self.restarts: list[float] = []
+        self.misses = 0
 
     def note(self, reason: str) -> None:
         try:
@@ -129,6 +164,15 @@ class Guard:
         if age > HANG_SECONDS:
             self.killer(int(beat.get("pid", 0)))
             return self._restart(beat, f"星期五卡住超过 {HANG_SECONDS // 60} 分钟没反应")
+        answered = self.probe(self.folder, beat) if state == "running" else None
+        if answered is False:
+            self.misses += 1
+            if self.misses >= HANG_PINGS:
+                self.misses = 0
+                self.killer(int(beat.get("pid", 0)))
+                return self._restart(beat, "星期五卡住了(窗口大约 2 分钟叫不动)")
+        elif answered:
+            self.misses = 0
         return "ok"
 
     def _restart(self, beat: dict, reason: str) -> str:
@@ -138,6 +182,11 @@ class Guard:
             self.note(f"{reason},已经连续重开 {MAX_RESTARTS} 次还是不行,先停下来了")
             return "gave_up"
         self.restarts.append(now)
+        try:
+            if self.rollback(beat):  # 刚更新完就出问题:先退回上一版再开
+                reason += ";因为刚更新完就出问题,已经自动退回上一版"
+        except Exception:
+            pass
         self.note(reason)
         # 新的那个起来之前标成“重启中”,免得下一次检查又重开一个
         data = {"time": now, "pid": 0, "state": "restarting", "exe": beat.get("exe"), "argv": beat.get("argv") or [],
@@ -181,12 +230,25 @@ def main() -> None:
     if not lock.acquire():
         return  # 已经有一个守护在看着
     guard = Guard(folder)
+    own = Path(os.path.abspath(__file__))
+    started = _mtime(own)
     time.sleep(CHECK_EVERY)
     while True:
         result = guard.step()
         if result in ("stop", "gave_up"):
             return
+        if result == "ok" and _mtime(own) != started:  # 星期五更新过了:换新版的守护接着看
+            lock.release()
+            start_guard(folder, dict(os.environ))
+            return
         time.sleep(CHECK_EVERY)
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 if __name__ == "__main__":
