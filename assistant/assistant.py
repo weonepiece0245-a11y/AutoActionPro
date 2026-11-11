@@ -2569,6 +2569,19 @@ def attach_router(assistant: Assistant, args, data_dir: str, on_change=None):
     return router
 
 
+def _startup_step(session, name: str, step: Callable[[], object]) -> None:
+    """启动时的一步:出错只影响这一个功能,别的照常开(以前一步出错,后面的设定全都不见)。"""
+    try:
+        step()
+    except Exception as e:  # noqa: BLE001
+        import traceback
+
+        print(f"启动“{name}”时出错:{type(e).__name__}: {e}", flush=True)
+        traceback.print_exc()
+        if not getattr(session, "startup_error", None):
+            session.startup_error = f"“{name}”没有开成功({type(e).__name__}),其他功能照常。检查更新通常就能修好。"
+
+
 def _quietly(call: Callable[[], object]) -> None:
     try:
         call()
@@ -2616,9 +2629,7 @@ def start_care(session, ctx, hub, toolbox: Toolbox, voice_module, data_dir: str 
     import friday_gameboost
 
     boost = friday_gameboost.GameBoost(data_dir)
-    session.gameboost = boost
-    session.quick.gameboost = boost
-    session.quick.env_file = session.env_file
+    session.gameboost = boost  # 简单指令那边等 session.quick 建好后再接上(这时还没有)
     if boost.recover():
         print("上次打游戏时星期五意外关掉了:游戏优化已经改回原样", flush=True)
 
@@ -3968,10 +3979,11 @@ def run_web(args) -> None:
     )
     if os.environ.get("FRIDAY_WAKE", "off") == "on":
         session.wake.start()
-    start_care(session, ctx, hub, toolbox, voice_module, data_dir)
-    start_daily_checks(session, toolbox, data_dir)
-    start_security(session, data_dir)
-    start_heartbeat(events, data_dir)
+    start_heartbeat(events, data_dir)  # 最先开:后面哪一步出错,守护程序也知道星期五还活着
+    for name, step in (("主动关心", lambda: start_care(session, ctx, hub, toolbox, voice_module, data_dir)),
+                       ("每日检查", lambda: start_daily_checks(session, toolbox, data_dir)),
+                       ("安全检查", lambda: start_security(session, data_dir))):
+        _startup_step(session, name, step)
     if crash_reason:
         hub.broadcast({"type": "error", "text": f"🛡 {crash_reason},守护程序已经自动把我重新打开了。"})
         phone_alert(session, f"🛡 {crash_reason},守护程序已经自动把星期五重新打开了。", delay=60)
@@ -3979,6 +3991,8 @@ def run_web(args) -> None:
     import friday_quick
 
     session.quick = friday_quick.QuickCommands(toolbox, meter=session.meter, budget=getattr(session, "budget", None))
+    session.quick.gameboost = getattr(session, "gameboost", None)
+    session.quick.env_file = session.env_file
     toolbox.meter, toolbox.budget = session.meter, getattr(session, "budget", None)
     import friday_scenes
 

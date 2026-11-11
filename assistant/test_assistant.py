@@ -5815,6 +5815,25 @@ class GameBoostTest(TempDirTest):
         care.tick()
         self.assertEqual(events, [("start", "Dota 2"), ("end", "Dota 2")])
 
+    def test_start_care_runs_before_quick_commands_exist(self):
+        """11-12 的问题:启动时 start_care 比 session.quick 早,一出错后面的设定全不见了。"""
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        self.assertIsNone(session.quick)
+        with mock.patch.object(friday_care.Care, "start", lambda self, interval=30: None):
+            app.start_care(session, SimpleNamespace(activity={}), friday_web.Hub(), SimpleNamespace(reminders=None),
+                           None, self.tmp)
+        self.assertIsNotNone(session.gameboost)
+        self.assertIsNotNone(session.care)
+
+    def test_startup_step_keeps_going(self):
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        ran = []
+        with mock.patch("sys.stdout", io.StringIO()), mock.patch("sys.stderr", io.StringIO()):
+            app._startup_step(session, "坏掉的", lambda: 1 / 0)
+        app._startup_step(session, "好的", lambda: ran.append(1))
+        self.assertEqual(ran, [1])
+        self.assertIn("“坏掉的”没有开成功", session.startup_error)
+
     def test_quick_commands_and_settings(self):
         system = FakeBoostSystem()
         quick = friday_quick.QuickCommands(SimpleNamespace())
