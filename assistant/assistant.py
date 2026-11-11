@@ -123,6 +123,8 @@ FRIDAY_PROMPT = """你是“星期五”,{call_me}的私人 AI 助手。
 - 执行命令和写文件前{call_me}会逐一确认;如果被拒绝,换个办法或说明还需要什么。
 - 用 computer 工具做一句话就能完成的电脑操作:音量、切歌、切换耳机/音箱、打开程序和游戏、窗口、
   电脑状态、亮度、深色模式、壁纸、找文件、剪贴板、锁屏、关机睡眠等。
+  开游戏时星期五会自动做游戏优化(游戏高优先级、后台程序降优先级、高性能电源,打完改回来),不用你做;
+  问“打游戏卡怎么办”“游戏体检”时,本地命令会检查 Windows 的游戏设定,你不用另外查。
   “游戏模式”:先用 computer 的 game_mode(关掉{call_me}在设定里选好的程序);还没选过就用 system_status 看哪些最占内存,
   问{call_me}关哪些,确认后用 close_app 关掉,并提醒可以在齿轮设定→打游戏时 选好,以后开游戏自动关。
 - 授权了 Google 的话:calendar 看和安排日程;gmail 看邮件、回邮件(发送前{call_me}会确认);
@@ -2373,6 +2375,13 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         save_env_value(env, "FRIDAY_GAME_QUIET", "on" if on else "off")
         os.environ["FRIDAY_GAME_QUIET"] = "on" if on else "off"
         done.append("打游戏时提醒改成右下角小通知,打完再说" if on else "打游戏时提醒照常读出来")
+    if "game_boost" in payload:
+        on = bool(payload["game_boost"])
+        save_env_value(env, "FRIDAY_GAME_BOOST", "on" if on else "off")
+        os.environ["FRIDAY_GAME_BOOST"] = "on" if on else "off"
+        if not on and getattr(session, "gameboost", None) is not None:
+            _quietly(session.gameboost.stop)
+        done.append("开游戏时会自动优化(游戏优先、后台让路、高性能电源)" if on else "游戏优化关掉了")
     if "game_close" in payload:
         import friday_care
 
@@ -2567,7 +2576,7 @@ def _quietly(call: Callable[[], object]) -> None:
         pass
 
 
-def start_care(session, ctx, hub, toolbox: Toolbox, voice_module):
+def start_care(session, ctx, hub, toolbox: Toolbox, voice_module, data_dir: str = "."):
     """主动关心:离开回来打招呼、用太久提醒休息、太晚提醒睡觉(固定的话,不花钱)。"""
     import friday_care
 
@@ -2604,8 +2613,39 @@ def start_care(session, ctx, hub, toolbox: Toolbox, voice_module):
         if tray is not None:
             tray.notify(text)
 
+    import friday_gameboost
+
+    boost = friday_gameboost.GameBoost(data_dir)
+    session.gameboost = boost
+    session.quick.gameboost = boost
+    session.quick.env_file = session.env_file
+    if boost.recover():
+        print("上次打游戏时星期五意外关掉了:游戏优化已经改回原样", flush=True)
+
+    def boost_game(game: str) -> None:
+        if not friday_gameboost.enabled():
+            return
+        try:
+            text = boost.start(game)
+        except Exception as e:
+            print(f"游戏优化没做成:{type(e).__name__}: {e}", flush=True)
+            return
+        if text:
+            toast(text)
+            hub.broadcast({"type": "status", "text": f"🎮 {text}"})
+
+    def game_ended(game: str) -> None:
+        try:
+            text = boost.stop()
+        except Exception as e:
+            print(f"游戏优化没改回来:{type(e).__name__}: {e}", flush=True)
+            return
+        if text:
+            hub.broadcast({"type": "status", "text": f"🎮 {text}"})
+
     def game_started(game: str) -> None:
-        """开游戏了:自动关掉事先选好的程序(游戏模式)。"""
+        """开游戏了:游戏优化,再自动关掉事先选好的程序(游戏模式)。"""
+        threading.Thread(target=lambda: boost_game(game), daemon=True, name="friday-game-boost").start()
         names = friday_care.game_close_list()
         computer = getattr(toolbox, "computer", None)
         if not names or computer is None or not computer.available:
@@ -2626,7 +2666,7 @@ def start_care(session, ctx, hub, toolbox: Toolbox, voice_module):
 
     care = friday_care.Care(
         say, name=lambda: os.environ.get("FRIDAY_CALL_ME") or session.call_me or DEFAULT_CALL_ME,
-        reminders=todays_reminders, toast=toast, on_game=game_started)
+        reminders=todays_reminders, toast=toast, on_game=game_started, on_game_end=game_ended)
     care.start()
     session.care = care
     return care
@@ -3132,7 +3172,9 @@ def start_folder_backup(session, toolbox, data_dir: str, interval: float = 600) 
         time.sleep(300)
         while True:
             def check() -> None:
-                if backup.due():
+                import friday_gameboost
+
+                if backup.due() and not friday_gameboost.gaming():  # 打游戏时不抢硬盘,打完再备份
                     run(quiet=True)
                 text = backup.overdue_message(_call_me(session))
                 if text:
@@ -3926,7 +3968,7 @@ def run_web(args) -> None:
     )
     if os.environ.get("FRIDAY_WAKE", "off") == "on":
         session.wake.start()
-    start_care(session, ctx, hub, toolbox, voice_module)
+    start_care(session, ctx, hub, toolbox, voice_module, data_dir)
     start_daily_checks(session, toolbox, data_dir)
     start_security(session, data_dir)
     start_heartbeat(events, data_dir)

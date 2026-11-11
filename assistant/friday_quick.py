@@ -75,6 +75,8 @@ class QuickCommands:
         self.spotify = None  # friday_spotify.Spotify
         self.dota = None  # friday_dota.Dota
         self.apex = None  # friday_apex.Apex
+        self.gameboost = None  # friday_gameboost.GameBoost
+        self.env_file = None  # 改设定时存到哪个 .env
         self.sleep_timer = None  # friday_sleeptimer.SleepTimer
         self.diary = None  # friday_diary.Diary
         self.shopping = None  # friday_shopping.Shopping
@@ -532,7 +534,33 @@ class QuickCommands:
                           r"|^(apex)?(地图|图)(轮换|什么时候换)$", re.I)
     APEX_RANK = re.compile(r"^(我的?)?apex(的)?(排位|段位|分数|等级|战绩|排位分)(多少|是什么|怎么样)?(分)?$", re.I)
 
+    GAME_CHECK = re.compile(r"^(游戏体检|游戏检查|检查(一下)?(电脑的?)?游戏(设定|设置)|打游戏前(帮我)?检查(一下)?(电脑)?"
+                            r"|(为什么|为啥)?(打)?游戏(很|好|会|有点)?(卡|掉帧|不顺|lag)(怎么办)?|(怎么|怎样)让游戏(更)?(顺|流畅|快))$")
+    BOOST_STATUS = re.compile(r"^游戏优化(状态|开着吗|有开吗|在做什么|做了什么)?$")
+    BOOST_SWITCH = re.compile(r"^(?P<act>打开|开启|开|关掉|关闭|关|停止)(自动)?游戏优化$")
+
     def _games(self, sentence: str) -> str | None:
+        if self.gameboost is not None:
+            if self.GAME_CHECK.match(sentence):
+                import friday_gameboost
+
+                return friday_gameboost.checkup()
+            if self.BOOST_STATUS.match(sentence):
+                return self.gameboost.describe()
+            found = self.BOOST_SWITCH.match(sentence)
+            if found:
+                on = found.group("act") in ("打开", "开启", "开")
+                os.environ["FRIDAY_GAME_BOOST"] = "on" if on else "off"
+                if self.env_file:
+                    from pathlib import Path
+
+                    from friday_discord import save_env_value
+
+                    save_env_value(Path(self.env_file), "FRIDAY_GAME_BOOST", "on" if on else "off")
+                if not on:
+                    self.gameboost.stop()
+                return ("好,以后开游戏时自动优化:游戏优先、后台程序让路、电源换高性能,打完改回来。" if on
+                        else "好,游戏优化关掉了(改过的都已经改回原样)。")
         if self.dota is not None and getattr(self.toolbox, "steam", None) is not None:
             if self.DOTA_LAST.match(sentence):
                 return self.dota.last_match()

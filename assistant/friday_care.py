@@ -73,6 +73,7 @@ def care_settings() -> dict:
         "night": os.environ.get("FRIDAY_CARE_NIGHT", "on") != "off",
         "game_quiet": os.environ.get("FRIDAY_GAME_QUIET", "on") != "off",
         "game_close": game_close_list(),
+        "game_boost": os.environ.get("FRIDAY_GAME_BOOST", "on") != "off",
     }
 
 
@@ -247,7 +248,8 @@ class Care:
                  now: Callable[[], datetime.datetime] = datetime.datetime.now, rng=random,
                  fullscreen: Callable[[], bool] = is_fullscreen, display: Callable[[], bool] = display_requested,
                  toast: Callable[[str], None] = lambda text: None,
-                 on_game: Callable[[str], None] = lambda game: None) -> None:
+                 on_game: Callable[[str], None] = lambda game: None,
+                 on_game_end: Callable[[str], None] = lambda game: None) -> None:
         self.say = say
         self.name = name
         self.idle = idle
@@ -256,6 +258,7 @@ class Care:
         self.display = display
         self.toast = toast
         self.on_game = on_game
+        self.on_game_end = on_game_end
         self.reminders = reminders  # 今天接下来的提醒(给“欢迎回来”用)
         self.settings = settings
         self.clock = clock
@@ -312,6 +315,10 @@ class Care:
         if self.game is None or now - self.game_seen < GAME_GRACE:
             return None
         finished, self.game = self.game, None
+        try:
+            self.on_game_end(finished)
+        except Exception:
+            pass
         if not self.held:
             return None
         text = HELD.format(name=self.name(), game=finished, count=len(self.held), items=";".join(self.held))

@@ -5697,6 +5697,150 @@ class GameModeTest(unittest.TestCase):
         self.assertEqual(care.held, ["21:00 倒垃圾"])
 
 
+import friday_gameboost  # noqa: E402
+
+
+class FakeBoostSystem:
+    def __init__(self, plans=None, active="381b4222-f694-41f0-9685-ff5bb260df2e"):
+        self.procs = {100: "r5apex.exe", 200: "chrome.exe", 201: "chrome.exe", 300: "Discord.exe", 400: "OneDrive.exe",
+                      500: "EasyAntiCheat.exe", 600: "svchost.exe", 900: "pythonw.exe"}
+        self.prio = {pid: friday_gameboost.NORMAL for pid in self.procs}
+        self.prio[400] = friday_gameboost.IDLE  # 已经是低优先级的不动
+        self.active = active
+        self.plans = plans if plans is not None else [
+            ("381b4222-f694-41f0-9685-ff5bb260df2e", "平衡"), ("8c5e7fda-e8bf-4a96-9a85-cf48a7f6f1ef", "高性能")]
+        self.denied = set()
+
+    def processes(self):
+        return list(self.procs.items())
+
+    def foreground_pid(self):
+        return 100
+
+    def get_priority(self, pid):
+        return self.prio.get(pid)
+
+    def set_priority(self, pid, value):
+        if pid in self.denied or pid not in self.procs:
+            return False
+        self.prio[pid] = value
+        return True
+
+    def power_plans(self):
+        return self.active, self.plans
+
+    def set_power_plan(self, guid):
+        self.active = guid
+        return True
+
+
+class GameBoostTest(TempDirTest):
+    def test_boost_and_restore(self):
+        system = FakeBoostSystem()
+        boost = friday_gameboost.GameBoost(self.tmp, system=system, own_pid=900)
+        text = boost.start("Apex")
+        self.assertIn("Apex 设成高优先级", text)
+        self.assertIn("1 个后台程序让路(chrome)", text)
+        self.assertIn("电源换成“高性能”", text)
+        self.assertTrue(friday_gameboost.gaming())
+        self.assertEqual(system.prio[100], friday_gameboost.HIGH)
+        self.assertEqual((system.prio[200], system.prio[201]), (friday_gameboost.BELOW_NORMAL,) * 2)
+        self.assertEqual(system.prio[300], friday_gameboost.NORMAL)  # Discord 语音不动
+        self.assertEqual(system.prio[500], friday_gameboost.NORMAL)  # 防作弊不碰
+        self.assertEqual(system.prio[600], friday_gameboost.NORMAL)  # 系统不碰
+        self.assertEqual(system.prio[900], friday_gameboost.BELOW_NORMAL)  # 星期五自己也让路
+        self.assertEqual(boost.start("Apex"), "")  # 已经在优化:不重复
+        self.assertIn("正在为 Apex 优化", boost.describe())
+        del system.procs[201]  # 打的时候关掉了一个 chrome
+        system.procs[201] = "notepad.exe"  # 编号换给了别的程序:不能乱改
+        system.prio[201] = friday_gameboost.NORMAL
+        self.assertIn("改回原样", boost.stop())
+        self.assertFalse(friday_gameboost.gaming())
+        self.assertEqual(system.prio[100], friday_gameboost.NORMAL)
+        self.assertEqual(system.prio[200], friday_gameboost.NORMAL)
+        self.assertEqual(system.prio[900], friday_gameboost.NORMAL)
+        self.assertEqual(system.active, "381b4222-f694-41f0-9685-ff5bb260df2e")
+        self.assertFalse(Path(self.tmp, friday_gameboost.STATE_FILE).exists())
+        self.assertEqual(boost.stop(), "")
+
+    def test_recover_after_crash(self):
+        system = FakeBoostSystem()
+        friday_gameboost.GameBoost(self.tmp, system=system, own_pid=900).start("Dota 2")
+        self.assertEqual(system.active, "8c5e7fda-e8bf-4a96-9a85-cf48a7f6f1ef")
+        again = friday_gameboost.GameBoost(self.tmp, system=system, own_pid=901)  # 星期五重开了
+        self.assertTrue(again.recover())
+        self.assertEqual(system.active, "381b4222-f694-41f0-9685-ff5bb260df2e")
+        self.assertEqual(system.prio[200], friday_gameboost.NORMAL)
+        self.assertFalse(friday_gameboost.gaming())
+        self.assertFalse(again.recover())
+
+    def test_no_fast_plan_and_protected_game(self):
+        system = FakeBoostSystem(plans=[("381b4222-f694-41f0-9685-ff5bb260df2e", "Balanced")])
+        system.denied.add(100)  # 防作弊不让改游戏的优先级
+        text = friday_gameboost.GameBoost(self.tmp, system=system, own_pid=900).start("Apex")
+        self.assertNotIn("高优先级", text)
+        self.assertNotIn("电源", text)
+        self.assertIn("让路", text)
+        friday_gameboost._gaming.clear()
+
+    def test_fast_plan_choice(self):
+        plans = [("381b4222-f694-41f0-9685-ff5bb260df2e", "Balanced"), ("aaaaaaaa-1111-2222-3333-444444444444", "Ultimate Performance"),
+                 ("8c5e7fda-e8bf-4a96-9a85-cf48a7f6f1ef", "High performance")]
+        self.assertEqual(friday_gameboost.fast_plan(plans)[0], "8c5e7fda-e8bf-4a96-9a85-cf48a7f6f1ef")
+        self.assertEqual(friday_gameboost.fast_plan(plans[:2])[1], "Ultimate Performance")
+        self.assertIsNone(friday_gameboost.fast_plan(plans[:1]))
+
+    def test_checkup(self):
+        values = {"AutoGameModeEnabled": 0, "GameDVR_Enabled": 1, "HwSchMode": 2}
+        text = friday_gameboost.checkup(system=FakeBoostSystem(), reg=lambda root, path, name: values.get(name))
+        self.assertIn("游戏模式”关着", text)
+        self.assertIn("录影", text)
+        self.assertIn("硬件加速 GPU 计划开着", text)
+        self.assertIn("开游戏时我会自动换成“高性能”", text)
+        good = {"AutoGameModeEnabled": 1, "GameDVR_Enabled": 0, "HwSchMode": 2}
+        self.assertTrue(friday_gameboost.checkup(system=FakeBoostSystem(), reg=lambda r, p, n: good.get(n))
+                        .startswith("看起来都没问题"))
+
+    def test_care_calls_start_and_end(self):
+        events, now, exe = [], [1000.0], ["dota2.exe"]
+        care = friday_care.Care(lambda t: True, name=lambda: "老板", idle=lambda: 0, app=lambda: exe[0],
+                                settings=lambda: {"welcome": False, "break_minutes": 0, "night": False, "game_quiet": True},
+                                fullscreen=lambda: exe[0] == "dota2.exe", display=lambda: False, clock=lambda: now[0],
+                                on_game=lambda g: events.append(("start", g)), on_game_end=lambda g: events.append(("end", g)))
+        care.tick()
+        exe[0] = "explorer.exe"
+        now[0] += 30
+        care.tick()  # 切出去一下:还不算打完
+        now[0] += friday_care.GAME_GRACE + 1
+        care.tick()
+        self.assertEqual(events, [("start", "Dota 2"), ("end", "Dota 2")])
+
+    def test_quick_commands_and_settings(self):
+        system = FakeBoostSystem()
+        quick = friday_quick.QuickCommands(SimpleNamespace())
+        quick.gameboost = friday_gameboost.GameBoost(self.tmp, system=system, own_pid=900)
+        env = Path(self.tmp, ".env")
+        env.write_text("")
+        quick.env_file = str(env)
+        with mock.patch.dict(os.environ, {"FRIDAY_GAME_BOOST": "on"}), \
+                mock.patch.object(friday_gameboost, "checkup", lambda: "体检结果"):
+            self.assertEqual(quick.handle("游戏体检"), "体检结果")
+            self.assertEqual(quick.handle("为什么打游戏会卡"), "体检结果")
+            self.assertIn("现在没在打游戏", quick.handle("游戏优化"))
+            quick.gameboost.start("Apex")
+            self.assertIn("关掉了", quick.handle("关掉游戏优化"))
+            self.assertEqual(os.environ["FRIDAY_GAME_BOOST"], "off")
+            self.assertIn("FRIDAY_GAME_BOOST=off", env.read_text())
+            self.assertEqual(system.prio[100], friday_gameboost.NORMAL)  # 关掉时马上改回来
+            self.assertIn("自动优化", quick.handle("打开游戏优化"))
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        with mock.patch.dict(os.environ, {"FRIDAY_GAME_BOOST": "on"}):
+            result = app.apply_settings({"game_boost": False}, session, SimpleNamespace(), env)
+            self.assertEqual(os.environ["FRIDAY_GAME_BOOST"], "off")
+            self.assertFalse(friday_care.care_settings()["game_boost"])
+        self.assertIn("游戏优化关掉了", json.dumps(result, ensure_ascii=False))
+
+
 class LedgerTest(TempDirTest):
     def make(self, when=datetime.datetime(2026, 11, 10, 13, 0)):
         self.now = [when]
