@@ -8460,6 +8460,51 @@ class SpotifyTest(TempDirTest):
 
         self.assertTrue(friday_security.is_secret_path(Path(self.tmp, "friday_spotify.json")))
 
+    def liked_routes(self, player):
+        return {
+            ("POST", "/api/token"): (200, {"access_token": "AT", "refresh_token": "RT", "expires_in": 3600}),
+            ("GET", "/me/tracks"): (200, {"items": [{"track": {"uri": "spotify:track:1"}}]}),
+            ("GET", "/me/player/devices"): (200, {"devices": [{"id": "PHONE", "type": "Smartphone"},
+                                                              {"id": "PC", "type": "Computer", "name": "x"}]}),
+            ("PUT", "/me/player/play"): (204, {}),
+            ("GET", "/me/player"): player,
+            ("PUT", "/me/player"): (204, {}),
+        }
+
+    def test_says_ok_but_nothing_plays_then_retries_on_this_pc(self):
+        """Spotify 回“好”却没放出来(截图那次):转到这台电脑再放一次,真的在放才说好了。"""
+        checks = []
+
+        def player(body):
+            checks.append(1)
+            return (200, {"is_playing": len(checks) > 4, "device": {"name": "PC", "type": "Computer"}})
+        spotify = self.make(self.liked_routes(player))
+        spotify.sleep = lambda seconds: None
+        with mock.patch.dict(os.environ, {"FRIDAY_SPOTIFY_CLIENT_ID": "c" * 32}):
+            self.login(spotify)
+            text = spotify.play("我喜欢的歌")
+        self.assertEqual(text, "好,放你喜欢的歌。")
+        plays = [url for m, url, _ in self.calls if m == "PUT" and "/me/player/play" in url]
+        self.assertTrue(all("device_id=PC" in url for url in plays))  # 没在用的设备时:放在这台电脑
+        self.assertEqual(len(plays), 2)
+        self.assertIn(("PUT", "https://api.spotify.com/v1/me/player"), [(m, u) for m, u, _ in self.calls])
+        self.assertEqual(self.opened, [])
+
+    def test_never_plays_tells_the_truth(self):
+        spotify = self.make(self.liked_routes((200, {"is_playing": False})))
+        spotify.sleep = lambda seconds: None
+        with mock.patch.dict(os.environ, {"FRIDAY_SPOTIFY_CLIENT_ID": "c" * 32}):
+            self.login(spotify)
+            text = spotify.play("我喜欢的歌")
+        self.assertIn("没有真的放出来", text)
+        self.assertEqual(self.opened, ["spotify:collection:tracks"])
+
+    def test_says_which_device_when_not_this_pc(self):
+        spotify = self.make(self.liked_routes((200, {"is_playing": True, "device": {"name": "客厅音箱", "type": "Speaker"}})))
+        with mock.patch.dict(os.environ, {"FRIDAY_SPOTIFY_CLIENT_ID": "c" * 32}):
+            self.login(spotify)
+            self.assertEqual(spotify.play("我喜欢的歌"), "好,放你喜欢的歌(在“客厅音箱”上放)。")
+
     def test_free_account_and_no_device(self):
         plays = []
 

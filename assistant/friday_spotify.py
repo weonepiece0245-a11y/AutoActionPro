@@ -11,6 +11,7 @@ import base64
 import hashlib
 import json
 import os
+import platform
 import secrets
 import threading
 import time
@@ -165,10 +166,63 @@ class Spotify:
         part = [p for p in items if want in p.get("name", "").lower().replace(" ", "")]
         return (exact or part or [None])[0]
 
+    OK = (200, 202, 204)
+
+    def _pick_device(self) -> str | None:
+        """要在哪个设备放:正在用的那个;都没在用就用这台电脑上的 Spotify(不打开、不等)。"""
+        try:
+            status, data = self.api("GET", "/me/player/devices")
+        except SpotifyError:
+            return None
+        devices = [d for d in (data.get("devices") or []) if not d.get("is_restricted")] if status == 200 else []
+        active = [d for d in devices if d.get("is_active")]
+        computers = [d for d in devices if d.get("type") == "Computer"]
+        host = platform.node().lower()
+        named = [d for d in computers if str(d.get("name", "")).lower() == host]
+        pick = (active or named or computers or [None])[0]
+        return pick.get("id") if pick else None
+
+    def _play(self, body: dict, device: str | None) -> tuple[int, dict]:
+        return self.api("PUT", "/me/player/play", {"device_id": device} if device else None, body=body)
+
+    def _confirm(self) -> dict | None:
+        """Spotify 说“好”之后,看看是不是真的在放了。在放:播放状态;没在放:None;看不出来:{}。"""
+        for attempt in range(4):
+            if attempt:
+                self.sleep(1.0)
+            try:
+                status, data = self.api("GET", "/me/player")
+            except SpotifyError:
+                return {}
+            if status == 200 and data.get("is_playing"):
+                return data
+            if status not in (200, 204):
+                return {}  # 查不到:就相信它
+        return None
+
+    def _started(self, body: dict, label: str, fallback_uri: str | None, device: str | None) -> str:
+        state = self._confirm()
+        if state is None and device:  # 说好了却没放出来:把播放转到这个设备再放一次
+            self.api("PUT", "/me/player", body={"device_ids": [device], "play": False})
+            self.sleep(1.0)
+            status, _ = self._play(body, device)
+            state = self._confirm() if status in self.OK else None
+        if state is None:
+            print(f"Spotify 说开始放{label}了,可是没有真的放出来", flush=True)
+            if fallback_uri:
+                self.open_uri(fallback_uri)
+                return (f"Spotify 说好了,可是没有真的放出来。我把{label}在 Spotify 里打开了,点一下播放;"
+                        f"放过一次之后我就能直接控制。")
+            return "Spotify 说好了,可是没有真的放出来。打开 Spotify 点一下播放试试。"
+        where = state.get("device") or {}
+        elsewhere = f"(在“{where['name']}”上放)" if where.get("name") and where.get("type") != "Computer" else ""
+        return f"好,放{label}{elsewhere}。"
+
     def _start(self, body: dict, label: str, fallback_uri: str | None) -> str:
-        status, data = self.api("PUT", "/me/player/play", body=body)
-        if status in (200, 202, 204):
-            return f"好,放{label}。"
+        device = self._pick_device()
+        status, data = self._play(body, device)
+        if status in self.OK:
+            return self._started(body, label, fallback_uri, device)
         reason = self._reason(data)
         if status == 404 or reason == "NO_ACTIVE_DEVICE":
             # 电脑上的 Spotify 刚打开、还没放过歌时,Spotify 当它“没在用”:
@@ -178,10 +232,10 @@ class Spotify:
                 self.api("PUT", "/me/player", body={"device_ids": [device], "play": False})
                 for attempt in range(3):
                     self.sleep(1.0 + attempt)
-                    status, data = self.api("PUT", "/me/player/play", {"device_id": device}, body=body)
+                    status, data = self._play(body, device)
                     reason = self._reason(data)
-                    if status in (200, 202, 204):
-                        return f"好,放{label}。"
+                    if status in self.OK:
+                        return self._started(body, label, fallback_uri, device)
                     if status == 403 or reason == "PREMIUM_REQUIRED":
                         break
         if status == 403 or reason == "PREMIUM_REQUIRED":
