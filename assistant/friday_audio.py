@@ -96,6 +96,76 @@ class WindowsMasterVolume:
             self._release(volume)
 
 
+class PycawVolume:
+    """后备做法:用 pycaw(很多程序在用的 Windows 音量组件,第一次用时自动安装)读、设主音量。"""
+
+    def __init__(self) -> None:
+        try:
+            import pycaw  # noqa: F401
+        except ImportError:
+            import friday_wake
+
+            if not friday_wake.pip_install(["pycaw", "comtypes"]):
+                raise RuntimeError("音量组件 pycaw 没装好,检查一下网络") from None
+
+    @staticmethod
+    def _endpoint():
+        import comtypes
+        from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+
+        try:
+            comtypes.CoInitialize()
+        except OSError:
+            pass
+        speakers = AudioUtilities.GetSpeakers()
+        if hasattr(speakers, "EndpointVolume"):  # 新版 pycaw
+            return speakers.EndpointVolume
+        from ctypes import POINTER, cast
+
+        from comtypes import CLSCTX_ALL
+
+        interface = speakers.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+        return cast(interface, POINTER(IAudioEndpointVolume))
+
+    def get(self) -> float:
+        return float(self._endpoint().GetMasterVolumeLevelScalar())
+
+    def set(self, level: float) -> None:
+        self._endpoint().SetMasterVolumeLevelScalar(max(0.0, min(1.0, float(level))), None)
+
+
+class FallbackVolume:
+    """先用自己的做法;那个在你电脑上出错的话,换 pycaw,之后一直用能用的那个。"""
+
+    def __init__(self, makers=None) -> None:
+        self.makers = list(makers) if makers is not None else [WindowsMasterVolume, PycawVolume]
+        self.current = None
+        self.errors: list[str] = []
+
+    def _try(self, action):
+        while True:
+            if self.current is None:
+                if not self.makers:
+                    raise RuntimeError(";".join(self.errors) or "调不了电脑音量")
+                try:
+                    self.current = self.makers.pop(0)()
+                except Exception as e:  # noqa: BLE001
+                    self.errors.append(f"{type(e).__name__}: {e}")
+                    continue
+            try:
+                return action(self.current)
+            except Exception as e:  # noqa: BLE001
+                self.errors.append(f"{type(self.current).__name__} {type(e).__name__}: {e}")
+                print(f"电脑音量:{self.errors[-1]},换下一个做法", flush=True)
+                self.current = None
+
+    def get(self) -> float:
+        return self._try(lambda v: v.get())
+
+    def set(self, level: float) -> None:
+        self._try(lambda v: v.set(level))
+
+
 class Ducker:
     """按住说话时压低电脑声音,放开后恢复成原来的大小(只恢复它自己压低的)。"""
 
@@ -111,7 +181,7 @@ class Ducker:
 
     def _vol(self):
         if self.volume is None:
-            self.volume = WindowsMasterVolume()
+            self.volume = FallbackVolume()
         return self.volume
 
     def duck(self) -> None:
@@ -156,7 +226,7 @@ def test_duck(volume=None, wait: Callable[[float], None] | None = None) -> str:
     import time
 
     wait = wait or time.sleep
-    vol = volume or WindowsMasterVolume()
+    vol = volume or FallbackVolume()
     try:
         before = vol.get()
     except Exception as e:  # noqa: BLE001

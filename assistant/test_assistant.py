@@ -7033,6 +7033,22 @@ class VoiceRobustTest(unittest.TestCase):
                 pass  # 设了没用(不是默认播放设备)
         self.assertIn("音量没压下去", friday_audio.test_duck(Stuck(0.6), wait=lambda s: None))
 
+    def test_fallback_volume(self):
+        class Broken:
+            def get(self):
+                raise OSError("COM 出错")
+        good = self.Volume(0.5)
+        vol = friday_audio.FallbackVolume([Broken, lambda: good])
+        with mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(vol.get(), 0.5)  # 第一个做法坏了:换第二个
+        vol.set(0.2)
+        self.assertEqual(good.level, 0.2)
+        self.assertIs(vol.current, good)  # 之后一直用能用的
+        with mock.patch("sys.stdout", io.StringIO()):
+            with self.assertRaises(RuntimeError) as e:
+                friday_audio.FallbackVolume([Broken]).get()
+        self.assertIn("COM 出错", str(e.exception))
+
     def test_ptt_ducks_while_recording(self):
         order = []
         state = {"down": False}
