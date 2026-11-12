@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
+from pathlib import Path
 from typing import Callable
 
 GAME_MODES = {"none": "不动", "dim": "调暗(20%)", "off": "关掉", "红": "红色", "紫": "紫色", "蓝": "蓝色", "青": "青色",
@@ -44,12 +46,35 @@ def settings() -> dict:
 
 
 class LightLink:
-    def __init__(self, home: Callable[[], object], config: Callable[[], dict] = settings) -> None:
+    def __init__(self, home: Callable[[], object], config: Callable[[], dict] = settings,
+                 path: str | os.PathLike | None = None) -> None:
         self.home = home  # () -> friday_tapo.TapoHome 或 None(还没连 Tapo)
         self.config = config
         self.lock = threading.Lock()
+        self.path = Path(path) if path else None  # 记在文件里:星期五中途重开(例如半夜自动更新)也改得回来
         self.saved: dict[str, dict] = {}  # 开游戏前灯的样子:id -> {on, brightness, hsv, color_temp}
         self.turned_off: list[str] = []  # 离开时被星期五关掉的
+        self.away_done = False  # 这次离开已经处理过了(不用每分钟再去找一次设备)
+        if self.path is not None:
+            try:
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+                self.saved = {str(k): v for k, v in (data.get("saved") or {}).items() if isinstance(v, dict)}
+                self.turned_off = [str(i) for i in data.get("turned_off") or []]
+                self.away_done = bool(self.turned_off)
+            except (OSError, ValueError, AttributeError):
+                pass
+
+    def _save(self) -> None:
+        if self.path is None:
+            return
+        try:
+            if self.saved or self.turned_off:
+                self.path.write_text(json.dumps({"saved": self.saved, "turned_off": self.turned_off},
+                                                ensure_ascii=False), encoding="utf-8")
+            else:
+                self.path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def _targets(self, names: list[str]) -> tuple[object, list[dict]]:
         home = self.home()
@@ -97,6 +122,7 @@ class LightLink:
                     done.append(d["name"])
                 except Exception:
                     self.saved.pop(d["id"], None)
+            self._save()
             if not done:
                 return ""
             return f"开游戏了,{'、'.join(done)}{'关掉了' if mode == 'off' else '调暗了' if mode == 'dim' else '换成' + mode + '色了'}。"
@@ -106,7 +132,9 @@ class LightLink:
             saved, self.saved = self.saved, {}
             home = self.home() if saved else None
             if home is None:
+                self.saved = saved  # Tapo 还没连上:下次再改回去
                 return ""
+            self._save()
             back = []
             for device_id, old in saved.items():
                 try:
@@ -131,8 +159,11 @@ class LightLink:
         if idle is None:
             return ""
         with self.lock:
-            if cfg["away_minutes"] and idle >= cfg["away_minutes"] * 60 and not self.turned_off:
+            if cfg["away_minutes"] and idle >= cfg["away_minutes"] * 60 and not self.away_done:
                 home, targets = self._targets(cfg["away"])
+                if home is None:
+                    return ""  # Tapo 还没连上:下一分钟再试
+                self.away_done = True
                 for d in targets:
                     if not d.get("on"):
                         continue
@@ -142,12 +173,16 @@ class LightLink:
                         self.turned_off.append(d["id"])
                     except Exception:
                         continue
+                self._save()
                 if self.turned_off:
                     names = [d["name"] for d in targets if d["id"] in self.turned_off]
                     return f"你离开电脑 {cfg['away_minutes']} 分钟了,帮你关掉了 {'、'.join(names)}。"
                 return ""
+            if idle < 60:
+                self.away_done = False
             if self.turned_off and idle < 60:
                 ids, self.turned_off = self.turned_off, []
+                self._save()
                 if not cfg["back"]:
                     return ""
                 home = self.home()

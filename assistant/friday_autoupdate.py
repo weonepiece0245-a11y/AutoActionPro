@@ -15,6 +15,7 @@ from typing import Callable
 
 START_HOUR, END_HOUR = 3, 5
 IDLE_SECONDS = 20 * 60
+PENDING_HOURS = 3  # 开始自动更新后这么久内重开,才算是这次更新(不然是没装成,别把以后手动更新的当成昨晚的)
 MORNING_HOUR = 6
 MAX_LINES = 6
 
@@ -63,7 +64,7 @@ class AutoUpdate:
         """要开始更新了:记下现在的更新记录,重开后好比较多了什么。"""
         with self.lock:
             self.state.update({"checked": self.clock().strftime("%Y-%m-%d"), "pending": True,
-                               "before": change_lines(self.changes)})
+                               "started": self.clock().timestamp(), "before": change_lines(self.changes)})
             self._save()
 
     def after_start(self) -> None:
@@ -72,13 +73,23 @@ class AutoUpdate:
             if not self.state.get("pending"):
                 return
             before = set(self.state.get("before") or [])
-            new = [line for line in change_lines(self.changes) if line not in before]
+            fresh = self.clock().timestamp() - float(self.state.get("started") or 0) < PENDING_HOURS * 3600
+            new = [line for line in change_lines(self.changes) if line not in before] if fresh else []
             self.state["pending"] = False
             self.state.pop("before", None)
+            self.state.pop("started", None)
             if new:
                 self.state["note"] = new[:MAX_LINES]
                 self.state["more"] = max(0, len(new) - MAX_LINES)
             self._save()
+
+    def clear_pending(self) -> None:
+        """检查过了,但已经是最新(没有重开):不用等着报告。"""
+        with self.lock:
+            if self.state.pop("pending", None) is not None:
+                self.state.pop("before", None)
+                self.state.pop("started", None)
+                self._save()
 
     def morning_note(self, idle: float | None) -> str | None:
         """早上你回到电脑前(刚动过键盘鼠标)时,说一次昨晚更新了什么。"""

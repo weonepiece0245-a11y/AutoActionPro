@@ -6410,6 +6410,23 @@ class AutoUpdateTest(TempDirTest):
         self.assertEqual(note, "昨晚我自己更新了:按住说话;光球新样子。想知道细节就问我“你更新了什么”。")
         self.assertIsNone(restarted.morning_note(5))  # 只说一次
 
+    def test_failed_or_latest_update_is_not_reported_later(self):
+        """审计:半夜没更新成(或已经是最新),以后手动更新的不能说成“昨晚我自己更新了”。"""
+        changes = Path(self.tmp, "CHANGES.md")
+        changes.write_text("- 旧的\n")
+        now = [datetime.datetime(2026, 11, 13, 3, 30)]
+        auto = friday_autoupdate.AutoUpdate(os.path.join(self.tmp, "a.json"), changes, clock=lambda: now[0])
+        auto.mark_started()  # 半夜开始检查,但断网没装成
+        changes.write_text("- 旧的\n- 后来手动更新的\n")
+        now[0] = datetime.datetime(2026, 11, 15, 20, 0)  # 两天后手动更新重开
+        later = friday_autoupdate.AutoUpdate(os.path.join(self.tmp, "a.json"), changes, clock=lambda: now[0])
+        later.after_start()
+        now[0] = datetime.datetime(2026, 11, 16, 9, 0)
+        self.assertIsNone(later.morning_note(5))
+        auto.mark_started()
+        auto.clear_pending()  # 已经是最新:不用等着报告
+        self.assertNotIn("pending", auto.state)
+
     def test_nothing_new_says_nothing(self):
         changes = Path(self.tmp, "CHANGES.md")
         changes.write_text("- 一样\n")
@@ -6482,6 +6499,35 @@ class LightLinkTest(unittest.TestCase):
         link.away_tick(1300)
         self.assertEqual(link.away_tick(5), "")
         self.assertEqual(self.calls, [("on", "a", False)])
+
+    def test_away_looks_for_devices_once(self):
+        """审计:灯都关了(或本来就关着)时,离开期间不要每分钟去找一次设备。"""
+        link, home = self.make({"away_minutes": 10, "away": ["卧室灯"]})
+        looks = []
+        refresh = home.refresh
+        home.refresh = lambda force=False: looks.append(1) or refresh(force)
+        for _ in range(30):
+            link.away_tick(3600)
+        self.assertEqual(len(looks), 1)
+        link.away_tick(5)  # 回来了
+        link.away_tick(3600)  # 下次离开再看一次
+        self.assertEqual(len(looks), 2)
+
+    def test_remembers_across_restart(self):
+        """审计:关了灯以后星期五重开(例如半夜自动更新),回来时还是开得回来;打游戏调暗的灯也改得回来。"""
+        path = os.path.join(tempfile.mkdtemp(), "l.json")
+        link, home = self.make({"away_minutes": 10, "away": ["客厅灯"], "game_mode": "dim", "game": ["灯带"]})
+        link.path = Path(path)
+        link.game_start()
+        link.away_tick(3600)
+        again = friday_lightlink.LightLink(lambda: home, config=lambda: self.cfg, path=path)
+        self.assertEqual(again.turned_off, ["a"])
+        self.assertIn("b", again.saved)
+        self.calls.clear()
+        self.assertIn("客厅灯", again.away_tick(5))
+        self.assertIn("改回原来的样子", again.game_end())
+        self.assertIn(("on", "a", True), self.calls)
+        self.assertFalse(Path(path).exists())  # 都改回来了:不留文件
 
     def test_no_home(self):
         link = friday_lightlink.LightLink(lambda: None, config=lambda: {"game_mode": "dim", "game": ["x"], "away_minutes": 10,

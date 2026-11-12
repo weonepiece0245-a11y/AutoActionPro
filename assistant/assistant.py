@@ -1594,6 +1594,9 @@ def web_update(session: WebSession, updater=None) -> bool:
         hub.broadcast({"type": "update_done"})
         return False
     if result["status"] == "latest":
+        auto = getattr(session, "autoupdate", None)
+        if auto is not None:
+            auto.clear_pending()
         hub.broadcast({"type": "status", "text": "已经是最新版本了"})
         hub.broadcast({"type": "update_done"})
         return False
@@ -2812,7 +2815,8 @@ def start_care(session, ctx, hub, toolbox: Toolbox, voice_module, data_dir: str 
 
     import friday_lightlink
 
-    lights = friday_lightlink.LightLink(lambda: getattr(toolbox, "home", None))
+    lights = friday_lightlink.LightLink(lambda: getattr(toolbox, "home", None),
+                                        path=os.path.join(data_dir, "friday_lightlink.json"))
     session.lightlink = lights
 
     def lights_say(text: str) -> None:
