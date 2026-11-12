@@ -5860,6 +5860,180 @@ class GameBoostTest(TempDirTest):
         self.assertIn("游戏优化关掉了", json.dumps(result, ensure_ascii=False))
 
 
+import friday_games  # noqa: E402
+
+
+class KnownGamesTest(TempDirTest):
+    def make(self):
+        self.now = [1000.0]
+        return friday_games.KnownGames(os.path.join(self.tmp, "g.json"), clock=lambda: self.now[0])
+
+    def test_game_folders(self):
+        self.assertEqual(friday_games.folder_game(r"D:\SteamLibrary\steamapps\common\Elden Ring\Game\eldenring.exe"),
+                         "Elden Ring")
+        self.assertEqual(friday_games.folder_game(r"C:\Program Files\Epic Games\Fortnite\FortniteClient.exe"), "Fortnite")
+        self.assertIsNone(friday_games.folder_game(r"C:\Program Files (x86)\Steam\steam.exe"))
+        self.assertIsNone(friday_games.folder_game(r"D:\Games\NTE\NTE Launcher.exe"))  # 启动器不算
+        self.assertIsNone(friday_games.folder_game(r"C:\Windows\notepad.exe"))
+        # 装在 Steam 文件夹里的窗口模式游戏也认得
+        self.assertEqual(friday_care.game_name("eldenring.exe", False,
+                                               r"E:\steamapps\common\Elden Ring\eldenring.exe", self.make()), "Elden Ring")
+
+    def test_learns_fullscreen_game_after_five_minutes(self):
+        known = self.make()
+        self.assertIsNone(known.seen("htgame.exe", r"D:\NTE\HTGame.exe", True, friday_care.NOT_GAMES))
+        self.now[0] += friday_games.LEARN_SECONDS - 30
+        self.assertIsNone(known.seen("htgame.exe", r"D:\NTE\HTGame.exe", True, friday_care.NOT_GAMES))
+        self.now[0] += 60
+        text = known.seen("htgame.exe", r"D:\NTE\HTGame.exe", True, friday_care.NOT_GAMES)
+        self.assertIn("记住了:htgame 是游戏", text)
+        again = self.make()  # 重开星期五也记得;窗口模式也认得
+        self.assertEqual(friday_care.game_name("htgame.exe", False, None, again), "htgame")
+        self.assertIsNone(known.seen("chrome.exe", None, True, friday_care.NOT_GAMES))  # 看视频不学
+
+    def test_teach_and_forget(self):
+        known = self.make()
+        known.seen("htgame.exe", r"D:\NTE\HTGame.exe", False, friday_care.NOT_GAMES)
+        known.seen("taskmgr.exe", r"C:\Windows\taskmgr.exe", False, friday_care.NOT_GAMES)  # 任务管理器不算“刚才那个”
+        self.assertIn("NTE(htgame.exe)是游戏", known.mark_game("NTE"))
+        self.assertEqual(known.name("htgame.exe"), "NTE")
+        self.assertIn("以后叫 异环", known.rename("NTE", "异环"))
+        self.assertIn("NTE", known.describe().replace("异环", "NTE"))
+        self.assertIn("不是游戏", known.mark_not_game("刚才那个"))
+        self.assertIsNone(friday_care.game_name("htgame.exe", True, None, known))  # 全屏也不当游戏了
+        self.assertIn("是游戏", known.mark_game("刚才那个"))  # 又改回来
+        self.assertEqual(known.name("htgame.exe"), "htgame")
+        with self.assertRaises(ValueError):
+            self.make().mark_game("刚才那个")  # 还没看到别的程序
+
+    def test_quick_commands(self):
+        quick = friday_quick.QuickCommands(SimpleNamespace())
+        quick.known_games = self.make()
+        quick.known_games.seen("htgame.exe", None, False, friday_care.NOT_GAMES)
+        self.assertIn("还没有学过", quick.handle("你认识哪些游戏"))
+        self.assertIn("NTE(htgame.exe)是游戏", quick.handle("NTE是游戏"))
+        self.assertIn("以后叫 异环", quick.handle("把NTE叫做异环"))
+        self.assertIn("异环(htgame.exe)", quick.handle("你认识哪些游戏"))
+        self.assertIn("不是游戏", quick.handle("刚才那个不是游戏"))
+        self.assertIsNone(quick._learn_games("这是什么游戏"))
+        self.assertIsNone(quick._learn_games("把我叫做老大"))  # 不是游戏的改名不归这里
+
+    def test_care_toasts_when_learning(self):
+        toasts, now = [], [1000.0]
+        care = friday_care.Care(lambda t: True, name=lambda: "老板", idle=lambda: 0, app=lambda: "htgame.exe",
+                                settings=lambda: {"welcome": False, "break_minutes": 0, "night": False, "game_quiet": True},
+                                fullscreen=lambda: True, display=lambda: False, clock=lambda: now[0], toast=toasts.append)
+        care.known = friday_games.KnownGames(os.path.join(self.tmp, "g.json"), clock=lambda: now[0])
+        care.tick()
+        self.assertEqual(care.game, "htgame")  # 全屏:先当游戏
+        now[0] += friday_games.LEARN_SECONDS + 1
+        care.tick()
+        self.assertTrue(any("记住了" in t for t in toasts))
+
+
+import friday_gamereport  # noqa: E402
+import friday_temps  # noqa: E402
+
+
+class TempsTest(unittest.TestCase):
+    LHM_TREE = {"Text": "Sensor", "Children": [{"Text": "PC", "Children": [
+        {"Text": "AMD Ryzen 7 7800X3D", "ImageURL": "images_icon/cpu.png", "Children": [
+            {"Text": "Temperatures", "Children": [{"Text": "Core (Tctl/Tdie)", "Value": "71.3 °C", "Children": []},
+                                                  {"Text": "CCD1 (Tdie)", "Value": "66.0 °C", "Children": []}]},
+            {"Text": "Load", "Children": [{"Text": "CPU Total", "Value": "30.0 %", "Children": []}]}]},
+        {"Text": "NVIDIA GeForce RTX 4070", "ImageURL": "images_icon/nvidia.png", "Children": [
+            {"Text": "Temperatures", "Children": [{"Text": "GPU Core", "Value": "64.0 °C", "Children": []}]}]},
+        {"Text": "ASUS B650", "ImageURL": "images_icon/mainboard.png", "Children": [
+            {"Text": "Temperatures", "Children": [{"Text": "CPU", "Value": "99.0 °C", "Children": []}]}]}]}]}
+
+    def test_reads_lhm_web_server(self):
+        sensors = friday_temps.lhm_http(fetch=lambda url: json.dumps(self.LHM_TREE).encode())
+        self.assertEqual(friday_temps._pick_cpu(sensors), 71.3)  # 主板上的“CPU”读数不算
+        self.assertEqual(friday_temps._pick_gpu(sensors), 64.0)
+
+    def test_reads_lhm_wmi(self):
+        rows = [{"Name": "CPU Package", "Value": 88.5, "Parent": "/intelcpu/0"},
+                {"Name": "CPU Core #1", "Value": 90.0, "Parent": "/intelcpu/0"},
+                {"Name": "GPU Core", "Value": 70, "Parent": "/gpu-nvidia/0"}]
+        sensors = friday_temps.lhm_wmi(run=lambda cmd: json.dumps(rows))
+        self.assertEqual(friday_temps._pick_cpu(sensors), 88.5)  # 先用 Package
+
+    def test_describe_and_alert(self):
+        now = [1000.0]
+        cpu = [[("Core (Tctl/Tdie)", "cpu", 95.0)]]
+        temps = friday_temps.Temps(gpu=lambda: [{"name": "RTX", "temp": 70.0}], lhm=[lambda: cpu[0]], clock=lambda: now[0])
+        self.assertEqual(temps.describe(), "现在 CPU 95°C(太热了)、显卡 70°C(正常)。")
+        self.assertIn("CPU 95°C,有点太热了", temps.check("老板"))
+        now[0] += 60
+        self.assertIsNone(temps.check("老板"))  # 30 分钟最多一次
+        now[0] += friday_temps.ALERT_EVERY
+        self.assertIsNotNone(temps.check("老板"))
+        none = friday_temps.Temps(gpu=None, lhm=[lambda: []])
+        self.assertIn("Libre Hardware Monitor", none.describe())
+        gpu_only = friday_temps.Temps(gpu=lambda: [{"name": "RTX", "temp": 60.0}], lhm=[lambda: (_ for _ in ()).throw(OSError())])
+        self.assertIn("CPU 温度要开着 Libre Hardware Monitor", gpu_only.describe())
+
+    def test_quick_command(self):
+        quick = friday_quick.QuickCommands(SimpleNamespace())
+        quick.temps = SimpleNamespace(describe=lambda: "现在 CPU 60°C")
+        self.assertEqual(quick.handle("电脑多少度"), "现在 CPU 60°C")
+        self.assertEqual(quick.handle("CPU温度"), "现在 CPU 60°C")
+
+
+class FakeSampler:
+    cpus = 4
+
+    def __init__(self):
+        self.t = {1: ["r5apex.exe", 0.0], 2: ["audiodg.exe", 0.0], 3: ["chrome.exe", 0.0], 99: ["pythonw.exe", 0.0]}
+
+    def cpu_times(self):
+        return {pid: (name, total) for pid, (name, total) in self.t.items()}
+
+    def own_memory(self):
+        return 270.0
+
+
+class GameReportTest(unittest.TestCase):
+    def test_report_after_a_game(self):
+        now = [1000.0]
+        sampler = FakeSampler()
+        report = friday_gamereport.GameReport(sampler=sampler, temps=lambda: {"cpu": 78.0, "gpu": 71.0},
+                                              clock=lambda: now[0], own_pid=99)
+        report.start("Apex", "r5apex.exe")
+        self.assertIn("正在记录 Apex", report.describe())
+        for minute in range(30):
+            now[0] += 60
+            sampler.t[1][1] += 60 * 4 * 0.5  # 游戏 50%(不算后台)
+            sampler.t[2][1] += 60 * 4 * 0.08  # 音频 8%
+            sampler.t[3][1] += 60 * 4 * 0.01  # chrome 1%(不算忙)
+            sampler.t[99][1] += 60 * 4 * (0.012 if minute == 3 else 0.002)
+            report.sample()
+        text = report.stop()
+        self.assertTrue(text.startswith("Apex 打了 30 分钟。"))
+        self.assertIn("星期五自己:CPU 最多 1.2%、内存 270 MB(很轻,没跟游戏抢)", text)
+        self.assertIn("CPU 最高 78°C、显卡最高 71°C", text)
+        self.assertIn("Windows 音频处理", text)
+        self.assertIn("平均 8%", text)
+        self.assertNotIn("Chrome", text)
+        self.assertNotIn("r5apex", text)
+        self.assertEqual(report.describe(), text)
+
+    def test_short_game_not_reported(self):
+        now = [0.0]
+        report = friday_gamereport.GameReport(sampler=FakeSampler(), clock=lambda: now[0])
+        report.start("Dota 2")
+        now[0] += 120
+        self.assertEqual(report.stop(), "")
+        self.assertEqual(report.stop(), "")
+        self.assertIn("还没有游戏报告", report.describe())
+
+    def test_quick_command(self):
+        quick = friday_quick.QuickCommands(SimpleNamespace())
+        quick.gamereport = SimpleNamespace(describe=lambda: "报告")
+        self.assertEqual(quick.handle("游戏报告"), "报告")
+        self.assertEqual(quick.handle("刚才那局电脑怎么样"), "报告")
+
+
 class LedgerTest(TempDirTest):
     def make(self, when=datetime.datetime(2026, 11, 10, 13, 0)):
         self.now = [when]

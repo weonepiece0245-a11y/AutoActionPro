@@ -63,6 +63,7 @@ assistant/friday_screentime.json
 assistant/friday_notes.json*
 assistant/friday_heartbeat.json*
 assistant/friday_gameboost.json*
+assistant/friday_games.json*
 assistant/friday_crash.json
 assistant/friday_guard.lock
 assistant/friday_dates.json*

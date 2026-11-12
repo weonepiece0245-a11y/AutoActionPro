@@ -74,6 +74,7 @@ def care_settings() -> dict:
         "game_quiet": os.environ.get("FRIDAY_GAME_QUIET", "on") != "off",
         "game_close": game_close_list(),
         "game_boost": os.environ.get("FRIDAY_GAME_BOOST", "on") != "off",
+        "game_report": os.environ.get("FRIDAY_GAME_REPORT", "on") != "off",
     }
 
 
@@ -122,6 +123,12 @@ def idle_seconds() -> float | None:
 
 def foreground_app() -> str | None:
     """最前面那个窗口的程序名(小写,例如 r5apex.exe)。"""
+    path = foreground_path()
+    return os.path.basename(path).lower() if path else None
+
+
+def foreground_path() -> str | None:
+    """最前面那个窗口的程序的完整路径。"""
     if os.name != "nt":
         return None
     try:
@@ -140,7 +147,7 @@ def foreground_app() -> str | None:
             size = wintypes.DWORD(len(buffer))
             if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
                 return None
-            return os.path.basename(buffer.value).lower()
+            return buffer.value or None
         finally:
             kernel32.CloseHandle(handle)
     except Exception:
@@ -198,9 +205,15 @@ def display_requested() -> bool:
         return False
 
 
-def game_name(exe: str, fullscreen: bool) -> str | None:
-    """认识的游戏用名字;不认识但全屏的程序也当游戏(用程序名)。"""
+def game_name(exe: str, fullscreen: bool, path: str | None = None, known=None) -> str | None:
+    """认识的游戏用名字(学过的、装在游戏文件夹里的也算);不认识但全屏的程序也当游戏(用程序名)。"""
     exe = (exe or "").lower()
+    if known is not None:
+        if known.is_not_game(exe):
+            return None
+        name = known.name(exe, path)
+        if name:
+            return name
     if exe in GAMES:
         return GAMES[exe]
     if fullscreen and exe and exe not in NOT_GAMES:
@@ -209,7 +222,8 @@ def game_name(exe: str, fullscreen: bool) -> str | None:
 
 
 def look(idle: Callable[[], float | None] = idle_seconds, app: Callable[[], str | None] = foreground_app,
-         fullscreen: Callable[[], bool] = is_fullscreen, display: Callable[[], bool] = display_requested) -> dict | None:
+         fullscreen: Callable[[], bool] = is_fullscreen, display: Callable[[], bool] = display_requested,
+         path: Callable[[], str | None] | None = None, known=None) -> dict | None:
     """看一眼你在干什么:{idle 没碰键盘鼠标几秒, app, game 在玩的游戏, watching 在看视频/全屏, present_idle}。
 
     看视频、打游戏时不碰键盘鼠标也算你在电脑前(present_idle 记为 0)。
@@ -218,10 +232,13 @@ def look(idle: Callable[[], float | None] = idle_seconds, app: Callable[[], str 
     if seconds is None:
         return None
     exe = (app() or "").lower()
+    full_path = path() if path is not None else None
+    if full_path and not exe:
+        exe = os.path.basename(full_path).lower()
     full = bool(fullscreen())
-    game = game_name(exe, full)
+    game = game_name(exe, full, full_path, known)
     watching = full or (exe in VIDEO_APPS and bool(display()))
-    return {"idle": seconds, "app": exe, "game": game, "watching": watching,
+    return {"idle": seconds, "app": exe, "path": full_path, "fullscreen": full, "game": game, "watching": watching,
             "present_idle": 0.0 if (game or watching) else seconds}
 
 
@@ -273,6 +290,9 @@ class Care:
         self.held: list[str] = []  # 打游戏时先记着的提醒
         self.screentime = None  # 电脑使用时间统计(friday_screentime.ScreenTime)
         self.focus = None  # 专注模式(friday_focus.Focus):专注时不提醒休息、不打招呼
+        self.known = None  # 学过的游戏(friday_games.KnownGames)
+        self.app_now = ""  # 最近一次看到在最前面的程序(开游戏时给游戏报告用)
+        self.app_path: Callable[[], str | None] | None = None  # 最前面程序的完整路径(Windows 上才设)
 
     def _line(self, options: list[str], **values) -> str:
         return self.rng.choice(options).format(name=self.name(), **values)
@@ -331,9 +351,21 @@ class Care:
     # ---------- 每 30 秒 ----------
     def tick(self) -> str | None:
         """看一次;说了话就返回那句话。"""
-        snapshot = look(self.idle, self.app, self.fullscreen, self.display)
+        snapshot = look(self.idle, self.app, self.fullscreen, self.display, path=self.app_path, known=self.known)
         if snapshot is None:
             return None
+        self.app_now = snapshot["app"]
+        if self.known is not None:
+            try:
+                learned = self.known.seen(snapshot["app"], snapshot.get("path"), snapshot.get("fullscreen", False),
+                                          NOT_GAMES)
+            except Exception:
+                learned = None
+            if learned:
+                try:
+                    self.toast("🎮 " + learned)
+                except Exception:
+                    pass
         if self.screentime is not None:
             try:
                 self.screentime.record(snapshot)

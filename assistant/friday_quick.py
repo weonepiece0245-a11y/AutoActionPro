@@ -76,6 +76,9 @@ class QuickCommands:
         self.dota = None  # friday_dota.Dota
         self.apex = None  # friday_apex.Apex
         self.gameboost = None  # friday_gameboost.GameBoost
+        self.known_games = None  # friday_games.KnownGames
+        self.temps = None  # friday_temps.Temps
+        self.gamereport = None  # friday_gamereport.GameReport
         self.env_file = None  # 改设定时存到哪个 .env
         self.sleep_timer = None  # friday_sleeptimer.SleepTimer
         self.diary = None  # friday_diary.Diary
@@ -539,7 +542,45 @@ class QuickCommands:
     BOOST_STATUS = re.compile(r"^游戏优化(状态|开着吗|有开吗|在做什么|做了什么)?$")
     BOOST_SWITCH = re.compile(r"^(?P<act>打开|开启|开|关掉|关闭|关|停止)(自动)?游戏优化$")
 
+    GAME_YES = re.compile(r"^(把)?(?P<w>[^?？吗呢什么哪]{0,20}?)(记成|当成|当作|算是?|是)(一个|个)?游戏$")
+    GAME_NO = re.compile(r"^(?P<w>[^?？吗呢什么哪]{0,20}?)(不是|不算)(一个|个)?游戏$")
+    GAME_RENAME = re.compile(r"^(把)?(?P<a>[^?？吗]{1,20}?)(叫做|改名叫|改名为|改叫|改名成)(?P<b>[^?？吗]{1,20})$")
+    GAME_LIST = re.compile(r"^(你)?(认识|学过|记得|记住了)(哪些|什么|几个)游戏(了)?$")
+
+    def _learn_games(self, sentence: str) -> str | None:
+        known = self.known_games
+        if known is None:
+            return None
+        if self.GAME_LIST.match(sentence):
+            return known.describe()
+        try:
+            found = self.GAME_NO.match(sentence)
+            if found:
+                return known.mark_not_game(found.group("w"))
+            found = self.GAME_YES.match(sentence)
+            if found:
+                return known.mark_game(found.group("w"))
+            found = self.GAME_RENAME.match(sentence)
+            if found and known._pick(found.group("a")) in known.games:  # 只认学过的游戏(“把我叫做老板”不归这里)
+                return known.rename(found.group("a"), found.group("b"))
+        except ValueError as e:
+            return str(e)
+        return None
+
+    TEMP_RE = re.compile(r"^(电脑|主机|CPU|cpu|处理器)(现在)?(的)?(温度|多少度|几度|热不热|会不会太热|有没有过热)(多少|怎么样|高不高)?$"
+                         r"|^(现在)?(电脑|主机)?(温度|几度)(怎么样|多少|高不高)$")
+
+    REPORT_RE = re.compile(r"^(游戏报告|上一局报告|刚才那局电脑(怎么样|有没有问题)|(刚才)?打游戏(的)?时候电脑(怎么样|有没有问题)"
+                           r"|你(刚才)?(打游戏时)?(用了|占了)多少(资源|CPU|cpu|内存))$")
+
     def _games(self, sentence: str) -> str | None:
+        learned = self._learn_games(sentence)
+        if learned:
+            return learned
+        if self.temps is not None and self.TEMP_RE.match(sentence):
+            return self.temps.describe()
+        if self.gamereport is not None and self.REPORT_RE.match(sentence):
+            return self.gamereport.describe()
         if self.gameboost is not None:
             if self.GAME_CHECK.match(sentence):
                 import friday_gameboost

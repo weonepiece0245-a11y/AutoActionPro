@@ -2375,6 +2375,11 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         save_env_value(env, "FRIDAY_GAME_QUIET", "on" if on else "off")
         os.environ["FRIDAY_GAME_QUIET"] = "on" if on else "off"
         done.append("打游戏时提醒改成右下角小通知,打完再说" if on else "打游戏时提醒照常读出来")
+    if "game_report" in payload:
+        on = bool(payload["game_report"])
+        save_env_value(env, "FRIDAY_GAME_REPORT", "on" if on else "off")
+        os.environ["FRIDAY_GAME_REPORT"] = "on" if on else "off"
+        done.append("每局打完会告诉你游戏报告" if on else "不再报游戏报告")
     if "game_boost" in payload:
         on = bool(payload["game_boost"])
         save_env_value(env, "FRIDAY_GAME_BOOST", "on" if on else "off")
@@ -2645,7 +2650,29 @@ def start_care(session, ctx, hub, toolbox: Toolbox, voice_module, data_dir: str 
             toast(text)
             hub.broadcast({"type": "status", "text": f"🎮 {text}"})
 
+    import friday_gamereport
+
+    report = friday_gamereport.GameReport(
+        temps=lambda: session.temps.read() if getattr(session, "temps", None) is not None else {})
+    session.gamereport = report
+
+    def report_game(game: str) -> None:
+        if os.environ.get("FRIDAY_GAME_REPORT", "on") == "off" or os.name != "nt":
+            return
+        care_now = getattr(session, "care", None)
+        report.start(game, getattr(care_now, "app_now", "") or "")
+        while report.active is not None:
+            time.sleep(60)
+            report.sample()
+
     def game_ended(game: str) -> None:
+        text = ""
+        try:
+            text = report.stop()
+        except Exception as e:
+            print(f"游戏报告没做成:{type(e).__name__}: {e}", flush=True)
+        if text:
+            threading.Thread(target=lambda: (time.sleep(5), say_here(session, text, "🎮")), daemon=True).start()
         try:
             text = boost.stop()
         except Exception as e:
@@ -2657,6 +2684,8 @@ def start_care(session, ctx, hub, toolbox: Toolbox, voice_module, data_dir: str 
     def game_started(game: str) -> None:
         """开游戏了:游戏优化,再自动关掉事先选好的程序(游戏模式)。"""
         threading.Thread(target=lambda: boost_game(game), daemon=True, name="friday-game-boost").start()
+        threading.Thread(target=lambda: _quietly(lambda: report_game(game)), daemon=True,
+                         name="friday-game-report").start()
         names = friday_care.game_close_list()
         computer = getattr(toolbox, "computer", None)
         if not names or computer is None or not computer.available:
@@ -2678,6 +2707,11 @@ def start_care(session, ctx, hub, toolbox: Toolbox, voice_module, data_dir: str 
     care = friday_care.Care(
         say, name=lambda: os.environ.get("FRIDAY_CALL_ME") or session.call_me or DEFAULT_CALL_ME,
         reminders=todays_reminders, toast=toast, on_game=game_started, on_game_end=game_ended)
+    import friday_games
+
+    care.known = session.known_games = friday_games.KnownGames(os.path.join(data_dir, "friday_games.json"))
+    if os.name == "nt":
+        care.app_path = friday_care.foreground_path
     care.start()
     session.care = care
     return care
@@ -3216,17 +3250,23 @@ def start_connected_apps(session, toolbox, ctx, data_dir: str, port: int) -> Non
     toolbox.diary = session.quick.diary = diary
     start_diary_evening(session, diary)
     start_tapo(session, toolbox)
-    if os.name == "nt" and friday_nvidia.find_smi() is not None:
-        toolbox.nvidia = session.quick.nvidia = True
-        watch = friday_nvidia.GpuWatch()
+    if os.name == "nt":
+        import friday_gameboost
+        import friday_temps
 
-        def gpu_loop() -> None:
+        has_gpu = friday_nvidia.find_smi() is not None
+        if has_gpu:
+            toolbox.nvidia = session.quick.nvidia = True
+        temps = friday_temps.Temps(gpu=friday_nvidia.status if has_gpu else None)
+        session.temps = toolbox.temps = session.quick.temps = temps
+
+        def temp_loop() -> None:
             time.sleep(120)
             while True:
-                _quietly(lambda: [say_here(session, text, "🌡") for text in [watch.check(_call_me(session))] if text])
-                time.sleep(60)
+                _quietly(lambda: [say_here(session, text, "🌡") for text in [temps.check(_call_me(session))] if text])
+                time.sleep(60 if friday_gameboost.gaming() else 300)  # 打游戏时每分钟看,平时 5 分钟
 
-        threading.Thread(target=gpu_loop, daemon=True, name="friday-gpu").start()
+        threading.Thread(target=temp_loop, daemon=True, name="friday-temps").start()
     import friday_apex
     import friday_dota
     import friday_sleeptimer
@@ -3992,6 +4032,8 @@ def run_web(args) -> None:
 
     session.quick = friday_quick.QuickCommands(toolbox, meter=session.meter, budget=getattr(session, "budget", None))
     session.quick.gameboost = getattr(session, "gameboost", None)
+    session.quick.known_games = getattr(session, "known_games", None)
+    session.quick.gamereport = getattr(session, "gamereport", None)
     session.quick.env_file = session.env_file
     toolbox.meter, toolbox.budget = session.meter, getattr(session, "budget", None)
     import friday_scenes
