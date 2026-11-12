@@ -583,7 +583,17 @@ class QuickCommands:
 
     DUCK_TEST_RE = re.compile(r"^(测试|试试|试一下|测一下)(一下)?(压低|降低|调低)(电脑)?(声音|音量)$")
 
+    DUCK_LOG_RE = re.compile(r"^(按住说话|压低声音)(的)?(诊断|记录|日志)$")
+
     def _games(self, sentence: str) -> str | None:
+        if self.DUCK_LOG_RE.match(sentence):
+            ducker = getattr(self, "ducker", None)
+            if ducker is None:
+                return "按住说话没有开着(或这台电脑不是 Windows)。"
+            if not ducker.log:
+                return ("这次打开星期五以后,按住说话还没有叫过“压低声音”。如果你刚按过 F9 而且听到“嘀”一声,"
+                        "把这句截图给我。")
+            return "按住说话最近几次:\n" + "\n".join(ducker.log)
         if os.name == "nt" and self.DUCK_TEST_RE.match(sentence):
             import friday_audio
 

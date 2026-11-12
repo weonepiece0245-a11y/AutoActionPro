@@ -7025,13 +7025,35 @@ class VoiceRobustTest(unittest.TestCase):
         self.assertEqual(told, ["没压低电脑声音(OSError: 找不到播放设备)"])  # 同一个问题只说一次
         ducker.restore()
         vol = self.Volume(0.6)
-        self.assertEqual(friday_audio.test_duck(vol, wait=lambda s: None), "压低声音正常:音量从 60% 压到 18%,两秒后恢复到 60%。")
+        self.assertEqual(friday_audio.test_duck(vol, wait=lambda s: None),
+                         "压低声音正常:1 个播放设备都压低两秒再恢复(60%→18%→60%)。你刚才有听到声音变小吗?")
         self.assertIn("读不到电脑的音量", friday_audio.test_duck(Broken(), wait=lambda s: None))
 
         class Stuck(self.Volume):
             def set(self, level):
                 pass  # 设了没用(不是默认播放设备)
-        self.assertIn("音量没压下去", friday_audio.test_duck(Stuck(0.6), wait=lambda s: None))
+        self.assertIn("有 1 个播放设备的音量没压下去", friday_audio.test_duck(Stuck(0.6), wait=lambda s: None))
+
+    def test_duck_every_output_device(self):
+        """声音可能从耳机出来、不是 Windows 的默认设备:所有正在用的播放设备一起压低,放开各自恢复。"""
+        class Many:
+            def __init__(self):
+                self.levels_now = {"喇叭": 0.62, "耳机": 0.4}
+
+            def levels(self):
+                return dict(self.levels_now)
+
+            def set_levels(self, levels):
+                self.levels_now.update(levels)
+        vol = Many()
+        ducker = friday_audio.Ducker(vol, enabled=lambda: True)
+        ducker.duck()
+        self.assertEqual(vol.levels_now, {"喇叭": 0.186, "耳机": 0.12})
+        vol.levels_now["耳机"] = 0.9  # 说话时自己把耳机调大了
+        ducker.restore()
+        self.assertEqual(vol.levels_now, {"喇叭": 0.62, "耳机": 0.9})  # 只恢复没被你动过的
+        self.assertIn("2 个播放设备", ducker.log[0])
+        self.assertIn("2 个播放设备都压低两秒再恢复", friday_audio.test_duck(Many(), wait=lambda s: None))
 
     def test_fallback_volume(self):
         class Broken:

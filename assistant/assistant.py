@@ -1981,6 +1981,8 @@ def start_ptt(session, ctx, events: queue.Queue, voice_module) -> None:
                                                                           "text": "🎙 " + text}),
         paused=lambda: bool(ctx.locked()), on_start=ducker.duck, on_stop=ducker.restore)
     session.ptt_ducker = ducker
+    if getattr(session, "quick", None) is not None:
+        session.quick.ducker = ducker
     key = friday_ptt.key_setting()
     if key != "off":
         print(session.ptt.start(key), flush=True)
