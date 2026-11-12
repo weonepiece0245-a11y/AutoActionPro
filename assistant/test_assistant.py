@@ -7057,6 +7057,52 @@ class VoiceRobustTest(unittest.TestCase):
             self.assertEqual(events.get_nowait(), ("ptt", "帮我开 YouTube"))
 
 
+import friday_selfcheck  # noqa: E402
+
+
+class SelfCheckTest(TempDirTest):
+    def test_run_and_report_once(self):
+        def broken():
+            raise RuntimeError("登录可能过期了")
+        checker = friday_selfcheck.SelfCheck(os.path.join(self.tmp, "s.json"), {
+            "天气": lambda: None, "Spotify": broken, "Google": lambda: friday_selfcheck.SKIP,
+            "慢的": lambda: time.sleep(1)}, timeout=0.2)
+        results = checker.run()
+        self.assertEqual([r["status"] for r in results], ["ok", "bad", "skip", "bad"])
+        text = friday_selfcheck.SelfCheck.describe(results)
+        self.assertIn("Spotify 有问题(登录可能过期了)", text)
+        self.assertIn("慢的 有问题(0.2 秒没反应)", text)
+        self.assertIn("没设定所以没检查:Google", text)
+        again = friday_selfcheck.SelfCheck(os.path.join(self.tmp, "s.json"), {})  # 重开后也记得
+        report = again.pending_report()
+        self.assertIn("Spotify 有问题", report)
+        self.assertIsNone(again.pending_report())  # 只说一次
+
+    def test_all_good_reports_nothing(self):
+        checker = friday_selfcheck.SelfCheck(os.path.join(self.tmp, "s.json"), {"天气": lambda: None})
+        self.assertEqual(friday_selfcheck.SelfCheck.describe(checker.run()), "自我检查:都正常(天气)。")
+        self.assertIsNone(checker.pending_report())
+
+    def test_start_selfcheck_checks(self):
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.quick = SimpleNamespace()
+        spotify = SimpleNamespace(connected=True, api=lambda m, p: (401, {}))
+        toolbox = SimpleNamespace(spotify=spotify, computer=None, reminders=None, google=None,
+                                  memory=SimpleNamespace(facts=[]))
+        with mock.patch.object(friday_weather, "find_place", lambda name: {"name": "吉隆坡"}), \
+                mock.patch.object(friday_weather, "forecast", lambda place, days: {"current": {"temperature_2m": 30}}):
+            app.start_selfcheck(session, toolbox, self.tmp)
+            results = {r["name"]: r for r in session.selfcheck.run()}
+        self.assertEqual(results["天气"]["status"], "ok")
+        self.assertIn("重新登录 Spotify", results["Spotify"]["detail"])
+        self.assertEqual(results["提醒"]["status"], "skip")
+        self.assertEqual(results["Claude 钥匙"]["status"], "bad")  # 测试里没有钥匙
+        self.assertEqual(results["Discord"]["status"], "skip")
+        quick = friday_quick.QuickCommands(SimpleNamespace())
+        quick.selfcheck = SimpleNamespace(run=lambda: [{"name": "天气", "status": "ok", "detail": ""}])
+        self.assertEqual(quick.handle("自我检查"), "自我检查:都正常(天气)。")
+
+
 class LedgerTest(TempDirTest):
     def make(self, when=datetime.datetime(2026, 11, 10, 13, 0)):
         self.now = [when]
@@ -7594,7 +7640,10 @@ class LocksTest(TempDirTest):
         now = [0.0]
         alerts = []
         stored = friday_locks.hash_pin("2468")
-        self.assertNotIn("2468", stored)
+        algorithm, rounds, salt, digest = stored.split("$")
+        self.assertEqual(algorithm, "pbkdf2")  # 存的是加密过的,不是 PIN 本身
+        self.assertNotEqual(digest, "2468")
+        self.assertNotEqual(friday_locks.hash_pin("2468"), stored)  # 每次加的盐都不一样
         lock = friday_locks.WindowLock(stored=lambda: stored, clock=lambda: now[0], on_alert=alerts.append)
         self.assertTrue(lock.lock())
         for _ in range(4):
@@ -8335,7 +8384,7 @@ class CleanupTest(TempDirTest):
         data = os.urandom(2 * 1024 * 1024)
         (root / "movie.mp4").write_bytes(data)
         (root / "sub" / "movie (1).mp4").write_bytes(data)  # 一模一样
-        (root / "other.mp4").write_bytes(data[:-1] + b"x")  # 一样大但不一样
+        (root / "other.mp4").write_bytes(data[:-1] + bytes([(data[-1] + 1) % 256]))  # 一样大但一定不一样
         (root / "big.iso").write_bytes(os.urandom(3 * 1024 * 1024))
         (root / "AppData" / "cache.bin").write_bytes(data)  # 程序资料夹不看
         (root / "id_rsa").write_bytes(data)  # 钥匙不碰

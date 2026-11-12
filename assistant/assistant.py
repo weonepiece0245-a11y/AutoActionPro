@@ -3385,7 +3385,15 @@ def make_brief(session, toolbox, data_dir: str):
     state = getattr(session, "alert_state", None)
     if state is None:
         state = friday_alerts.AlertState(os.path.join(data_dir, "friday_alerts.json"))
-    return friday_brief.MorningBrief(state, [weather, events, reminders, todos, dates, bills, mail, spending, news])
+    def selfcheck(now):  # 昨晚自我检查发现坏了的:早安简报里说,也推到手机
+        checker = getattr(session, "selfcheck", None)
+        text = checker.pending_report() if checker is not None else None
+        if text:
+            phone_alert(session, "🩺 " + text)
+        return text
+
+    return friday_brief.MorningBrief(state, [selfcheck, weather, events, reminders, todos, dates, bills, mail, spending,
+                                             news])
 
 
 def brief_now(session) -> str:
@@ -3995,6 +4003,81 @@ def floatorb_switch(session, on: bool) -> str:
     return "小光球收起来了。"
 
 
+def start_selfcheck(session, toolbox, data_dir: str) -> None:
+    """自我检查:半夜自动更新完试跑常用功能;说“自我检查”也会马上做一次。"""
+    import friday_alerts
+    import friday_selfcheck
+    import friday_weather
+
+    skip = friday_selfcheck.SKIP
+
+    def weather():
+        place = friday_weather.find_place(friday_alerts.rain_place())
+        data = friday_weather.forecast(place, 1)
+        if "temperature_2m" not in (data.get("current") or {}):
+            raise RuntimeError("天气服务没给现在的温度")
+
+    def spotify():
+        sp = getattr(toolbox, "spotify", None)
+        if sp is None or not sp.connected:
+            return skip
+        status, _ = sp.api("GET", "/me/player")
+        if status not in (200, 204):
+            raise RuntimeError("登录可能过期了,到齿轮设定重新登录 Spotify" if status == 401 else f"Spotify 回 HTTP {status}")
+
+    def open_apps():
+        computer = getattr(toolbox, "computer", None)
+        if os.name != "nt" or computer is None or not computer.available:
+            return skip
+        code, out = computer._pc().powershell("(Get-StartApps | Measure-Object).Count")
+        if code != 0 or not out.strip().isdigit() or int(out.strip()) == 0:
+            raise RuntimeError("读不到开始菜单的程序清单,打开程序可能会失败")
+
+    def reminders():
+        if toolbox.reminders is None:
+            return skip
+        toolbox.reminders.upcoming()
+        if not os.access(data_dir, os.W_OK):
+            raise RuntimeError("资料夹不能写,新的提醒存不起来")
+
+    def google():
+        account = getattr(toolbox, "google", None)
+        if account is None:
+            return skip
+        now = datetime.datetime.now().astimezone()
+        account.raw_events(now, now + datetime.timedelta(hours=1))
+
+    def memory():
+        if not isinstance(toolbox.memory.facts, list):
+            raise RuntimeError("记忆读不出来")
+
+    def claude():
+        assistant = session.assistant
+        if assistant is None or getattr(assistant, "client", None) is None:
+            raise RuntimeError(session.startup_error or "没有 Claude 钥匙")
+        assistant.client.models.list(limit=1)  # 只问有哪些模型:不花钱
+
+    def discord():
+        bridge = getattr(session, "discord", None)
+        if bridge is None:
+            return skip
+        client = getattr(bridge, "client", None)
+        if client is None or not client.is_ready():
+            raise RuntimeError("Discord 机器人没连上")
+
+    checker = friday_selfcheck.SelfCheck(os.path.join(data_dir, "friday_selfcheck.json"), {
+        "天气": weather, "Spotify": spotify, "开程序": open_apps, "提醒": reminders, "Google": google,
+        "记忆": memory, "Claude 钥匙": claude, "Discord": discord})
+    session.selfcheck = toolbox.selfcheck = session.quick.selfcheck = checker
+    auto = getattr(session, "autoupdate", None)
+    if auto is not None and auto.state.get("note"):  # 昨晚刚自动更新完:等大家都连上了再试
+        def later() -> None:
+            time.sleep(180)
+            results = checker.run()
+            print(friday_selfcheck.SelfCheck.describe(results), flush=True)
+        threading.Thread(target=lambda: _quietly(later), daemon=True, name="friday-selfcheck").start()
+
+
 def start_autoupdate(session, events: queue.Queue, data_dir: str) -> None:
     """半夜没在用电脑时自己检查更新;早上回来时说更新了什么。"""
     import friday_autoupdate
@@ -4014,6 +4097,14 @@ def start_autoupdate(session, events: queue.Queue, data_dir: str) -> None:
                 note = auto.morning_note(idle)
                 if note:
                     say_here(session, note, "🆕")
+                import friday_brief
+
+                checker = getattr(session, "selfcheck", None)  # 没开早安简报:自我检查的问题在这里说
+                if (checker is not None and not friday_brief.enabled() and idle is not None and idle < 120
+                        and datetime.datetime.now().hour >= 6):
+                    text = checker.pending_report()
+                    if text:
+                        announce(session, text, "🩺", "自我检查发现有功能坏了", urgent=True)
                 if auto.due(idle, session.busy, friday_gameboost.gaming()):
                     auto.mark_started()
                     print("半夜自动检查更新", flush=True)
@@ -4571,6 +4662,7 @@ def run_web(args) -> None:
     _startup_step(session, "按住说话", lambda: start_ptt(session, ctx, events, voice_module))
     _startup_step(session, "截图问星期五", lambda: start_screenshot(session, ctx, events))
     _startup_step(session, "半夜自动更新", lambda: start_autoupdate(session, events, data_dir))
+    _startup_step(session, "自我检查", lambda: start_selfcheck(session, toolbox, data_dir))
     if getattr(toolbox, "screen", None) is not None:
         toolbox.screen.on_change = lambda active, text: takeover_notice(session, active, text)
     if toolbox.google is not None:  # 登录了 Google:笔记同时抄到 Google 文档(在后台抄,不拖慢)

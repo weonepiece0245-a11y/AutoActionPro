@@ -81,6 +81,7 @@ class QuickCommands:
         self.gamereport = None  # friday_gamereport.GameReport
         self.wishlist = None  # friday_wishlist.Wishlist
         self.dota_advice = None  # friday_dota_advice.DotaAdvice
+        self.selfcheck = None  # friday_selfcheck.SelfCheck
         self.env_file = None  # 改设定时存到哪个 .env
         self.sleep_timer = None  # friday_sleeptimer.SleepTimer
         self.diary = None  # friday_diary.Diary
@@ -578,7 +579,13 @@ class QuickCommands:
     WISHLIST_RE = re.compile(r"^(steam|Steam|STEAM)?(的)?(愿望单|愿望清单)(里)?(有什么|有没有|有哪些|哪些)?(游戏)?(在)?(打折|特价|降价)(吗|了吗|了没)?$"
                              r"|^(steam|Steam|STEAM)(上)?(有什么|有哪些|哪些)?(游戏)?(在)?(打折|特价)(吗)?$|^(看看|查查)?(我的)?(steam|Steam)?愿望单$")
 
+    SELFCHECK_RE = re.compile(r"^(做一?次|做个|来个|帮我)?(自我检查|自检|体检一下你自己|检查一下你自己|你有没有(坏掉|出问题)|你哪里坏了)(一下)?$")
+
     def _games(self, sentence: str) -> str | None:
+        if self.selfcheck is not None and self.SELFCHECK_RE.match(sentence):
+            import friday_selfcheck
+
+            return friday_selfcheck.SelfCheck.describe(self.selfcheck.run())
         learned = self._learn_games(sentence)
         if learned:
             return learned

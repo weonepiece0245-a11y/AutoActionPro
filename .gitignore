@@ -68,6 +68,7 @@ assistant/friday_wishlist.json*
 assistant/friday_autoupdate.json*
 assistant/friday_gamereport.json*
 assistant/friday_lightlink.json*
+assistant/friday_selfcheck.json*
 assistant/friday_crash.json
 assistant/friday_guard.lock
 assistant/friday_dates.json*
