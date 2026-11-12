@@ -968,6 +968,12 @@ function fillSettings() {
     $("setGameReport").checked = care.game_report !== false;
     if (document.activeElement !== $("setGameClose")) $("setGameClose").value = (care.game_close || []).join(", ");
   }
+  $("pttRow").hidden = !s.ptt;
+  if (s.ptt) {
+    const sel = $("setPtt");
+    if (sel.options.length <= 1) for (const [key, label] of s.ptt.keys) sel.append(new Option(label, key));
+    sel.value = s.ptt.key;
+  }
   const c = s.cloud;
   $("cloudGroup").hidden = !c;
   if (c) {
@@ -1369,6 +1375,7 @@ $("setRemindCalendar").onchange = (e) => saveSetting({ remind_calendar: e.target
 $("setGameQuiet").onchange = (e) => saveSetting({ game_quiet: e.target.checked });
 $("setGameBoost").onchange = (e) => saveSetting({ game_boost: e.target.checked });
 $("setGameReport").onchange = (e) => saveSetting({ game_report: e.target.checked });
+$("setPtt").onchange = (e) => saveSetting({ ptt_key: e.target.value });
 $("saveGameClose").onclick = () => saveSetting({ game_close: $("setGameClose").value });
 $("setGameClose").addEventListener("keydown", (e) => { if (e.key === "Enter") $("saveGameClose").click(); });
 $("gameCandidates").onclick = async () => {

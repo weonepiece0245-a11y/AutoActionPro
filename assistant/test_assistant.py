@@ -6257,6 +6257,98 @@ class DashboardTest(unittest.TestCase):
                          ("吉隆坡", "局部多云", 70, 6, "15:00"))
 
 
+import friday_ptt  # noqa: E402
+
+
+class PushToTalkTest(unittest.TestCase):
+    def run_script(self, script, paused=False):
+        """script:[(按着吗, 过了几秒)…];用假的键盘、录音、时钟跑完。"""
+        now = [0.0]
+        steps = list(script)
+        state = {"down": False}
+        sent, beeps, started = [], [], []
+
+        class Recorder:
+            def start(self):
+                started.append(now[0])
+
+            def stop(self):
+                return b"\x01\x00" * 1600
+
+        ptt = friday_ptt.PushToTalk(sent.append, key_down=lambda vk: state["down"], recorder_factory=Recorder,
+                                    clock=lambda: now[0], beep=beeps.append, paused=lambda: paused)
+
+        def sleep(seconds):
+            if not steps:
+                ptt.running = False
+                return
+            state["down"], advance = steps.pop(0)
+            now[0] += advance
+        ptt.sleep = sleep
+        ptt.key = "f8"
+        ptt.running = True
+        ptt._loop()
+        return sent, beeps, started
+
+    def test_hold_and_release_sends_audio(self):
+        sent, beeps, _ = self.run_script([(True, 0.1), (True, 1.0), (True, 0.5), (False, 0.1), (False, 0.1)])
+        self.assertEqual(len(sent), 1)
+        self.assertTrue(sent[0].startswith(b"RIFF"))  # WAV,识别那边认得
+        self.assertEqual(beeps, [True, False])
+
+    def test_short_press_is_ignored(self):
+        sent, beeps, _ = self.run_script([(True, 0.1), (False, 0.2), (False, 0.1)])
+        self.assertEqual(sent, [])
+        self.assertEqual(beeps, [True, False])
+
+    def test_long_press_stops_at_limit_and_waits_for_release(self):
+        sent, _, started = self.run_script([(True, 0.1)] + [(True, 5.0)] * 8 + [(False, 0.1), (False, 0.1)])
+        self.assertEqual(len(sent), 1)  # 30 秒就送出去,一直按着也不会再录一段
+        self.assertEqual(len(started), 1)
+
+    def test_locked_window_does_not_listen(self):
+        sent, beeps, started = self.run_script([(True, 0.1), (True, 2.0), (False, 0.1)], paused=True)
+        self.assertEqual((sent, beeps, started), ([], [], []))
+
+    def test_start_and_settings(self):
+        ptt = friday_ptt.PushToTalk(lambda wav: None, key_down=lambda vk: False, recorder_factory=lambda: None,
+                                    sleep=lambda s: time.sleep(0.01))
+        self.assertIn("按住 F8", ptt.start("f8"))
+        self.assertTrue(ptt.running)
+        self.assertIn("关掉了", ptt.start("off"))
+        self.assertFalse(ptt.running)
+        with mock.patch.dict(os.environ, {"FRIDAY_PTT_KEY": "Mouse4"}):
+            self.assertEqual(friday_ptt.key_setting(), "mouse4")
+        with mock.patch.dict(os.environ, {"FRIDAY_PTT_KEY": "rm -rf"}):
+            self.assertEqual(friday_ptt.key_setting(), "off")
+
+    def test_ptt_answer_speaks_without_window(self):
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        asked, spoken = [], []
+        session.ask = lambda text, source, speak: asked.append((text, source, speak)) or "现在 3 点"
+        session.local_speaker = SimpleNamespace(speak=spoken.append)
+        app.ptt_answer(session, "几点了")  # 窗口关着:用电脑直接读
+        self.assertEqual(asked, [("几点了", "ptt", False)])
+        self.assertEqual(spoken, ["现在 3 点"])
+        session.hub.subscribe()  # 窗口开着:在窗口里读
+        app.ptt_answer(session, "几点了")
+        self.assertEqual(asked[-1], ("几点了", "ptt", True))
+        self.assertEqual(len(spoken), 1)
+
+    def test_settings_payload(self):
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        started = []
+        session.ptt = SimpleNamespace(start=lambda key: started.append(key) or f"按住 {key}")
+        env = Path(tempfile.mkdtemp(), ".env")
+        env.write_text("")
+        with mock.patch.dict(os.environ, {}):
+            self.assertIn("error", app.apply_settings({"ptt_key": "f12"}, session, SimpleNamespace(), env))
+            app.apply_settings({"ptt_key": "mouse5"}, session, SimpleNamespace(), env)
+        self.assertEqual(started, ["mouse5"])
+        self.assertIn("FRIDAY_PTT_KEY=mouse5", env.read_text())
+        self.assertEqual(app.ptt_state(session)["key"], "off")  # 测试里环境变量已经还原
+
+
 class LedgerTest(TempDirTest):
     def make(self, when=datetime.datetime(2026, 11, 10, 13, 0)):
         self.now = [when]

@@ -1573,6 +1573,8 @@ def web_loop(session: WebSession, events: queue.Queue, transcribe=None) -> None:
                 return  # run_web 会用新代码重新启动
         elif kind == "discord":
             web_discord(payload, session, transcribe)
+        elif kind == "ptt":
+            ptt_answer(session, payload)
         elif kind == "reminder":
             web_reminder(payload, session)
         sys.stdout.flush()
@@ -1901,6 +1903,62 @@ def hotkey_state(session) -> dict | None:
             "ask_options": [[key, label] for key, (label, _, _) in friday_desktop.ASK_HOTKEYS.items()]}
 
 
+def ptt_state(session) -> dict | None:
+    """打游戏时按住说话(只有 Windows)。"""
+    if getattr(session, "ptt", None) is None:
+        return None
+    import friday_ptt
+
+    return {"key": friday_ptt.key_setting(), "keys": [[k, label] for k, (label, _) in friday_ptt.KEYS.items()]}
+
+
+def start_ptt(session, ctx, events: queue.Queue, voice_module) -> None:
+    """打游戏时按住说话:按住键录音,放开就问;回答用声音说(窗口开着在窗口里读,关着用电脑直接读)。"""
+    if os.name != "nt":
+        return
+    import friday_ptt
+
+    def on_audio(wav: bytes) -> None:
+        def work() -> None:
+            transcribe = ctx.transcribe or voice_module.transcribe_audio
+            try:
+                text = transcribe(wav)
+            except Exception as e:  # noqa: BLE001
+                print(f"按住说话没听清:{type(e).__name__}: {e}", flush=True)
+                text = None
+            if not text:
+                friday_ptt.beep(False)
+                session.hub.broadcast({"type": "status", "text": "🎙 按住说话:没听清,再说一次"})
+                return
+            events.put(("ptt", text))
+        threading.Thread(target=work, daemon=True, name="friday-ptt-ask").start()
+
+    session.ptt = friday_ptt.PushToTalk(
+        on_audio, on_status=lambda text, failed: session.hub.broadcast({"type": "error" if failed else "status",
+                                                                          "text": "🎙 " + text}),
+        paused=lambda: bool(ctx.locked()))
+    key = friday_ptt.key_setting()
+    if key != "off":
+        print(session.ptt.start(key), flush=True)
+
+
+def ptt_answer(session, text: str) -> None:
+    """按住说话问的:不跳窗口、一定读出来(窗口关着就用电脑直接读)。"""
+    if session.hub.connected:
+        session.ask(text, source="ptt", speak=True)
+        return
+    reply = session.ask(text, source="ptt", speak=False)
+    if reply:
+        try:
+            if getattr(session, "local_speaker", None) is None:
+                import voice as voice_module
+
+                session.local_speaker = voice_module.make_speaker(on_status=lambda t: None)
+            session.local_speaker.speak(reply)
+        except Exception as e:  # noqa: BLE001
+            print(f"按住说话的回答没读出来:{type(e).__name__}: {e}", flush=True)
+
+
 def settings_state(session, meter=None) -> dict:
     """齿轮设定里要显示的当前值。"""
     import friday_app
@@ -1921,6 +1979,7 @@ def settings_state(session, meter=None) -> dict:
         "hotkey": hotkey_state(session),
         "cloud": cloud_state(session),
         "care": care_state(session),
+        "ptt": ptt_state(session),
         "push": push_mode() if getattr(session, "discord", None) is not None else None,
         "remind_calendar": remind_calendar_state(session),
         "security": security_state(session),
@@ -2375,6 +2434,16 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         save_env_value(env, "FRIDAY_GAME_QUIET", "on" if on else "off")
         os.environ["FRIDAY_GAME_QUIET"] = "on" if on else "off"
         done.append("打游戏时提醒改成右下角小通知,打完再说" if on else "打游戏时提醒照常读出来")
+    if "ptt_key" in payload:
+        import friday_ptt
+
+        key = str(payload["ptt_key"]).strip().lower()
+        if key != "off" and key not in friday_ptt.KEYS:
+            return {"error": "没有这个键"}
+        save_env_value(env, "FRIDAY_PTT_KEY", key)
+        os.environ["FRIDAY_PTT_KEY"] = key
+        ptt = getattr(session, "ptt", None)
+        done.append(ptt.start(key) if ptt is not None else "按住说话只能在 Windows 上用")
     if "game_report" in payload:
         on = bool(payload["game_report"])
         save_env_value(env, "FRIDAY_GAME_REPORT", "on" if on else "off")
@@ -4192,6 +4261,7 @@ def run_web(args) -> None:
         _startup_step(session, name, step)
     _startup_step(session, "仪表板", lambda: start_dashboard(session, toolbox, ctx))
     _startup_step(session, "桌面小光球", lambda: start_floatorb(session, ctx, data_dir))
+    _startup_step(session, "按住说话", lambda: start_ptt(session, ctx, events, voice_module))
     if getattr(toolbox, "screen", None) is not None:
         toolbox.screen.on_change = lambda active, text: takeover_notice(session, active, text)
     if toolbox.google is not None:  # 登录了 Google:笔记同时抄到 Google 文档(在后台抄,不拖慢)
