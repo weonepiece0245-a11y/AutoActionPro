@@ -1285,11 +1285,13 @@ class FakeSR(types.ModuleType):
                 self.args = (frame_data, sample_rate, sample_width)
 
         class Recognizer:
-            def recognize_google(self, audio, language=None):
+            def recognize_google(self, audio, language=None, show_all=False):
                 fake.recognized.append((audio.args, language))
                 item = fake.results.pop(0)
                 if isinstance(item, Exception):
                     raise item
+                if show_all and isinstance(item, str):  # 真的 show_all 会给候选和把握度
+                    return {"alternative": [{"transcript": item, "confidence": 0.9}], "final": True}
                 return item
 
         self.AudioData = AudioData
@@ -3562,6 +3564,16 @@ class AudioHelpersTest(unittest.TestCase):
             self.assertEqual(voice.transcribe_audio(b"OGG"), "今天天气怎么样")
             self.assertEqual(sr.recognized[0], ((b"PCM", 16000, 2), "zh-CN"))
             self.assertIsNone(voice.transcribe_audio(b"OGG"))
+
+    def test_transcribe_cleans_and_reports_confidence(self):
+        sr = FakeSR([{"alternative": [{"transcript": "星期无下午下午三点提醒我", "confidence": 0.42}]}, [],
+                     {"alternative": [{"transcript": "hello hello world"}]}])
+        with mock.patch.object(voice, "decode_audio", return_value=b"PCM"), \
+                mock.patch.dict(sys.modules, {"speech_recognition": sr}), \
+                mock.patch.dict(os.environ, {"FRIDAY_STT": "google"}):
+            self.assertEqual(voice.transcribe_detail(b"OGG"), ("星期五下午三点提醒我", 0.42))
+            self.assertEqual(voice.transcribe_detail(b"OGG"), (None, None))  # 没听到(真的 show_all 会给空的)
+            self.assertEqual(voice.transcribe_detail(b"OGG", language="en-US"), ("hello hello world", None))  # 外语不动
 
     def test_synthesize_mp3(self):
         with mock.patch.dict(sys.modules, {"edge_tts": fake_edge_tts()}), mock.patch.dict(os.environ, {}, clear=True):
@@ -6931,6 +6943,118 @@ class KeepGameFrontTest(unittest.TestCase):
         pc = SimpleNamespace(hotkey=lambda keys: self.fail("不该按 Win+D"))
         with mock.patch.object(friday_care, "_now_playing", "Apex"):
             self.assertIn("没有显示桌面", computer._do_show_desktop(pc, "", None))
+
+
+import friday_voicefix  # noqa: E402
+
+
+class VoiceFixTest(unittest.TestCase):
+    def test_clean(self):
+        cases = {
+            "下午下午三点提醒我": "下午三点提醒我",
+            "打开打开斯波蒂菲": "打开Spotify",
+            "星期无,开迪斯科德": "星期五,开Discord",
+            "试试看试试看试试看": "试试看",
+            "谢谢你": "谢谢你",  # 正常的叠字不动
+            "哈哈哈哈": "哈哈",
+            "看看天气": "看看天气",
+            "play play music": "play music",
+            "": "",
+        }
+        for heard, expected in cases.items():
+            self.assertEqual(friday_voicefix.clean(heard) or "", expected, heard)
+        self.assertEqual(friday_voicefix.clean("星期无", language="ja-JP"), "星期无")  # 外语不动
+
+    def test_unsure_and_answers(self):
+        self.assertTrue(friday_voicefix.unsure(0.4))
+        self.assertFalse(friday_voicefix.unsure(0.9))
+        self.assertFalse(friday_voicefix.unsure(None))
+        self.assertEqual([friday_voicefix.answer(t) for t in ("对", "是的", "不是", "不对", "嗯", "帮我开 Spotify")],
+                         ["yes", "yes", "no", "no", "yes", "other"])
+
+
+import friday_audio  # noqa: E402
+
+
+class VoiceRobustTest(unittest.TestCase):
+    class Volume:
+        def __init__(self, level):
+            self.level = level
+
+        def get(self):
+            return self.level
+
+        def set(self, level):
+            self.level = level
+
+    def test_duck_and_restore(self):
+        vol = self.Volume(0.8)
+        ducker = friday_audio.Ducker(vol, enabled=lambda: True)
+        ducker.duck()
+        self.assertAlmostEqual(vol.level, 0.24)
+        ducker.restore()
+        self.assertEqual(vol.level, 0.8)
+        ducker.restore()  # 没压过:不动
+        self.assertEqual(vol.level, 0.8)
+        ducker.duck()
+        vol.level = 0.5  # 说话时自己调了音量:听你的
+        ducker.restore()
+        self.assertEqual(vol.level, 0.5)
+        quiet = self.Volume(0.0)
+        friday_audio.Ducker(quiet, enabled=lambda: True).duck()
+        self.assertEqual(quiet.level, 0.0)
+        off = self.Volume(0.8)
+        friday_audio.Ducker(off, enabled=lambda: False).duck()
+        self.assertEqual(off.level, 0.8)
+
+    def test_ptt_ducks_while_recording(self):
+        order = []
+        state = {"down": False}
+        steps = [(True, 0.1), (True, 1.0), (False, 0.1), (False, 0.1)]
+        now = [0.0]
+
+        class Recorder:
+            def start(self):
+                order.append("record")
+
+            def stop(self):
+                order.append("stop")
+                return b"\x01\x00" * 1600
+        ptt = friday_ptt.PushToTalk(lambda wav: order.append("send"), key_down=lambda vk: state["down"],
+                                    recorder_factory=Recorder, clock=lambda: now[0], beep=lambda high: None,
+                                    on_start=lambda: order.append("duck"), on_stop=lambda: order.append("restore"))
+
+        def sleep(seconds):
+            if not steps:
+                ptt.running = False
+                return
+            state["down"], advance = steps.pop(0)
+            now[0] += advance
+        ptt.sleep = sleep
+        ptt.key, ptt.vk, ptt.running = "f8", 0x77, True
+        ptt._loop()
+        self.assertEqual(order, ["record", "duck", "stop", "restore", "send"])  # 送去识别前就恢复声音
+
+    def test_unsure_asks_first(self):
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        approver = friday_web.WebApprover(session.hub)
+        events = queue.Queue()
+        said = []
+        with mock.patch.object(app, "ptt_say", lambda s, text: said.append(text)):
+            app.ptt_heard(session, approver, events, "关掉客厅灯", 0.92)  # 有把握:直接做
+            self.assertEqual(events.get_nowait(), ("ptt", "关掉客厅灯"))
+            app.ptt_heard(session, approver, events, "关掉客厅等", 0.41)  # 拿不准:先问
+            self.assertTrue(events.empty())
+            self.assertIn("你是说“关掉客厅等”吗", said[-1])
+            app.ptt_heard(session, approver, events, "对", 0.95)
+            self.assertEqual(events.get_nowait(), ("ptt", "关掉客厅等"))
+            app.ptt_heard(session, approver, events, "播放音乐", 0.3)
+            app.ptt_heard(session, approver, events, "不是", 0.9)
+            self.assertTrue(events.empty())
+            self.assertEqual(said[-1], "好,那你再说一次。")
+            app.ptt_heard(session, approver, events, "播放音乐", 0.3)
+            app.ptt_heard(session, approver, events, "帮我开 YouTube", 0.95)  # 说了别的:当成新的一句
+            self.assertEqual(events.get_nowait(), ("ptt", "帮我开 YouTube"))
 
 
 class LedgerTest(TempDirTest):

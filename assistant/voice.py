@@ -578,7 +578,22 @@ def decode_audio(data: bytes, rate: int = SAMPLE_RATE) -> bytes:
 
 
 def transcribe_audio(data: bytes, engine: str | None = None, language: str = "zh-CN") -> str | None:
-    """把一整段音频转成文字;没听清时返回 None。engine:google(默认)或 vosk(只认中文)。language:口译时听别的语言。"""
+    """把一整段音频转成文字;没听清时返回 None。engine:google(默认)或 vosk(只认中文)。language:口译时听别的语言。
+
+    出来的文字会先整理(重复的词、常听错的名字),见 friday_voicefix。
+    """
+    return transcribe_detail(data, engine, language)[0]
+
+
+def transcribe_detail(data: bytes, engine: str | None = None, language: str = "zh-CN") -> tuple[str | None, float | None]:
+    """(整理过的文字, 识别把握度 0~1;不知道就 None)。"""
+    import friday_voicefix
+
+    text, confidence = _transcribe_raw(data, engine, language)
+    return friday_voicefix.clean(text, language), confidence
+
+
+def _transcribe_raw(data: bytes, engine: str | None, language: str) -> tuple[str | None, float | None]:
     engine = engine or os.environ.get("FRIDAY_STT") or "google"
     pcm = decode_audio(data)
     if engine == "vosk":
@@ -592,17 +607,23 @@ def transcribe_audio(data: bytes, engine: str | None = None, language: str = "zh
             _vosk_model = vosk.Model(ensure_vosk_model(on_status=lambda t: None))
         recognizer = vosk.KaldiRecognizer(_vosk_model, SAMPLE_RATE)
         recognizer.AcceptWaveform(pcm)
-        return json.loads(recognizer.FinalResult()).get("text", "").replace(" ", "") or None
+        return json.loads(recognizer.FinalResult()).get("text", "").replace(" ", "") or None, None
     try:
         import speech_recognition as sr
     except ImportError as e:
         raise VoiceUnavailable(FFMPEG_HINT) from e
     try:
-        return sr.Recognizer().recognize_google(sr.AudioData(pcm, SAMPLE_RATE, 2), language=language) or None
+        result = sr.Recognizer().recognize_google(sr.AudioData(pcm, SAMPLE_RATE, 2), language=language, show_all=True)
     except sr.UnknownValueError:
-        return None
+        return None, None
     except sr.RequestError as e:
         raise VoiceUnavailable(f"在线语音识别连接失败({e})。可以在 .env 里写 FRIDAY_STT=vosk 改用离线识别") from e
+    alternatives = (result or {}).get("alternative") if isinstance(result, dict) else None
+    if not alternatives:
+        return None, None
+    best = alternatives[0]
+    confidence = best.get("confidence")
+    return (best.get("transcript") or None), (float(confidence) if confidence is not None else None)
 
 
 def synthesize_mp3(text: str, edge_voice: str | None = None, max_chars: int = 800) -> bytes | None:

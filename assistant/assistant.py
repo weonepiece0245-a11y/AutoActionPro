@@ -1933,7 +1933,9 @@ def ptt_state(session) -> dict | None:
         key = friday_ptt.key_setting(which)
         state[which] = {"key": "custom" if key.startswith("vk:") else key,
                         "custom": friday_ptt.key_info(key, which)[0] if key.startswith("vk:") else ""}
-    return {**state["ptt"], "keys": keys, "shot": state["shot"]}
+    import friday_audio
+
+    return {**state["ptt"], "keys": keys, "shot": state["shot"], "duck": friday_audio.duck_enabled()}
 
 
 def start_ptt(session, ctx, events: queue.Queue, voice_module) -> None:
@@ -1942,36 +1944,71 @@ def start_ptt(session, ctx, events: queue.Queue, voice_module) -> None:
         return
     import friday_ptt
 
+    import friday_audio
+
+    ducker = friday_audio.Ducker()
+
+    def hear(wav: bytes) -> tuple[str | None, float | None]:
+        interp = getattr(session, "interpreter", None)
+        if interp is not None and interp.active and ctx.transcribe is not None:
+            return ctx.transcribe(wav), None  # 口译:照口译的语言听
+        detail = getattr(voice_module, "transcribe_detail", None)
+        if detail is not None:
+            return detail(wav)
+        return (ctx.transcribe or voice_module.transcribe_audio)(wav), None
+
     def on_audio(wav: bytes) -> None:
         def work() -> None:
-            transcribe = ctx.transcribe or voice_module.transcribe_audio
             try:
-                text = transcribe(wav)
+                text, confidence = hear(wav)
             except Exception as e:  # noqa: BLE001
                 print(f"按住说话没听清:{type(e).__name__}: {e}", flush=True)
-                text = None
+                text, confidence = None, None
             if not text:
                 friday_ptt.beep(False)
                 session.hub.broadcast({"type": "status", "text": "🎙 按住说话:没听清,再说一次"})
                 return
-            verdict = ctx.approver.answer_by_voice(text)  # 正在等你用声音确认?
-            if verdict == "unclear":
-                ptt_say(session, "听不出来是允许还是不要。按住再说一次“允许”或者“不要”。")
-                return
-            if verdict is not None:
-                session.hub.broadcast({"type": "status", "text": f"🎙 你说“{text}”:{'允许' if verdict == 'yes' else '不做'}"})
-                return
-            events.put(("ptt", text))
+            ptt_heard(session, ctx.approver, events, text, confidence)
         threading.Thread(target=work, daemon=True, name="friday-ptt-ask").start()
 
     session.ptt_approver = ctx.approver
     session.ptt = friday_ptt.PushToTalk(
         on_audio, on_status=lambda text, failed: session.hub.broadcast({"type": "error" if failed else "status",
                                                                           "text": "🎙 " + text}),
-        paused=lambda: bool(ctx.locked()))
+        paused=lambda: bool(ctx.locked()), on_start=ducker.duck, on_stop=ducker.restore)
+    session.ptt_ducker = ducker
     key = friday_ptt.key_setting()
     if key != "off":
         print(session.ptt.start(key), flush=True)
+
+
+def ptt_heard(session, approver, events: queue.Queue, text: str, confidence: float | None) -> None:
+    """按住说话听到一句:先看是不是在回答“允许吗”“你是说……吗”,拿不准就先问,不然就当成问题。"""
+    import friday_voicefix
+
+    verdict = approver.answer_by_voice(text)  # 正在等你用声音确认?
+    if verdict == "unclear":
+        ptt_say(session, "听不出来是允许还是不要。按住再说一次“允许”或者“不要”。")
+        return
+    if verdict is not None:
+        session.hub.broadcast({"type": "status", "text": f"🎙 你说“{text}”:{'允许' if verdict == 'yes' else '不做'}"})
+        return
+    pending = getattr(session, "ptt_unsure", None)  # 上一句拿不准,问过“你是说……吗”
+    session.ptt_unsure = None
+    if pending and time.monotonic() - pending[1] < 25:
+        reply = friday_voicefix.answer(text)
+        if reply == "yes":
+            events.put(("ptt", pending[0]))
+            return
+        if reply == "no":
+            ptt_say(session, "好,那你再说一次。")
+            return
+    if friday_voicefix.unsure(confidence):  # 拿不准:先问一句,不直接做
+        session.ptt_unsure = (text, time.monotonic())
+        session.hub.broadcast({"type": "status", "text": f"🎙 没听太清楚,确认一下:“{text}”"})
+        ptt_say(session, f"你是说“{text}”吗?按住说“对”或者“不是”。")
+        return
+    events.put(("ptt", text))
 
 
 def ptt_say(session, text: str) -> None:
@@ -2612,6 +2649,11 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
             save_env_value(env, key, value)
             os.environ[key] = value
         done.append("家里的灯联动设好了")
+    if "ptt_duck" in payload:
+        on = bool(payload["ptt_duck"])
+        save_env_value(env, "FRIDAY_PTT_DUCK", "on" if on else "off")
+        os.environ["FRIDAY_PTT_DUCK"] = "on" if on else "off"
+        done.append("按住说话时会先把电脑声音压低,说完恢复" if on else "按住说话时不压低电脑声音")
     if "auto_update" in payload:
         on = bool(payload["auto_update"])
         save_env_value(env, "FRIDAY_AUTO_UPDATE", "on" if on else "off")

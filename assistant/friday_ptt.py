@@ -123,13 +123,15 @@ class PushToTalk:
     def __init__(self, on_audio: Callable[[bytes], None], on_status: Callable[[str, bool], None] = lambda t, e: None,
                  key_down: Callable[[int], bool] | None = None, recorder_factory: Callable[[], object] | None = None,
                  clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
-                 beep: Callable[[bool], None] = beep, paused: Callable[[], bool] = lambda: False) -> None:
+                 beep: Callable[[bool], None] = beep, paused: Callable[[], bool] = lambda: False,
+                 on_start: Callable[[], None] = lambda: None, on_stop: Callable[[], None] = lambda: None) -> None:
         self.on_audio = on_audio  # 放开后:一段 WAV
         self.on_status = on_status
         self.key_down = key_down or key_down_windows
         self.recorder_factory = recorder_factory or SoundDeviceRecorder
         self.clock, self.sleep, self.beep = clock, sleep, beep
         self.paused = paused  # 锁着的时候不听
+        self.on_start, self.on_stop = on_start, on_stop  # 开始录音前 / 录完:压低、恢复电脑声音
         self.key = "off"
         self.running = False
         self.thread: threading.Thread | None = None
@@ -184,6 +186,7 @@ class PushToTalk:
                     self._recorder().start()
                     recording, started = True, self.clock()
                     self.beep(True)
+                    self._hook(self.on_start)
                 except Exception as e:  # noqa: BLE001
                     self.on_status(f"按住说话打不开麦克风:{e}", True)
                     recording = False
@@ -193,6 +196,7 @@ class PushToTalk:
                     pcm = self.recorder.stop()
                 except Exception:
                     pcm = b""
+                self._hook(self.on_stop)
                 self.beep(False)
                 if self.clock() - started >= MIN_SECONDS and pcm:
                     try:
@@ -210,6 +214,14 @@ class PushToTalk:
                 self.recorder.stop()
             except Exception:
                 pass
+            self._hook(self.on_stop)
+
+    @staticmethod
+    def _hook(call) -> None:
+        try:
+            call()
+        except Exception:
+            pass
 
 
 class KeyTap:

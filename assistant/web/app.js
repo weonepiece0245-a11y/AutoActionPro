@@ -969,6 +969,8 @@ function fillSettings() {
     if (document.activeElement !== $("setGameClose")) $("setGameClose").value = (care.game_close || []).join(", ");
   }
   $("setAutoUpdate").checked = s.auto_update !== false;
+  $("pttDuckRow").hidden = !s.ptt;
+  if (s.ptt) $("setPttDuck").checked = s.ptt.duck !== false;
   fillLightLink(s.lightlink);
   for (const [row, select, button, state] of [["pttRow", "setPtt", "pttCapture", s.ptt],
                                                 ["shotRow", "setShot", "shotCapture", s.ptt && s.ptt.shot]]) {
@@ -1456,6 +1458,7 @@ function startKeyCapture(buttonId, field) {
   window.addEventListener("auxclick", block, true);
 }
 $("setAutoUpdate").onchange = (e) => saveSetting({ auto_update: e.target.checked });
+$("setPttDuck").onchange = (e) => saveSetting({ ptt_duck: e.target.checked });
 
 // 家里的灯联动:开游戏时调灯、离开时关灯
 function picks(box, devices, chosen, onlyLights) {
