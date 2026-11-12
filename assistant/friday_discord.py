@@ -143,6 +143,7 @@ class DiscordGate:
             self.pair_code = self._code()  # 第一次:一直有效,直到配对成功
         self.answers: queue.Queue = queue.Queue()
         self.waiting_for: int | None = None
+        self.voice_command: Callable[[str, int, object], None] | None = None  # (join/leave, 你的账号, 频道):语音频道
 
     @staticmethod
     def _code() -> str:
@@ -246,6 +247,14 @@ class DiscordGate:
                 self.send(channel, "🔒 手机遥控已上锁。请私信我验证器 App 里“星期五”现在的 6 位数字,解锁后接着处理你刚才的消息。")
                 return
             lock.touch()
+        if self.voice_command is not None and text and not audio and not images:
+            import friday_discord_voice
+
+            command = ("join" if friday_discord_voice.JOIN_RE.match(text) else
+                       "leave" if friday_discord_voice.LEAVE_RE.match(text) else None)
+            if command:
+                self.voice_command(command, author_id, channel)
+                return
         self._queue(author_id, text, channel, is_dm, audio, images)
 
     def _queue(self, author_id: int, text: str, channel, is_dm: bool, audio: bytes | None,
@@ -353,6 +362,22 @@ class DiscordBridge:
         self.gate = DiscordGate(state_file, events, self.send, on_status, send_voice=self.send_voice)
         self.tts: Callable[[str], bytes | None] | None = None  # 文字转 MP3,由主程序设置
         self.client = None
+        self.voice = None  # 语音频道里的星期五(friday_discord_voice.DiscordVoice),由主程序设置
+        self.gate.voice_command = self._voice_command
+
+    def _voice_command(self, command: str, owner_id: int, channel) -> None:
+        """“进语音”“退出语音”(在机器人自己的线程里调用)。"""
+        if self.voice is None or self.loop is None:
+            self.send(channel, "语音频道功能在这台电脑上没开。")
+            return
+
+        async def run() -> None:
+            try:
+                text = await (self.voice.join(owner_id) if command == "join" else self.voice.leave())
+            except Exception as e:  # noqa: BLE001
+                text = f"语音频道没弄好:{type(e).__name__}: {e}"
+            self.send(channel, text)
+        self.loop.create_task(run())
 
     def start(self) -> None:
         try:
@@ -397,6 +422,11 @@ class DiscordBridge:
             self.on_status(f"Discord 已连接:{client.user}")
             if self.gate.pair_code:
                 self.on_status(f"还没配对:私信机器人 {client.user},发送配对码 {self.gate.pair_code}")
+
+        @client.event
+        async def on_voice_state_update(member, before, after):
+            if self.voice is not None and self.voice.owner_left(member.id, after.channel):
+                await self.voice.leave()  # 你离开频道:她也走
 
         @client.event
         async def on_message(message):

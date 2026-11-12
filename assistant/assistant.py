@@ -1576,6 +1576,8 @@ def web_loop(session: WebSession, events: queue.Queue, transcribe=None) -> None:
             web_discord(payload, session, transcribe)
         elif kind == "ptt":
             ptt_answer(session, payload)
+        elif kind == "discord_voice":
+            discord_voice_answer(session, payload)
         elif kind == "reminder":
             web_reminder(payload, session)
         sys.stdout.flush()
@@ -2042,6 +2044,44 @@ def start_screenshot(session, ctx, events: queue.Queue) -> None:
     key = friday_ptt.key_setting("shot")
     if key != "off":
         print(session.shot_tap.start(key), flush=True)
+
+
+def attach_discord_voice(session, bridge, events: queue.Queue, voice_module) -> None:
+    """Discord 语音频道里的星期五:说“进语音”她就进你在的频道,叫“星期五”就回答。"""
+    import friday_discord_voice as dv
+
+    def status(text: str) -> None:
+        events.put(("status", "🎧 " + text))
+
+    def ask(question: str) -> str | None:
+        holder = {"done": threading.Event(), "reply": None}
+        events.put(("discord_voice", (question, holder)))
+        holder["done"].wait(180)
+        return holder["reply"]
+
+    def locked() -> bool:
+        lock = getattr(session, "remote_lock", None)
+        return lock is not None and lock.enabled() and (lock.paused or not lock.session_open())
+
+    wake = dv.vosk_wake_checker(lambda: dv.load_vosk(status))
+    bridge.voice = dv.DiscordVoice(
+        bridge, lambda say: dv.VoiceBrain(wake, voice_module.transcribe_audio, ask, say, locked),
+        voice_module.synthesize_mp3, status)
+
+
+def discord_voice_answer(session, payload) -> None:
+    """语音频道里问的:回答用声音在频道里读;要你“允许”的事一律不做(频道里有别人)。"""
+    question, holder = payload
+    approver = getattr(session, "web_approver", None)
+    old = approver.remote if approver is not None else None
+    if approver is not None:
+        approver.remote = lambda request: False
+    try:
+        holder["reply"] = session.ask(question, source="discord-voice", speak=False)
+    finally:
+        if approver is not None:
+            approver.remote = old
+        holder["done"].set()
 
 
 def ptt_answer(session, text: str) -> None:
@@ -4320,8 +4360,10 @@ def run_web(args) -> None:
                                 lambda text: events.put(("status", text)))
         discord.tts = voice_module.synthesize_mp3
         discord.gate.transcriber = voice_module.transcribe_audio
+        _startup_step(session, "Discord 语音频道", lambda: attach_discord_voice(session, discord, events, voice_module))
         discord.start()
     session.discord = discord  # 提醒也推到手机
+    session.web_approver = approver
     start_telegram(session, events, data_dir, voice_module)
     if phones(session):
         toolbox.phone = lambda text, files: [p.notify_owners(text, files=files) for p in phones(session)]

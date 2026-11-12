@@ -6778,6 +6778,104 @@ class DotaAdviceTest(unittest.TestCase):
         self.assertTrue(toolbox._dota_advice({"action": "counters", "heroes": "谁"}, None)[1])
 
 
+import friday_discord_voice  # noqa: E402
+
+
+class DiscordVoiceTest(unittest.TestCase):
+    def test_downsample(self):
+        import array
+
+        stereo = array.array("h", [100, 300] * 4800)  # 0.1 秒 48kHz 双声道
+        mono = array.array("h")
+        mono.frombytes(friday_discord_voice.to_16k_mono(stereo.tobytes()))
+        self.assertEqual(len(mono), 1600)  # 0.1 秒 16kHz
+        self.assertEqual(set(mono), {200})  # 左右平均
+        self.assertTrue(friday_discord_voice.wav_16k(mono.tobytes()).startswith(b"RIFF"))
+
+    def test_segmenter(self):
+        now = [0.0]
+        seg = friday_discord_voice.Segmenter(clock=lambda: now[0])
+        chunk = b"\x00" * 3840  # 20 毫秒
+        for _ in range(50):  # 1 秒的话
+            self.assertIsNone(seg.feed(chunk))
+            now[0] += 0.02
+        self.assertIsNone(seg.poll())  # 还没停够
+        now[0] += 0.9
+        self.assertEqual(len(seg.poll()), 3840 * 50)
+        self.assertIsNone(seg.poll())
+        seg.feed(chunk)  # 太短的(咳一声)不算
+        now[0] += 1
+        self.assertIsNone(seg.poll())
+        phrase = None
+        for _ in range(800):  # 一直说:15 秒就切一段
+            phrase = seg.feed(chunk) or phrase
+        self.assertEqual(len(phrase), int(friday_discord_voice.MAX_PHRASE * friday_discord_voice.STEREO_48K))
+
+    def brain(self, wake=True, text="星期五,现在几点", locked=False):
+        self.asked, self.said, self.sent = [], [], []
+        now = [0.0]
+        self.now = now
+        return friday_discord_voice.VoiceBrain(
+            heard_wake=lambda mono: wake, transcribe=lambda wav: self.sent.append(wav) or text,
+            ask=lambda q: self.asked.append(q) or "下午三点", say=self.said.append, locked=lambda: locked,
+            clock=lambda: now[0])
+
+    def test_brain(self):
+        pcm = b"\x00\x00" * 48000
+        brain = self.brain(wake=False)
+        self.assertIsNone(brain.phrase(pcm))
+        self.assertEqual(self.sent, [])  # 没叫星期五:声音不送出去识别
+        brain = self.brain()
+        self.assertEqual(brain.phrase(pcm), "下午三点")
+        self.assertEqual((self.asked, self.said), (["现在几点"], ["下午三点"]))
+        brain = self.brain(text="星期五")  # 只叫了名字:等下一句
+        self.assertIsNone(brain.phrase(pcm))
+        self.assertEqual(self.said, ["我在。"])
+        brain.heard_wake = lambda mono: False
+        brain.transcribe = lambda wav: "放首歌"
+        self.assertEqual(brain.phrase(pcm), "下午三点")
+        self.assertEqual(self.asked, ["放首歌"])
+        self.now[0] += 20
+        self.assertIsNone(brain.phrase(pcm))  # 过了 8 秒:又要先叫名字
+        brain = self.brain(locked=True)
+        brain.phrase(pcm)
+        self.assertEqual(self.asked, [])
+        self.assertIn("上锁", self.said[0])
+
+    def test_gate_commands(self):
+        gate = dmod.DiscordGate(os.path.join(tempfile.mkdtemp(), "d.json"), queue.Queue(), lambda c, t: None, lambda t: None)
+        gate.owners = {42: "me"}
+        got = []
+        gate.voice_command = lambda command, owner, channel: got.append((command, owner))
+        gate.handle(42, "me", True, "进语音", "dm")
+        gate.handle(42, "me", True, "星期五,退出语音频道", "dm")
+        gate.handle(7, "stranger", True, "进语音", "dm")  # 陌生人不行
+        gate.handle(42, "me", True, "语音消息怎么发", "dm")  # 平常的问题
+        self.assertEqual(got, [("join", 42), ("leave", 42)])
+        self.assertEqual(gate.events.qsize(), 1)
+
+    def test_voice_answer_refuses_approvals(self):
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.web_approver = friday_web.WebApprover(session.hub)
+        seen = []
+        session.ask = lambda q, source, speak: seen.append(session.web_approver("关机")) or "不行"
+        holder = {"done": threading.Event(), "reply": None}
+        app.discord_voice_answer(session, ("关机", holder))
+        self.assertEqual(seen, [False])  # 频道里有别人:要允许的事一律不做
+        self.assertTrue(holder["done"].is_set())
+        self.assertEqual(holder["reply"], "不行")
+        self.assertIsNone(session.web_approver.remote)
+
+    def test_owner_left(self):
+        voice = friday_discord_voice.DiscordVoice(SimpleNamespace(), lambda say: None, None, print)
+        voice.vc = SimpleNamespace(channel="room")
+        voice.owner_id = 42
+        self.assertTrue(voice.owner_left(42, None))
+        self.assertTrue(voice.owner_left(42, "other room"))
+        self.assertFalse(voice.owner_left(42, "room"))
+        self.assertFalse(voice.owner_left(7, None))
+
+
 class LedgerTest(TempDirTest):
     def make(self, when=datetime.datetime(2026, 11, 10, 13, 0)):
         self.now = [when]
