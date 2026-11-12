@@ -30,7 +30,7 @@ from typing import Callable
 MAX_MESSAGE = 1900  # Discord 单条消息上限 2000 字,留点余量
 ASK_TIMEOUT = 120  # 秒
 YES = ("y", "yes", "是", "好", "允许", "可以", "ok", "确定")
-INVITE_PERMISSIONS = 1024 + 2048 + 32768  # 查看频道、发消息、上传文件
+INVITE_PERMISSIONS = 1024 + 2048 + 32768 + 1048576 + 2097152  # 查看频道、发消息、上传文件、连接语音、在语音里说话
 
 StatusFn = Callable[[str], None]
 
