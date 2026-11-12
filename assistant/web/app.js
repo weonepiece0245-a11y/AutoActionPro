@@ -972,6 +972,13 @@ function fillSettings() {
   $("pttDuckRow").hidden = !s.ptt;
   $("subtitleRow").hidden = !s.ptt;
   if (s.ptt) { $("setPttDuck").checked = s.ptt.duck !== false; $("setSubtitles").checked = s.ptt.subtitles !== false; }
+  $("subtitleOptRow").hidden = $("duckToRow").hidden = !s.ptt;
+  if (s.ptt) {
+    if (!$("subPos").options.length) for (const [k, v] of s.ptt.sub_positions) $("subPos").append(new Option(v, k));
+    if (!$("duckTo").options.length) for (const p of s.ptt.duck_choices) $("duckTo").append(new Option(`${p}%`, String(p)));
+    $("subPos").value = s.ptt.sub_pos; $("subSize").value = s.ptt.sub_size; $("subTime").value = s.ptt.sub_time;
+    $("duckTo").value = String(s.ptt.duck_to);
+  }
   fillLightLink(s.lightlink);
   fillParty(s.party);
   for (const [row, select, button, state] of [["pttRow", "setPtt", "pttCapture", s.ptt],
@@ -1462,6 +1469,11 @@ function startKeyCapture(buttonId, field) {
 $("setAutoUpdate").onchange = (e) => saveSetting({ auto_update: e.target.checked });
 $("setPttDuck").onchange = (e) => saveSetting({ ptt_duck: e.target.checked });
 $("setSubtitles").onchange = (e) => saveSetting({ subtitles: e.target.checked });
+$("subPos").onchange = (e) => saveSetting({ sub_pos: e.target.value });
+$("subSize").onchange = (e) => saveSetting({ sub_size: e.target.value });
+$("subTime").onchange = (e) => saveSetting({ sub_time: e.target.value });
+$("duckTo").onchange = (e) => saveSetting({ duck_to: e.target.value });
+$("subPreview").onclick = () => saveSetting({ subtitle_preview: true });
 
 // 家里的灯联动:开游戏时调灯、离开时关灯
 function picks(box, devices, chosen, onlyLights) {

@@ -14,6 +14,21 @@ from typing import Callable
 
 MAX_WIDTH = 760
 FONT_SIZE = 22
+SIZES = {"small": 18, "medium": 22, "large": 28}  # 字的大小
+POSITIONS = {"bottom": "下方中间", "top": "上方中间", "bottom_right": "右下角", "top_left": "左上角"}
+TIMES = {"short": 0.6, "normal": 1.0, "long": 1.6}  # 显示多久(乘上按字数算的秒数)
+
+
+def place(screen_w: int, screen_h: int, width: int, height: int, pos: str = "bottom") -> tuple[int, int]:
+    """字幕放在画面哪里(避开游戏常见的血条、小地图:下方中间稍微往上,角落留边)。"""
+    margin = 40
+    if pos == "top":
+        return (screen_w - width) // 2, int(screen_h * 0.08)
+    if pos == "bottom_right":
+        return screen_w - width - margin, int(screen_h * 0.72) - height
+    if pos == "top_left":
+        return margin, int(screen_h * 0.12)
+    return (screen_w - width) // 2, int(screen_h * 0.78) - height
 PADDING = 16
 MAX_LINES = 6
 MAX_CHARS = 240
@@ -21,9 +36,9 @@ POLL_SECONDS = 0.25
 GIVE_UP_SECONDS = 30
 
 
-def show_seconds(text: str) -> float:
-    """字越多显示越久:4 秒起,最多 20 秒。"""
-    return min(20.0, 4.0 + len(text) * 0.18)
+def show_seconds(text: str, factor: float = 1.0) -> float:
+    """字越多显示越久:4 秒起,最多 20 秒;factor 是“短/一般/长”。"""
+    return round(min(20.0, 4.0 + len(text) * 0.18) * factor, 2)
 
 
 def shorten(text: str) -> str:
@@ -31,16 +46,16 @@ def shorten(text: str) -> str:
     return text if len(text) <= MAX_CHARS else text[: MAX_CHARS - 1] + "…"
 
 
-def _font():
+def _font(size: int = FONT_SIZE):
     from PIL import ImageFont
 
     for name in ("msyh.ttc", "msyhbd.ttc", "simhei.ttf", "NotoSansCJK-Regular.ttc", "DejaVuSans.ttf"):
         try:
-            return ImageFont.truetype(name, FONT_SIZE)
+            return ImageFont.truetype(name, size)
         except OSError:
             continue
     try:
-        return ImageFont.load_default(size=FONT_SIZE)
+        return ImageFont.load_default(size=size)
     except TypeError:
         return ImageFont.load_default()
 
@@ -73,16 +88,17 @@ def wrap(text: str, measure: Callable[[str], float], width: int) -> list[str]:
     return lines
 
 
-def render(text: str, accent: tuple[int, int, int] = (34, 211, 238)):
+def render(text: str, accent: tuple[int, int, int] = (34, 211, 238), size: int = FONT_SIZE):
     """一张半透明的字幕图(RGBA)。"""
     from PIL import Image, ImageDraw
 
-    font = _font()
+    font = _font(size)
+    max_width = int(MAX_WIDTH * max(1.0, size / FONT_SIZE))
     probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     measure = lambda s: probe.textlength(s, font=font)  # noqa: E731
-    lines = wrap(shorten(text), measure, MAX_WIDTH - PADDING * 2) or [""]
-    line_height = int(FONT_SIZE * 1.45)
-    width = int(min(MAX_WIDTH, max(measure(line) for line in lines) + PADDING * 2 + 10))
+    lines = wrap(shorten(text), measure, max_width - PADDING * 2) or [""]
+    line_height = int(size * 1.45)
+    width = int(min(max_width, max(measure(line) for line in lines) + PADDING * 2 + 10))
     height = line_height * len(lines) + PADDING * 2
     image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
@@ -111,7 +127,7 @@ class SubtitleWindow:
         self.mem_dc = self.win["gdi32"].CreateCompatibleDC(self.screen_dc)
         self.visible = False
 
-    def show(self, image) -> None:
+    def show(self, image, pos: str = "bottom") -> None:
         win = self.win
         ctypes, wintypes, user32, gdi32 = win["ctypes"], win["wintypes"], win["user32"], win["gdi32"]
         import friday_floatorb
@@ -124,7 +140,7 @@ class SubtitleWindow:
         data = friday_floatorb.premultiplied_bgra(image)
         ctypes.memmove(bits, data, len(data))
         screen_w, screen_h = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
-        where = wintypes.POINT((screen_w - width) // 2, int(screen_h * 0.78) - height)  # 画面下方中间
+        where = wintypes.POINT(*place(screen_w, screen_h, width, height, pos))
         size, source = wintypes.SIZE(width, height), wintypes.POINT(0, 0)
         blend = win["BLENDFUNCTION"](0, 0, 255, 1)
         user32.UpdateLayeredWindow(self.hwnd, self.screen_dc, ctypes.byref(where), ctypes.byref(size), self.mem_dc,
@@ -171,8 +187,10 @@ def run_process(folder: Path, parent: int | None = None, connect=None, parent_al
             if data.get("id") and data.get("id") != shown_id and data.get("text"):
                 shown_id = data["id"]
                 accent = friday_floatorb.parse_color(data.get("accent") or "")
-                window.show(render(data["text"], accent))
-                hide_at = clock() + show_seconds(data["text"])
+                size = SIZES.get(str(data.get("size")), FONT_SIZE)
+                factor = TIMES.get(str(data.get("time")), 1.0)
+                window.show(render(data["text"], accent, size), str(data.get("pos") or "bottom"))
+                hide_at = clock() + show_seconds(data["text"], factor)
         except Exception:
             link["call"] = None
             if clock() - last_ok > GIVE_UP_SECONDS or not parent_alive():

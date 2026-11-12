@@ -1947,8 +1947,12 @@ def ptt_state(session) -> dict | None:
                         "custom": friday_ptt.key_info(key, which)[0] if key.startswith("vk:") else ""}
     import friday_audio
 
+    import friday_subtitle
+
     return {**state["ptt"], "keys": keys, "shot": state["shot"], "duck": friday_audio.duck_enabled(),
-            "subtitles": subtitles_enabled()}
+            "subtitles": subtitles_enabled(), "duck_to": round(friday_audio.duck_to() * 100),
+            "duck_choices": list(friday_audio.DUCK_CHOICES), **{f"sub_{k}": v for k, v in subtitle_settings().items()},
+            "sub_positions": [[k, v] for k, v in friday_subtitle.POSITIONS.items()]}
 
 
 def start_ptt(session, ctx, events: queue.Queue, voice_module) -> None:
@@ -2033,16 +2037,29 @@ def subtitles_enabled() -> bool:
     return os.environ.get("FRIDAY_SUBTITLES", "on") != "off"
 
 
-def show_subtitle(session, text: str) -> None:
-    """打游戏时:回答也在画面下方显示几秒(另一个小程序画,点不到、不抢焦点)。"""
+def subtitle_settings() -> dict:
+    import friday_subtitle
+
+    pos = os.environ.get("FRIDAY_SUB_POS", "bottom")
+    size = os.environ.get("FRIDAY_SUB_SIZE", "medium")
+    shown = os.environ.get("FRIDAY_SUB_TIME", "normal")
+    return {"pos": pos if pos in friday_subtitle.POSITIONS else "bottom",
+            "size": size if size in friday_subtitle.SIZES else "medium",
+            "time": shown if shown in friday_subtitle.TIMES else "normal"}
+
+
+def show_subtitle(session, text: str, force: bool = False) -> None:
+    """打游戏时:回答也在画面下方显示几秒(另一个小程序画,点不到、不抢焦点)。force:“试看字幕”。"""
     import friday_care
 
-    if not text or os.name != "nt" or not subtitles_enabled() or not friday_care.playing():
+    if not text or os.name != "nt":
+        return
+    if not force and (not subtitles_enabled() or not friday_care.playing()):
         return
     session.subtitle_seq = getattr(session, "subtitle_seq", 0) + 1
     ctx = getattr(session, "subtitle_ctx", None)
     accent = ctx.activity.get("accent", "") if ctx is not None else ""
-    session.subtitle = {"id": session.subtitle_seq, "text": str(text)[:600], "accent": accent}
+    session.subtitle = {"id": session.subtitle_seq, "text": str(text)[:600], "accent": accent, **subtitle_settings()}
     proc = getattr(session, "subtitle_proc", None)
     if proc is None:
         proc = session.subtitle_proc = OrbProcess(getattr(session, "data_dir", "."), script="friday_subtitle.py")
@@ -2691,6 +2708,23 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
             save_env_value(env, key, value)
             os.environ[key] = value
         done.append("家里的灯联动设好了")
+    for field, key, allowed in (("sub_pos", "FRIDAY_SUB_POS", ("bottom", "top", "bottom_right", "top_left")),
+                                ("sub_size", "FRIDAY_SUB_SIZE", ("small", "medium", "large")),
+                                ("sub_time", "FRIDAY_SUB_TIME", ("short", "normal", "long")),
+                                ("duck_to", "FRIDAY_PTT_DUCK_TO", ("10", "20", "30", "40", "50", "60"))):
+        if field in payload:
+            value = str(payload[field])
+            if value not in allowed:
+                return {"error": "选项不对"}
+            save_env_value(env, key, value)
+            os.environ[key] = value
+            done.append({"sub_pos": "字幕位置改好了", "sub_size": "字幕大小改好了", "sub_time": "字幕显示时间改好了",
+                         "duck_to": f"按住说话时电脑声音压到原来的 {value}%"}[field])
+    if payload.get("subtitle_preview"):
+        if os.name != "nt":
+            return {"error": "字幕只能在 Windows 上显示"}
+        show_subtitle(session, "这是字幕的样子:打游戏时按住说话问我,回答会这样显示几秒。", force=True)
+        done.append("看看画面上的字幕(几秒后自己消失)")
     if "subtitles" in payload:
         on = bool(payload["subtitles"])
         save_env_value(env, "FRIDAY_SUBTITLES", "on" if on else "off")

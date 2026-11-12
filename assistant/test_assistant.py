@@ -7196,14 +7196,14 @@ class SubtitleTest(unittest.TestCase):
             def pump(self):
                 pass
 
-            def show(self, image):
-                shown.append(image.size)
+            def show(self, image, pos="bottom"):
+                shown.append((image.size, pos))
                 self.visible = True
 
             def hide(self):
                 hidden.append(now[0])
                 self.visible = False
-        states = [{"id": 1, "text": "下午三点"}, {"id": 1, "text": "下午三点"}] + [{"id": 1, "text": "下午三点"}] * 30
+        states = [{"id": 1, "text": "下午三点", "pos": "top_left", "size": "large"}] * 32
         calls = []
 
         def call(method, path, body):
@@ -7220,7 +7220,7 @@ class SubtitleTest(unittest.TestCase):
                 return call
             window = Window()
             original = friday_subtitle.render
-            friday_subtitle.render = lambda text, accent=None: original(text)
+            friday_subtitle.render = lambda text, accent=None, size=22: original(text, size=size)
             try:
                 with mock.patch.object(friday_subtitle, "POLL_SECONDS", 0.25):
                     def sleep_and_die(seconds):
@@ -7232,8 +7232,60 @@ class SubtitleTest(unittest.TestCase):
             finally:
                 friday_subtitle.render = original
         self.assertEqual(len(shown), 1)  # 同一句只显示一次
+        self.assertEqual(shown[0][1], "top_left")
         self.assertTrue(hidden and hidden[0] < 6)  # 几秒后自己收起来
         self.assertEqual(calls[0], "/api/subtitle")
+
+    def test_place_positions(self):
+        self.assertEqual(friday_subtitle.place(1920, 1080, 400, 60), (760, int(1080 * 0.78) - 60))
+        self.assertEqual(friday_subtitle.place(1920, 1080, 400, 60, "top"), (760, int(1080 * 0.08)))
+        self.assertEqual(friday_subtitle.place(1920, 1080, 400, 60, "bottom_right")[0], 1920 - 400 - 40)
+        self.assertEqual(friday_subtitle.place(1920, 1080, 400, 60, "top_left"), (40, int(1080 * 0.12)))
+        self.assertEqual(friday_subtitle.place(1920, 1080, 400, 60, "乱写"), friday_subtitle.place(1920, 1080, 400, 60))
+
+    def test_show_seconds_factor_and_size(self):
+        self.assertEqual(friday_subtitle.show_seconds("短"), 4.18)
+        self.assertLess(friday_subtitle.show_seconds("短", friday_subtitle.TIMES["short"]), 4.18)
+        self.assertGreater(friday_subtitle.show_seconds("短", friday_subtitle.TIMES["long"]), 4.18)
+        small = friday_subtitle.render("字幕大小", size=friday_subtitle.SIZES["small"]).size
+        large = friday_subtitle.render("字幕大小", size=friday_subtitle.SIZES["large"]).size
+        self.assertGreater(large[1], small[1])
+
+    def test_duck_to_setting(self):
+        with mock.patch.dict(os.environ, {"FRIDAY_PTT_DUCK_TO": "50"}):
+            self.assertEqual(friday_audio.duck_to(), 0.5)
+        with mock.patch.dict(os.environ, {"FRIDAY_PTT_DUCK_TO": "99"}):
+            self.assertEqual(friday_audio.duck_to(), 0.3)
+        with mock.patch.dict(os.environ, {"FRIDAY_PTT_DUCK_TO": "abc"}):
+            self.assertEqual(friday_audio.duck_to(), 0.3)
+
+    def test_subtitle_settings_saved_and_preview(self):
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        with tempfile.TemporaryDirectory() as d:
+            env = Path(d) / ".env"
+            env.write_text("", encoding="utf-8")
+            apply = lambda payload: app.apply_settings(payload, session, None, str(env))  # noqa: E731
+            keys = ("FRIDAY_SUB_POS", "FRIDAY_SUB_SIZE", "FRIDAY_SUB_TIME", "FRIDAY_PTT_DUCK_TO")
+            with mock.patch.dict(os.environ, {}, clear=False):
+                for k in keys:
+                    os.environ.pop(k, None)
+                self.assertIn("error", apply({"sub_pos": "middle"}))
+                self.assertIn("error", apply({"duck_to": "90"}))
+                apply({"sub_pos": "top", "sub_size": "large", "sub_time": "long", "duck_to": "50"})
+                saved = env.read_text(encoding="utf-8")
+                self.assertIn("FRIDAY_SUB_POS=top", saved)
+                self.assertIn("FRIDAY_PTT_DUCK_TO=50", saved)
+                self.assertEqual(app.subtitle_settings(), {"pos": "top", "size": "large", "time": "long"})
+                self.assertEqual(friday_audio.duck_to(), 0.5)
+                started = []
+                with mock.patch.object(app.os, "name", "nt"), \
+                        mock.patch.object(app, "subtitles_enabled", lambda: False), \
+                        mock.patch.object(app.OrbProcess, "start", lambda self: started.append(1)):
+                    app.show_subtitle(session, "游戏外")
+                    self.assertIsNone(getattr(session, "subtitle", None))
+                    app.show_subtitle(session, "试看", force=True)
+                self.assertEqual(session.subtitle["pos"], "top")
+                self.assertEqual(session.subtitle["size"], "large")
 
     def test_show_subtitle_only_while_gaming(self):
         session = app.WebSession(None, app.default_persona(), friday_web.Hub())

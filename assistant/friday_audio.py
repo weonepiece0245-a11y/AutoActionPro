@@ -9,7 +9,17 @@ import os
 import threading
 from typing import Callable
 
-DUCK_TO = 0.3  # 压到原来的 30%
+DUCK_TO = 0.3  # 默认压到原来的 30%
+DUCK_CHOICES = (10, 20, 30, 40, 50, 60)
+
+
+def duck_to() -> float:
+    """按住说话时压到原来的几成(齿轮设定里选 10%~60%)。"""
+    try:
+        percent = int(os.environ.get("FRIDAY_PTT_DUCK_TO", "30"))
+    except ValueError:
+        percent = 30
+    return (percent if percent in DUCK_CHOICES else 30) / 100
 
 
 def duck_enabled() -> bool:
@@ -294,7 +304,7 @@ class Ducker:
                     self._note(f"按下:音量本来就很小({', '.join(f'{v:.0%}' for v in levels.values()) or '没有设备'}),不用压")
                     return
                 self.saved = levels
-                self.lowered_to = {k: round(v * DUCK_TO, 3) for k, v in levels.items()}
+                self.lowered_to = {k: round(v * duck_to(), 3) for k, v in levels.items()}
                 self._set_levels(self.lowered_to)
                 after = self._levels()
                 self._note(f"按下:{len(levels)} 个播放设备 " + "、".join(
@@ -350,7 +360,7 @@ def test_duck(volume=None, wait: Callable[[float], None] | None = None) -> str:
     ducker.restore()
     after = ducker._levels()
     parts = [f"{before[k]:.0%}→{lowered.get(k, -1):.0%}→{after.get(k, -1):.0%}" for k in before]
-    stuck = [k for k in before if abs(lowered.get(k, before[k]) - before[k] * DUCK_TO) > 0.03]
+    stuck = [k for k in before if abs(lowered.get(k, before[k]) - before[k] * duck_to()) > 0.03]
     if stuck:
         return f"有 {len(stuck)} 个播放设备的音量没压下去(" + "、".join(parts) + ")。把这句截图给我。"
     return (f"压低声音正常:{len(before)} 个播放设备都压低两秒再恢复(" + "、".join(parts)
