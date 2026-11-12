@@ -581,7 +581,13 @@ class QuickCommands:
 
     SELFCHECK_RE = re.compile(r"^(做一?次|做个|来个|帮我)?(自我检查|自检|体检一下你自己|检查一下你自己|你有没有(坏掉|出问题)|你哪里坏了)(一下)?$")
 
+    DUCK_TEST_RE = re.compile(r"^(测试|试试|试一下|测一下)(一下)?(压低|降低|调低)(电脑)?(声音|音量)$")
+
     def _games(self, sentence: str) -> str | None:
+        if os.name == "nt" and self.DUCK_TEST_RE.match(sentence):
+            import friday_audio
+
+            return friday_audio.test_duck()
         if self.selfcheck is not None and self.SELFCHECK_RE.match(sentence):
             import friday_selfcheck
 

@@ -99,11 +99,14 @@ class WindowsMasterVolume:
 class Ducker:
     """按住说话时压低电脑声音,放开后恢复成原来的大小(只恢复它自己压低的)。"""
 
-    def __init__(self, volume=None, enabled: Callable[[], bool] = duck_enabled) -> None:
+    def __init__(self, volume=None, enabled: Callable[[], bool] = duck_enabled,
+                 on_error: Callable[[str], None] = lambda text: None) -> None:
         self.volume = volume
         self.enabled = enabled
+        self.on_error = on_error  # 压不低时告诉你原因(只说一次,免得每按一次都说)
         self.saved: float | None = None
         self.lowered_to: float | None = None
+        self.error = ""
         self.lock = threading.Lock()
 
     def _vol(self):
@@ -122,8 +125,17 @@ class Ducker:
                 self.saved = level
                 self.lowered_to = round(level * DUCK_TO, 3)
                 self._vol().set(self.lowered_to)
-            except Exception:
+                self.error = ""
+            except Exception as e:  # noqa: BLE001
                 self.saved = None
+                text = f"{type(e).__name__}: {e}"
+                print(f"按住说话没压低电脑声音:{text}", flush=True)
+                if text != self.error:
+                    self.error = text
+                    try:
+                        self.on_error(f"没压低电脑声音({text})")
+                    except Exception:
+                        pass
 
     def restore(self) -> None:
         with self.lock:
@@ -137,3 +149,33 @@ class Ducker:
                 self._vol().set(saved)
             except Exception:
                 pass
+
+
+def test_duck(volume=None, wait: Callable[[float], None] | None = None) -> str:
+    """“测试压低声音”:压低两秒再恢复,告诉你音量的数字(不用按住说话也能试)。"""
+    import time
+
+    wait = wait or time.sleep
+    vol = volume or WindowsMasterVolume()
+    try:
+        before = vol.get()
+    except Exception as e:  # noqa: BLE001
+        return f"读不到电脑的音量:{type(e).__name__}: {e}。把这句截图给我。"
+    if before <= 0.02:
+        return "电脑现在是静音或音量很小,先把音量调大一点再试。"
+    try:
+        vol.set(before * DUCK_TO)
+        lowered = vol.get()
+        wait(2.0)
+        vol.set(before)
+        after = vol.get()
+    except Exception as e:  # noqa: BLE001
+        try:
+            vol.set(before)
+        except Exception:
+            pass
+        return f"调不了电脑的音量:{type(e).__name__}: {e}。把这句截图给我。"
+    if abs(lowered - before * DUCK_TO) > 0.03:
+        return (f"音量没压下去(本来 {before:.0%},压完还是 {lowered:.0%})。可能是你的声音输出不是 Windows 的“默认播放设备”。"
+                "把这句截图给我。")
+    return f"压低声音正常:音量从 {before:.0%} 压到 {lowered:.0%},两秒后恢复到 {after:.0%}。"

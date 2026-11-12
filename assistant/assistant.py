@@ -1947,7 +1947,8 @@ def start_ptt(session, ctx, events: queue.Queue, voice_module) -> None:
 
     import friday_audio
 
-    ducker = friday_audio.Ducker()
+    ducker = friday_audio.Ducker(on_error=lambda text: session.hub.broadcast(
+        {"type": "error", "text": "🎙 按住说话:" + text + "。说“测试压低声音”可以单独试。"}))
 
     def hear(wav: bytes) -> tuple[str | None, float | None]:
         interp = getattr(session, "interpreter", None)

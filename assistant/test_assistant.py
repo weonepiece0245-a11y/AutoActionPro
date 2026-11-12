@@ -7013,6 +7013,26 @@ class VoiceRobustTest(unittest.TestCase):
         friday_audio.Ducker(off, enabled=lambda: False).duck()
         self.assertEqual(off.level, 0.8)
 
+    def test_duck_errors_are_told_once_and_test_command(self):
+        class Broken:
+            def get(self):
+                raise OSError("找不到播放设备")
+        told = []
+        ducker = friday_audio.Ducker(Broken(), enabled=lambda: True, on_error=told.append)
+        with mock.patch("sys.stdout", io.StringIO()):
+            ducker.duck()
+            ducker.duck()
+        self.assertEqual(told, ["没压低电脑声音(OSError: 找不到播放设备)"])  # 同一个问题只说一次
+        ducker.restore()
+        vol = self.Volume(0.6)
+        self.assertEqual(friday_audio.test_duck(vol, wait=lambda s: None), "压低声音正常:音量从 60% 压到 18%,两秒后恢复到 60%。")
+        self.assertIn("读不到电脑的音量", friday_audio.test_duck(Broken(), wait=lambda s: None))
+
+        class Stuck(self.Volume):
+            def set(self, level):
+                pass  # 设了没用(不是默认播放设备)
+        self.assertIn("音量没压下去", friday_audio.test_duck(Stuck(0.6), wait=lambda s: None))
+
     def test_ptt_ducks_while_recording(self):
         order = []
         state = {"down": False}
