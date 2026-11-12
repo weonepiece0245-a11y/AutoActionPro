@@ -1980,6 +1980,7 @@ def settings_state(session, meter=None) -> dict:
         "cloud": cloud_state(session),
         "care": care_state(session),
         "ptt": ptt_state(session),
+        "auto_update": os.environ.get("FRIDAY_AUTO_UPDATE", "on") != "off",
         "push": push_mode() if getattr(session, "discord", None) is not None else None,
         "remind_calendar": remind_calendar_state(session),
         "security": security_state(session),
@@ -2434,6 +2435,11 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         save_env_value(env, "FRIDAY_GAME_QUIET", "on" if on else "off")
         os.environ["FRIDAY_GAME_QUIET"] = "on" if on else "off"
         done.append("打游戏时提醒改成右下角小通知,打完再说" if on else "打游戏时提醒照常读出来")
+    if "auto_update" in payload:
+        on = bool(payload["auto_update"])
+        save_env_value(env, "FRIDAY_AUTO_UPDATE", "on" if on else "off")
+        os.environ["FRIDAY_AUTO_UPDATE"] = "on" if on else "off"
+        done.append("半夜没在用电脑时会自己更新,早上告诉你更新了什么" if on else "不会自己更新了,要更新就点“检查更新”")
     if "ptt_key" in payload:
         import friday_ptt
 
@@ -3719,6 +3725,35 @@ def floatorb_switch(session, on: bool) -> str:
     return "小光球收起来了。"
 
 
+def start_autoupdate(session, events: queue.Queue, data_dir: str) -> None:
+    """半夜没在用电脑时自己检查更新;早上回来时说更新了什么。"""
+    import friday_autoupdate
+    import friday_care
+    import friday_gameboost
+
+    auto = friday_autoupdate.AutoUpdate(os.path.join(data_dir, "friday_autoupdate.json"),
+                                        os.path.join(SCRIPT_DIR, "CHANGES.md"))
+    session.autoupdate = auto
+    auto.after_start()
+
+    def loop() -> None:
+        time.sleep(300)
+        while True:
+            def check() -> None:
+                idle = friday_care.presence_idle() if os.name == "nt" else None
+                note = auto.morning_note(idle)
+                if note:
+                    say_here(session, note, "🆕")
+                if auto.due(idle, session.busy, friday_gameboost.gaming()):
+                    auto.mark_started()
+                    print("半夜自动检查更新", flush=True)
+                    events.put(("command", "update"))
+            _quietly(check)
+            time.sleep(300)
+
+    threading.Thread(target=loop, daemon=True, name="friday-autoupdate").start()
+
+
 def start_heartbeat(events: queue.Queue, data_dir: str, interval: float = 30) -> None:
     """每 30 秒往主循环送一个心跳;主循环处理到了就写心跳文件(主循环卡住,心跳就停,守护会发现)。"""
     def loop() -> None:
@@ -4262,6 +4297,7 @@ def run_web(args) -> None:
     _startup_step(session, "仪表板", lambda: start_dashboard(session, toolbox, ctx))
     _startup_step(session, "桌面小光球", lambda: start_floatorb(session, ctx, data_dir))
     _startup_step(session, "按住说话", lambda: start_ptt(session, ctx, events, voice_module))
+    _startup_step(session, "半夜自动更新", lambda: start_autoupdate(session, events, data_dir))
     if getattr(toolbox, "screen", None) is not None:
         toolbox.screen.on_change = lambda active, text: takeover_notice(session, active, text)
     if toolbox.google is not None:  # 登录了 Google:笔记同时抄到 Google 文档(在后台抄,不拖慢)

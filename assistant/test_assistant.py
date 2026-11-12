@@ -6349,6 +6349,51 @@ class PushToTalkTest(unittest.TestCase):
         self.assertEqual(app.ptt_state(session)["key"], "off")  # 测试里环境变量已经还原
 
 
+import friday_autoupdate  # noqa: E402
+
+
+class AutoUpdateTest(TempDirTest):
+    def test_night_update_and_morning_note(self):
+        changes = Path(self.tmp, "CHANGES.md")
+        changes.write_text("## 11-12\n- 旧的功能\n")
+        now = [datetime.datetime(2026, 11, 13, 3, 30)]
+        auto = friday_autoupdate.AutoUpdate(os.path.join(self.tmp, "a.json"), changes, clock=lambda: now[0])
+        with mock.patch.dict(os.environ, {"FRIDAY_AUTO_UPDATE": "on"}):
+            self.assertFalse(auto.due(60, False, False))  # 你还在用电脑
+            self.assertFalse(auto.due(3600, True, False))  # 星期五在忙
+            self.assertFalse(auto.due(3600, False, True))  # 在打游戏
+            self.assertTrue(auto.due(3600, False, False))
+            auto.mark_started()
+            self.assertFalse(auto.due(3600, False, False))  # 一晚只检查一次
+            now[0] = datetime.datetime(2026, 11, 13, 14, 0)
+            self.assertFalse(auto.due(3600, False, False))  # 白天不自己更新
+        with mock.patch.dict(os.environ, {"FRIDAY_AUTO_UPDATE": "off"}):
+            now[0] = datetime.datetime(2026, 11, 14, 3, 30)
+            self.assertFalse(auto.due(3600, False, False))
+        # 更新完重开
+        changes.write_text("## 11-13\n- 按住说话\n- 光球新样子\n\n## 11-12\n- 旧的功能\n")
+        now[0] = datetime.datetime(2026, 11, 13, 3, 35)
+        restarted = friday_autoupdate.AutoUpdate(os.path.join(self.tmp, "a.json"), changes, clock=lambda: now[0])
+        restarted.after_start()
+        self.assertIsNone(restarted.morning_note(5))  # 半夜不说
+        now[0] = datetime.datetime(2026, 11, 13, 8, 0)
+        self.assertIsNone(restarted.morning_note(3600))  # 还没回到电脑前
+        note = restarted.morning_note(5)
+        self.assertEqual(note, "昨晚我自己更新了:按住说话;光球新样子。想知道细节就问我“你更新了什么”。")
+        self.assertIsNone(restarted.morning_note(5))  # 只说一次
+
+    def test_nothing_new_says_nothing(self):
+        changes = Path(self.tmp, "CHANGES.md")
+        changes.write_text("- 一样\n")
+        now = datetime.datetime(2026, 11, 13, 3, 30)
+        auto = friday_autoupdate.AutoUpdate(os.path.join(self.tmp, "a.json"), changes, clock=lambda: now)
+        auto.mark_started()
+        auto.after_start()
+        later = friday_autoupdate.AutoUpdate(os.path.join(self.tmp, "a.json"), changes,
+                                             clock=lambda: datetime.datetime(2026, 11, 13, 9, 0))
+        self.assertIsNone(later.morning_note(5))
+
+
 class LedgerTest(TempDirTest):
     def make(self, when=datetime.datetime(2026, 11, 10, 13, 0)):
         self.now = [when]
