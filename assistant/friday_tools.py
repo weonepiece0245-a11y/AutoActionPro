@@ -22,7 +22,7 @@ import friday_security
 
 MAX_FACTS = 300
 MAX_FACT_CHARS = 500
-MEMORY_CATEGORIES = ["个人信息", "偏好", "习惯", "项目", "日程", "人际", "其他"]
+MEMORY_CATEGORIES = ["个人信息", "偏好", "习惯", "项目", "日程", "人际", "教训", "其他"]
 DEFAULT_CATEGORY = "其他"
 MAX_OUTPUT_CHARS = 20000
 MAX_READ_CHARS = 100000
@@ -1052,6 +1052,21 @@ UNATTENDED_REFUSAL = (
 SERVER_TOOL_LABELS = {"web_search": ("搜索", "query"), "web_fetch": ("读取网页", "url")}
 
 
+BACKGROUND_TOOL = {
+    "name": "background_task",
+    "description": (
+        "把要花很久的事交给后台慢慢做:要查很多资料的研究和比较(例如哪款显示器值得买)、整理一大堆邮件的重点、写长一点的调查报告。"
+        "交出去后只要简短告诉老板“交给后台了,做完会通知你”,不要在这一轮自己做。简单、一两次搜索就能答的问题直接回答,不要交给后台。"
+        "后台只能查资料(搜索、读网页、看邮件和日历),不能发邮件、不能改东西。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"goal": {"type": "string", "description": "要做的事,写清楚要什么结果和条件(例如:比较 RM1500 以内的 27 寸 2K 144Hz 显示器,推荐 3 款)"}},
+        "required": ["goal"],
+    },
+}
+
+
 class Toolbox:
     """定义星期五能用的工具,并负责执行用户电脑上的那部分。"""
 
@@ -1132,6 +1147,7 @@ class Toolbox:
         self.confirm = confirm or approve
         self.unattended = False  # 定时任务执行期间为 True:需要确认的操作一律不做
         self.archive: ConversationArchive | None = None  # 聊天记录档案,attach_archive() 设置
+        self.background = None  # 后台长任务:(目标) -> 话
         self.weather_fetch = None  # 测试时换成假的天气服务
         self._handlers = {
             "remember": self._remember,
@@ -1189,6 +1205,7 @@ class Toolbox:
             "smart_home": self._smart_home,
             "notes": self._notes,
             "dates": self._dates,
+            "background_task": self._background_task,
         }
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
 
@@ -1280,6 +1297,8 @@ class Toolbox:
             tools = tools + [SCREEN_TOOL, CONTROL_TOOL]
         if self.google is not None:
             tools = tools + [CALENDAR_TOOL, GMAIL_TOOL] + GOOGLE_EXTRA_TOOLS
+        if self.background is not None:
+            tools = tools + [BACKGROUND_TOOL]
         return tools
 
     def begin_turn(self) -> None:
@@ -1990,6 +2009,18 @@ class Toolbox:
         except Exception as e:
             return f"网站暂时打不开:{type(e).__name__}: {e}", True
         return f"不支持的 action:{action}", True
+
+    def _background_task(self, args, on_status):
+        if self.background is None:
+            return "后台任务现在用不了", True
+        if self.unattended:
+            return "定时任务里不能再交给后台", True
+        try:
+            reply = self.background(str(args.get("goal") or ""))
+        except ValueError as e:
+            return str(e), True
+        on_status("交给后台慢慢做")
+        return reply, False
 
     def _weather(self, args, on_status):
         import friday_weather

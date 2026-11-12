@@ -14,7 +14,7 @@ from typing import Callable
 MODEL = "claude-haiku-5-5"
 EVERY_DAYS = 7
 MIN_FACTS = 8
-CATEGORIES = ["个人信息", "偏好", "习惯", "项目", "日程", "人际", "其他"]
+CATEGORIES = ["个人信息", "偏好", "习惯", "项目", "日程", "人际", "教训", "其他"]
 
 PROMPT = """你在帮一位私人助手整理它对主人的长期记忆。今天是 {today}。
 下面是编号的记忆(后面是记下的日期和分类)。请找出:

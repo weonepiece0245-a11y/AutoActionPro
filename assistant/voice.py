@@ -589,13 +589,24 @@ def transcribe_detail(data: bytes, engine: str | None = None, language: str = "z
     """(整理过的文字, 识别把握度 0~1;不知道就 None)。"""
     import friday_voicefix
 
-    text, confidence = _transcribe_raw(data, engine, language)
+    engine = engine or os.environ.get("FRIDAY_STT") or "google"
+    pcm = decode_audio(data)
+    alternatives = _transcribe_raw(pcm, engine, language)
+    text, confidence = friday_voicefix.pick(alternatives)
+    if (engine == "google" and str(language).lower().startswith("zh") and friday_voicefix.unsure(confidence)
+            and friday_voicefix.mixed_enabled()):
+        # 中英马混着说:中文听得没把握,再用英文听一次;英文很有把握、而且几乎都是英文字母,就用英文的
+        try:
+            english, sure = friday_voicefix.pick(_transcribe_raw(pcm, engine, "en-US"))
+        except VoiceUnavailable:
+            english, sure = None, None
+        if english and sure is not None and sure >= 0.8 and friday_voicefix.mostly_latin(english):
+            text, confidence = english, sure
     return friday_voicefix.clean(text, language), confidence
 
 
-def _transcribe_raw(data: bytes, engine: str | None, language: str) -> tuple[str | None, float | None]:
-    engine = engine or os.environ.get("FRIDAY_STT") or "google"
-    pcm = decode_audio(data)
+def _transcribe_raw(pcm: bytes, engine: str, language: str) -> list[tuple[str, float | None]]:
+    """识别的候选:[(文字, 把握度)],最可能的在前;没听到返回 []。"""
     if engine == "vosk":
         global _vosk_model
         try:
@@ -607,7 +618,8 @@ def _transcribe_raw(data: bytes, engine: str | None, language: str) -> tuple[str
             _vosk_model = vosk.Model(ensure_vosk_model(on_status=lambda t: None))
         recognizer = vosk.KaldiRecognizer(_vosk_model, SAMPLE_RATE)
         recognizer.AcceptWaveform(pcm)
-        return json.loads(recognizer.FinalResult()).get("text", "").replace(" ", "") or None, None
+        text = json.loads(recognizer.FinalResult()).get("text", "").replace(" ", "")
+        return [(text, None)] if text else []
     try:
         import speech_recognition as sr
     except ImportError as e:
@@ -615,15 +627,16 @@ def _transcribe_raw(data: bytes, engine: str | None, language: str) -> tuple[str
     try:
         result = sr.Recognizer().recognize_google(sr.AudioData(pcm, SAMPLE_RATE, 2), language=language, show_all=True)
     except sr.UnknownValueError:
-        return None, None
+        return []
     except sr.RequestError as e:
         raise VoiceUnavailable(f"在线语音识别连接失败({e})。可以在 .env 里写 FRIDAY_STT=vosk 改用离线识别") from e
     alternatives = (result or {}).get("alternative") if isinstance(result, dict) else None
-    if not alternatives:
-        return None, None
-    best = alternatives[0]
-    confidence = best.get("confidence")
-    return (best.get("transcript") or None), (float(confidence) if confidence is not None else None)
+    found = []
+    for i, item in enumerate(alternatives or []):
+        if isinstance(item, dict) and item.get("transcript"):
+            confidence = item.get("confidence") if i == 0 else None  # Google 只给第一个把握度
+            found.append((str(item["transcript"]), float(confidence) if confidence is not None else None))
+    return found
 
 
 def synthesize_mp3(text: str, edge_voice: str | None = None, max_chars: int = 800) -> bytes | None:

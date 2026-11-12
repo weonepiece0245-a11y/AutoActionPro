@@ -866,6 +866,46 @@ function fillSettings() {
     list.replaceChildren();
     for (const scene of sc.list) list.append(sceneCard(scene));
   }
+  const bg = s.background;
+  $("bgGroup").hidden = !bg;
+  if (bg) {
+    const statusText = { waiting: "排队中", running: "正在做", done: "做完了", failed: "没做成", cancelled: "取消了", interrupted: "中断了" };
+    const list = $("bgList");
+    list.replaceChildren();
+    for (const j of [...bg.recent].reverse()) {
+      const row = document.createElement("div");
+      row.className = "set-row sub";
+      const text = document.createElement("span");
+      text.textContent = `${j.added || ""} ${j.goal}` + (j.summary ? ` —— ${j.summary}` : "");
+      const tag = document.createElement("span");
+      tag.className = "set-note";
+      tag.textContent = statusText[j.status] || j.status;
+      row.append(text, tag);
+      list.append(row);
+    }
+    $("bgCancel").hidden = !bg.running && !bg.waiting;
+  }
+  const vc = s.vocab;
+  $("learnGroup").hidden = !vc;
+  if (vc) {
+    $("setLearn").checked = vc.learn; $("setSttMixed").checked = vc.mixed;
+    if (document.activeElement !== $("vocabWords")) $("vocabWords").value = vc.words.join(", ");
+    const list = $("vocabList");
+    list.replaceChildren();
+    for (const f of vc.fixes) {
+      const row = document.createElement("div");
+      row.className = "set-row sub";
+      const text = document.createElement("span");
+      text.textContent = `“${f.heard}” → ${f.meant}`;
+      const del = document.createElement("button");
+      del.type = "button"; del.className = "mini-btn"; del.textContent = "删掉";
+      del.onclick = () => saveSetting({ vocab_remove: f.heard });
+      row.append(text, del);
+      list.append(row);
+    }
+    $("vocabNote").textContent = (vc.lessons ? `已经记下 ${vc.lessons} 条教训(在“记忆”里分类“教训”,可以改或删)。` : "")
+      + "也可以直接说“以后听到米谷就是 Mid Valley”。被你纠正“你听错了,我说的是……”时,我也会自己加进来。";
+  }
   const mt = s.memtidy;
   $("memtidyGroup").hidden = !mt;
   if (mt) {
@@ -1474,6 +1514,16 @@ $("subSize").onchange = (e) => saveSetting({ sub_size: e.target.value });
 $("subTime").onchange = (e) => saveSetting({ sub_time: e.target.value });
 $("duckTo").onchange = (e) => saveSetting({ duck_to: e.target.value });
 $("subPreview").onclick = () => saveSetting({ subtitle_preview: true });
+$("bgCancel").onclick = () => saveSetting({ bg_cancel: true });
+$("bgOpen").onclick = () => saveSetting({ bg_open: true });
+$("setLearn").onchange = (e) => saveSetting({ learn: e.target.checked });
+$("setSttMixed").onchange = (e) => saveSetting({ stt_mixed: e.target.checked });
+$("vocabWordsSave").onclick = () => saveSetting({ vocab_words: $("vocabWords").value });
+$("vocabAdd").onclick = async () => {
+  if (await saveSetting({ vocab_add: { heard: $("vocabHeard").value, meant: $("vocabMeant").value } })) {
+    $("vocabHeard").value = ""; $("vocabMeant").value = "";
+  }
+};
 
 // 家里的灯联动:开游戏时调灯、离开时关灯
 function picks(box, devices, chosen, onlyLights) {

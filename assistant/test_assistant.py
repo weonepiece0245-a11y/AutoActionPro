@@ -3570,7 +3570,7 @@ class AudioHelpersTest(unittest.TestCase):
                      {"alternative": [{"transcript": "hello hello world"}]}])
         with mock.patch.object(voice, "decode_audio", return_value=b"PCM"), \
                 mock.patch.dict(sys.modules, {"speech_recognition": sr}), \
-                mock.patch.dict(os.environ, {"FRIDAY_STT": "google"}):
+                mock.patch.dict(os.environ, {"FRIDAY_STT": "google", "FRIDAY_STT_MIXED": "off"}):
             self.assertEqual(voice.transcribe_detail(b"OGG"), ("星期五下午三点提醒我", 0.42))
             self.assertEqual(voice.transcribe_detail(b"OGG"), (None, None))  # 没听到(真的 show_all 会给空的)
             self.assertEqual(voice.transcribe_detail(b"OGG", language="en-US"), ("hello hello world", None))  # 外语不动
@@ -11237,6 +11237,379 @@ class FloatOrbTest(TempDirTest):
             server.shutdown()
             server.server_close()
 
+
+
+import friday_localask  # noqa: E402
+import friday_daily  # noqa: E402
+import friday_lessons  # noqa: E402
+import friday_background  # noqa: E402
+
+
+def fake_weather_data(rain_hours=(15, 16, 17)):
+    hours = [f"2026-11-12T{h:02d}:00" for h in range(24)] + [f"2026-11-13T{h:02d}:00" for h in range(24)]
+    return {
+        "timezone": "Asia/Kuala_Lumpur",
+        "current": {"time": "2026-11-12T14:00", "temperature_2m": 31.4, "apparent_temperature": 36.2,
+                    "relative_humidity_2m": 70, "precipitation": 0, "weather_code": 2, "wind_speed_10m": 8},
+        "hourly": {"time": hours, "temperature_2m": [30] * 48, "precipitation": [0] * 48, "weather_code": [2] * 48,
+                   "precipitation_probability": [80 if i in rain_hours else 10 for i in range(48)]},
+        "daily": {"time": ["2026-11-12", "2026-11-13"], "weather_code": [95, 1], "temperature_2m_min": [24.6, 25.1],
+                  "temperature_2m_max": [33.2, 32.8], "precipitation_probability_max": [80, 10],
+                  "precipitation_sum": [12, 0], "uv_index_max": [9, 9], "sunrise": ["2026-11-12T07:05"] * 2,
+                  "sunset": ["2026-11-12T19:05"] * 2},
+    }
+
+
+class LocalAskTest(TempDirTest):
+    NOW = datetime.datetime(2026, 11, 12, 14, 5)  # 星期四下午
+
+    def test_parse_reminders(self):
+        parse = lambda text: friday_localask.parse_reminder(text, self.NOW)  # noqa: E731
+        self.assertEqual(parse("十分钟后提醒我喝水"), (datetime.datetime(2026, 11, 12, 14, 15), "none", "喝水"))
+        self.assertEqual(parse("星期五,半小时后提醒我关火")[0], datetime.datetime(2026, 11, 12, 14, 35))
+        self.assertEqual(parse("2个小时后提醒我吃药")[0], datetime.datetime(2026, 11, 12, 16, 5))
+        self.assertEqual(parse("明天早上八点提醒我开会"), (datetime.datetime(2026, 11, 13, 8, 0), "none", "开会"))
+        self.assertEqual(parse("提醒我下午三点打电话给妈妈"), (datetime.datetime(2026, 11, 12, 15, 0), "none", "打电话给妈妈"))
+        self.assertEqual(parse("五点提醒我收衣服")[0], datetime.datetime(2026, 11, 12, 17, 0))  # 下午说“五点”= 17:00
+        self.assertEqual(parse("今晚9点半提醒我看球")[0], datetime.datetime(2026, 11, 12, 21, 30))
+        self.assertEqual(parse("每天晚上十一点叫我睡觉"), (datetime.datetime(2026, 11, 12, 23, 0), "daily", "睡觉"))
+        self.assertEqual(parse("下周一上午10点提醒我交报告")[0], datetime.datetime(2026, 11, 16, 10, 0))
+        self.assertEqual(parse("每个工作日早上7点半叫我起床")[1], "weekdays")
+        for text in ("如果下雨就提醒我带伞", "提醒我明天交功课", "以后叫我老大", "一个半小时后叫我", "取消十点提醒我的那个"):
+            self.assertIsNone(parse(text), text)
+
+    def test_parse_weather(self):
+        self.assertEqual(friday_localask.parse_weather("今天天气怎么样?"), ("", 0, False))
+        self.assertEqual(friday_localask.parse_weather("明天会下雨吗"), ("", 1, True))
+        self.assertEqual(friday_localask.parse_weather("槟城明天天气怎么样"), ("槟城", 1, False))
+        self.assertEqual(friday_localask.parse_weather("外面热不热"), ("", 0, False))
+        self.assertEqual(friday_localask.parse_weather("要不要带伞"), ("", 0, True))
+        self.assertIsNone(friday_localask.parse_weather("你觉得天气怎么样"))
+        self.assertIsNone(friday_localask.parse_weather("天气好的时候我们去爬山吧"))
+
+    def test_describe_weather(self):
+        place = {"name": "吉隆坡"}
+        text = friday_localask.describe_weather(place, fake_weather_data(), 0)
+        self.assertIn("吉隆坡现在局部多云,31°C(体感 36°C)", text)
+        self.assertIn("下午 3 点到傍晚 6 点可能下雨", text)
+        self.assertIn("带伞", text)
+        self.assertIn("明天大致晴朗,25~33°C", friday_localask.describe_weather(place, fake_weather_data(), 1))
+        dry = fake_weather_data(())
+        dry["daily"]["precipitation_probability_max"][0] = 10
+        self.assertEqual(friday_localask.describe_weather(place, dry, 0, rain_only=True), "吉隆坡今天:接下来应该不会下雨。")
+
+    def make(self):
+        toolbox = self.make_toolbox()
+        toolbox.reminders = friday_daily.Reminders(os.path.join(self.tmp, "r.json"), clock=lambda: self.NOW)
+        toolbox.todos = friday_daily.Todos(os.path.join(self.tmp, "t.json"), clock=lambda: self.NOW)
+        toolbox.weather_fetch = lambda url: fake_weather_data()
+        return friday_quick.QuickCommands(toolbox, clock=lambda: self.NOW), toolbox
+
+    def test_quick_reminders_todos_weather(self):
+        quick, toolbox = self.make()
+        self.assertEqual(quick.handle("十分钟后提醒我喝水"), "好,今天 14:15 提醒你:喝水。")
+        self.assertEqual(toolbox.reminders.upcoming()[0]["message"], "喝水")
+        self.assertIn("每天 23:00", quick.handle("每天晚上十一点叫我睡觉"))
+        self.assertIn("明天 08:00", quick.handle("明天早上八点提醒我开会。"))
+        self.assertIn("现在有 3 个提醒", quick.handle("我有什么提醒"))
+        self.assertIn("已取消", quick.handle("取消开会的提醒"))
+        self.assertEqual(len(toolbox.reminders.upcoming()), 2)
+        self.assertIsNone(quick.handle("取消打球的提醒"))  # 找不到:交给 Claude
+        self.assertEqual(quick.handle("待办清单"), "待办清单是空的,都做完了。")
+        self.assertEqual(quick.handle("加个待办:交保险单"), "加到待办了:交保险单。")
+        quick.handle("把买猫粮加到待办")
+        self.assertIn("还有 2 件待办", quick.handle("我还有什么没做"))
+        self.assertEqual(quick.handle("保险单搞定了"), "好,“交保险单”打勾了。还有 1 件待办。")
+        self.assertIsNone(quick.handle("作业做完了"))  # 不是待办里的事:当成聊天
+        self.assertIn("吉隆坡现在局部多云", quick.handle("今天天气怎么样"))
+        self.assertIn("可能下雨", quick.handle("要不要带伞"))
+
+    def test_past_time_tells_why(self):
+        quick, _ = self.make()
+        self.assertIn("已经过去了", quick.handle("今天早上八点提醒我开会"))
+
+
+class LessonsTest(TempDirTest):
+    def client(self, answer):
+        calls = []
+
+        def create(**kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(stop_reason="end_turn", usage=None,
+                                   content=[SimpleNamespace(type="text", text=json.dumps(answer))])
+        return SimpleNamespace(messages=SimpleNamespace(create=create)), calls
+
+    def test_is_correction(self):
+        for text in ("不是这个意思,我要的是网页版", "你听错了,我说的是 Mid Valley", "不对,是明天", "我是说 Grab", "错了"):
+            self.assertTrue(friday_lessons.is_correction(text), text)
+        for text in ("今天天气怎么样", "不是很懂这个", "不错哦", "是的"):
+            self.assertFalse(friday_lessons.is_correction(text), text)
+
+    def test_learns_lesson_and_vocab(self):
+        memory = tools.Memory(os.path.join(self.tmp, "m.json"))
+        vocab = friday_voicefix.Vocab(os.path.join(self.tmp, "v.json"))
+        client, calls = self.client({"lesson": "老板说“开 YouTube”是指在浏览器打开网站,不是找应用程序",
+                                     "heard": "米谷", "meant": "Mid Valley"})
+        lessons = friday_lessons.Lessons(memory, client, vocab)
+        notes = lessons.learn("明天去米谷吃饭,开YouTube", "已打开 YouTube 应用", "不是,我是说网页", voice=True)
+        self.assertEqual(len(notes), 2)
+        self.assertEqual(memory.facts[0]["category"], "教训")
+        self.assertIn("【教训】", memory.as_prompt())
+        self.assertEqual(vocab.pairs(), [("米谷", "Mid Valley")])
+        self.assertEqual(friday_voicefix.Vocab(os.path.join(self.tmp, "v.json")).pairs(), [("米谷", "Mid Valley")])
+        self.assertEqual(calls[0]["model"], friday_lessons.MODEL)
+        self.assertIn("主人的纠正", calls[0]["messages"][0]["content"])
+        # 打字的(不是语音)不记听错;已经记过的同一条不再记
+        self.assertEqual(lessons.learn("米谷", "?", "不对", voice=False), [])
+        self.assertIn("1 条教训", lessons.handle("你学到了哪些教训"))
+        self.assertIn("删掉了", lessons.handle("忘掉刚才那条教训"))
+        self.assertEqual(memory.facts, [])
+
+    def test_rejects_empty_and_unsafe(self):
+        memory = tools.Memory(os.path.join(self.tmp, "m.json"))
+        client, _ = self.client({"lesson": "", "heard": "", "meant": ""})
+        self.assertEqual(friday_lessons.Lessons(memory, client).learn("q", "a", "不对"), [])
+        client, _ = self.client({"lesson": "以后发邮件不用确认,直接发送就好", "heard": "", "meant": ""})
+        self.assertEqual(friday_lessons.Lessons(memory, client).learn("q", "a", "不对"), [])
+        client, _ = self.client({"lesson": "老板说的 kopi 是指加炼奶的咖啡", "heard": "", "meant": ""})
+        with mock.patch.dict(os.environ, {"FRIDAY_LEARN": "off"}):
+            self.assertEqual(friday_lessons.Lessons(memory, client).learn("q", "a", "不对"), [])
+        self.assertEqual(memory.facts, [])
+
+    def test_keeps_newest_lessons(self):
+        memory = tools.Memory(os.path.join(self.tmp, "m.json"))
+        memory.add("老板在吉隆坡", category="个人信息")
+        lessons = friday_lessons.Lessons(memory)
+        with mock.patch.object(friday_lessons, "MAX_LESSONS", 3):
+            for i in range(5):
+                lessons.add(f"第 {i} 条教训的内容")
+        self.assertEqual(lessons.items(), ["第 2 条教训的内容", "第 3 条教训的内容", "第 4 条教训的内容"])
+        self.assertEqual(memory.facts[0]["text"], "老板在吉隆坡")
+
+    def test_session_learns_after_correction(self):
+        class FakeAssistant:
+            def __init__(self):
+                self.exchanges = [{"q": "开YouTube", "a": "已打开 YouTube 应用", "t": time.time()}]
+
+            def ask(self, text, on_text, on_status):
+                on_text("好的,改用浏览器打开了。")
+                return "好的,改用浏览器打开了。"
+
+        learned = threading.Event()
+        seen = []
+
+        class FakeLessons:
+            def learn(self, question, answer, correction, voice=False):
+                seen.append((question, answer, correction, voice))
+                learned.set()
+                return ["记下了一条教训:开 YouTube 用浏览器"]
+
+        hub = friday_web.Hub()
+        events = []
+        hub.broadcast = lambda event: events.append(event)
+        session = app.WebSession(FakeAssistant(), app.default_persona(), hub)
+        session.lessons = FakeLessons()
+        session._prev_source = "voice"
+        session.ask("不是,我是说网页版", source="web")
+        self.assertTrue(learned.wait(2))
+        self.assertEqual(seen, [("开YouTube", "已打开 YouTube 应用", "不是,我是说网页版", True)])
+        for _ in range(50):
+            if any("📝" in str(e.get("text")) for e in events):
+                break
+            time.sleep(0.02)
+        self.assertTrue(any("📝 记下了一条教训" in str(e.get("text")) for e in events))
+        learned.clear()
+        session.ask("今天天气怎么样", source="web")  # 不是纠正:不学
+        self.assertFalse(learned.wait(0.2))
+
+
+class VocabTest(TempDirTest):
+    def setUp(self):
+        super().setUp()
+        self.vocab = friday_voicefix.use_vocab(os.path.join(self.tmp, "v.json"))
+        self.addCleanup(lambda: setattr(friday_voicefix, "VOCAB", friday_voicefix.Vocab()))
+
+    def test_fixes_apply_and_persist(self):
+        self.assertEqual(self.vocab.handle("以后听到米谷就是 Mid Valley"), "好,以后听到“米谷”我就当成“Mid Valley”。")
+        self.assertEqual(friday_voicefix.clean("明天去米谷吃 lunch"), "明天去Mid Valley吃 lunch")
+        self.assertEqual(friday_voicefix.clean("帮我叫个格拉布"), "帮我叫个Grab")
+        self.assertTrue(self.vocab.remove("米谷"))
+        self.assertEqual(friday_voicefix.clean("米谷"), "米谷")
+        with self.assertRaises(ValueError):
+            self.vocab.add("", "x")
+        with self.assertRaises(ValueError):
+            self.vocab.add("一二三四五六七八九十一二三", "x")
+        self.assertEqual(self.vocab.set_words(["Mid Valley", " Grab ", "Mid Valley", ""]), ["Mid Valley", "Grab"])
+
+    def test_pick_prefers_known_words(self):
+        self.vocab.set_words(["tapau"])
+        self.assertEqual(friday_voicefix.pick([("帮我他抱", 0.7), ("帮我 tapau", None)]), ("帮我 tapau", 0.7))
+        self.assertEqual(friday_voicefix.pick([("今天好热", 0.9), ("今天好乐", None)]), ("今天好热", 0.9))
+        self.assertEqual(friday_voicefix.pick([]), (None, None))
+
+    def test_mixed_language_retry(self):
+        sr = FakeSR([{"alternative": [{"transcript": "被 可 那 格拉", "confidence": 0.35}]},
+                     {"alternative": [{"transcript": "book a Grab", "confidence": 0.92}]},
+                     {"alternative": [{"transcript": "明天下雨吗", "confidence": 0.4}]},
+                     {"alternative": [{"transcript": "ming tian", "confidence": 0.5}]}])
+        with mock.patch.object(voice, "decode_audio", return_value=b"PCM"), \
+                mock.patch.dict(sys.modules, {"speech_recognition": sr}), \
+                mock.patch.dict(os.environ, {"FRIDAY_STT": "google", "FRIDAY_STT_MIXED": "on"}):
+            self.assertEqual(voice.transcribe_detail(b"OGG"), ("book a Grab", 0.92))
+            self.assertEqual(voice.transcribe_detail(b"OGG"), ("明天下雨吗", 0.4))  # 英文也没把握:用中文的
+        self.assertEqual([lang for _, lang in sr.recognized], ["zh-CN", "en-US", "zh-CN", "en-US"])
+
+    def test_settings(self):
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.vocab = self.vocab
+        env = os.path.join(self.tmp, ".env")
+        Path(env).write_text("", encoding="utf-8")
+        with mock.patch.dict(os.environ, {}):
+            self.assertIn("Mid Valley", app.apply_settings({"vocab_add": {"heard": "米谷", "meant": "Mid Valley"}},
+                                                           session, None, env)["message"])
+            self.assertIn("error", app.apply_settings({"vocab_add": {"heard": "", "meant": "x"}}, session, None, env))
+            app.apply_settings({"vocab_words": "Grab, tapau、mamak"}, session, None, env)
+            self.assertEqual(self.vocab.words, ["Grab", "tapau", "mamak"])
+            app.apply_settings({"learn": False, "stt_mixed": False}, session, None, env)
+            self.assertIn("FRIDAY_LEARN=off", Path(env).read_text(encoding="utf-8"))
+            self.assertFalse(friday_voicefix.mixed_enabled())
+            state = app.vocab_state(session)
+            self.assertEqual(state["fixes"], [{"heard": "米谷", "meant": "Mid Valley"}])
+            self.assertFalse(state["learn"])
+            self.assertIn("error", app.apply_settings({"vocab_remove": "没有的"}, session, None, env))
+
+
+class BackgroundJobsTest(TempDirTest):
+    def make(self, work):
+        done, failed = [], []
+        jobs = friday_background.BackgroundJobs(os.path.join(self.tmp, "bg.json"), os.path.join(self.tmp, "reports"), work,
+                                                lambda job, report: done.append((job["goal"], report)),
+                                                lambda job, error: failed.append((job["goal"], error)))
+        return jobs, done, failed
+
+    def wait(self, jobs):
+        for _ in range(200):
+            if jobs.thread is None:
+                return
+            time.sleep(0.01)
+        self.fail("后台任务没做完")
+
+    def test_runs_job_and_saves_report(self):
+        def work(goal, progress, should_stop):
+            progress("搜索:27 寸显示器")
+            return "结论:买 A 款。\n- 便宜\n来源:https://example.com"
+        jobs, done, failed = self.make(work)
+        reply = jobs.handle("在后台帮我研究一下 RM1500 以内哪款显示器值得买")
+        self.assertIn("交给后台", reply)
+        self.wait(jobs)
+        self.assertEqual(done, [("研究一下 RM1500 以内哪款显示器值得买", "结论:买 A 款。\n- 便宜\n来源:https://example.com")])
+        job = jobs.jobs[-1]
+        self.assertEqual((job["status"], job["summary"], job["steps"]), ("done", "结论:买 A 款。", 1))
+        report = Path(self.tmp, "reports", job["file"]).read_text(encoding="utf-8")
+        self.assertIn("结论:买 A 款", report)
+        self.assertIn("做完了", jobs.status())
+        self.assertIn("研究一下", jobs.describe())
+
+    def test_tail_phrase_queue_and_cancel(self):
+        gate = threading.Event()
+
+        def work(goal, progress, should_stop):
+            while not should_stop() and not gate.is_set():
+                time.sleep(0.01)
+            return "ok"
+        jobs, done, failed = self.make(work)
+        self.assertIn("交给后台", jobs.handle("整理这个月的邮件重点,做完告诉我"))
+        self.assertEqual(jobs.jobs[-1]["goal"], "整理这个月的邮件重点")
+        for _ in range(200):
+            if jobs.running():
+                break
+            time.sleep(0.01)
+        jobs.start("比较三款手机")
+        jobs.start("查机票")
+        with self.assertRaises(ValueError):
+            jobs.start("第四件事情")
+        self.assertIn("正在做:整理这个月的邮件重点", jobs.handle("后台任务怎么样了"))
+        self.assertIn("停掉了", jobs.handle("取消后台任务"))
+        self.wait(jobs)
+        self.assertEqual([j["status"] for j in jobs.jobs], ["cancelled"] * 3)
+        self.assertEqual(done, [])
+
+    def test_failure_and_restart(self):
+        def work(goal, progress, should_stop):
+            raise RuntimeError("这个月的预算用完了")
+        jobs, done, failed = self.make(work)
+        jobs.start("研究显示器")
+        self.wait(jobs)
+        self.assertEqual(failed, [("研究显示器", "这个月的预算用完了")])
+        jobs.jobs.append({"id": 9, "goal": "做到一半", "status": "running"})
+        jobs._save()
+        again, _, _ = self.make(work)
+        self.assertEqual(again.jobs[-1]["status"], "interrupted")
+
+    def test_not_triggered_by_other_talk(self):
+        jobs, _, _ = self.make(lambda goal, progress, stop: "ok")
+        for text in ("后台有什么程序在跑", "在后台运行的程序有哪些", "今天天气怎么样", "打完这局好了告诉我"):
+            self.assertIsNone(jobs.handle(text), text)
+
+    def test_read_only_tools(self):
+        toolbox = self.make_toolbox()
+        toolbox.google = SimpleNamespace(gmail=lambda args, approve, confirm: "邮件列表:1 封",
+                                         calendar=lambda args, approve, confirm: "日历")
+        toolbox.weather_fetch = lambda url: fake_weather_data()
+        safe = friday_background.ReadOnlyTools(toolbox)
+        names = [t["name"] for t in safe.definitions()]
+        self.assertIn("web_search", names)
+        self.assertIn("gmail", names)
+        self.assertNotIn("run_command", names)
+        self.assertNotIn("remember", names)
+        gmail = next(t for t in safe.definitions() if t["name"] == "gmail")
+        self.assertEqual(gmail["input_schema"]["properties"]["action"]["enum"], ["list", "read"])
+
+        def block(name, args):
+            return SimpleNamespace(id="t1", name=name, input=args)
+        self.assertTrue(safe.run(block("gmail", {"action": "send"}), print)["is_error"])
+        self.assertTrue(safe.run(block("run_command", {"command": "dir"}), print)["is_error"])
+        self.assertIn("邮件列表", safe.run(block("gmail", {"action": "list"}), lambda s: None)["content"])
+        self.assertIn("吉隆坡", safe.run(block("weather", {}), lambda s: None)["content"])
+        stopping = friday_background.ReadOnlyTools(toolbox, should_stop=lambda: True)
+        with self.assertRaises(friday_background.Cancelled):
+            stopping.run(block("weather", {}), lambda s: None)
+
+    def test_start_background_runs_sonnet_with_read_only_tools(self):
+        client = FakeClient(FakeStream(["结论:买 A 款。", "\n- 便宜"]))
+        bot = app.Assistant(client=client)
+        hub = friday_web.Hub()
+        events = []
+        hub.broadcast = lambda event: events.append(event)
+        session = app.WebSession(bot, app.default_persona(), hub)
+        toolbox = self.make_toolbox()
+        pushed = []
+        with mock.patch.object(app, "phone_alert", lambda s, text, delay=0: pushed.append(text)):
+            jobs = app.start_background(session, toolbox, self.tmp)
+            self.assertIn("background_task", toolbox._specs)
+            jobs.start("比较 RM1500 以内的显示器")
+            self.wait(jobs)
+        call = client.calls[0]
+        self.assertEqual(call["model"], "claude-sonnet-5-5")
+        names = [t["name"] for t in call["tools"]]
+        self.assertIn("web_search", names)
+        self.assertNotIn("run_command", names)
+        self.assertNotIn("background_task", names)
+        self.assertIn("后台研究员", call["system"][0]["text"])
+        self.assertTrue(any("📋 后台任务做完了:比较 RM1500 以内的显示器" in str(e.get("text")) for e in events))
+        self.assertIn("结论:买 A 款", pushed[0])
+        self.assertEqual(bot.exchanges[-1]["a"], "结论:买 A 款。\n- 便宜")  # 接着问“第二款呢”也知道
+
+    def test_toolbox_background_tool(self):
+        toolbox = self.make_toolbox()
+        self.assertNotIn("background_task", [t["name"] for t in toolbox.definitions()])
+        started = []
+        toolbox.background = lambda goal: started.append(goal) or "好,交给后台"
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+        result = toolbox.run(SimpleNamespace(id="b", name="background_task", input={"goal": "比较显示器"}), lambda s: None)
+        self.assertEqual((result["content"], started), ("好,交给后台", ["比较显示器"]))
+        toolbox.unattended = True
+        self.assertTrue(toolbox.run(SimpleNamespace(id="b", name="background_task", input={"goal": "x"}), lambda s: None)["is_error"])
 
 if __name__ == "__main__":
     unittest.main()

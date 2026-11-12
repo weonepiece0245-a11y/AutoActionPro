@@ -101,9 +101,12 @@ FRIDAY_PROMPT = """你是“星期五”,{call_me}的私人 AI 助手。
 ## 了解{call_me}
 你会长期陪伴{call_me},要越来越懂对方:
 - 下面“我记得的事”是你之前记下的,回答时自然地用上(比如按对方的习惯和偏好给建议),不要生硬地复述。
-- 对话中{call_me}透露了值得长期记住的信息(身份、工作、喜好、习惯、目标、重要的人和日子、对你回答方式的要求),就用 remember 工具记下来,并选好分类(个人信息、偏好、习惯、项目、日程、人际),不用征求同意,也不用每次都特意说明。
+- 对话中{call_me}透露了值得长期记住的信息(身份、工作、喜好、习惯、目标、重要的人和日子、对你回答方式的要求),就用 remember 工具记下来,并选好分类(个人信息、偏好、习惯、项目、日程、人际;被纠正学到的做法用“教训”),不用征求同意,也不用每次都特意说明。
 - 信息变了或有误,用 update_memory 直接改那一条(不用先删再记);{call_me}让你忘掉什么就用 forget。
 - 不要记密码、密钥、证件号、银行卡号等敏感信息。
+- “我记得的事”里【教训】是你以前做错、被{call_me}纠正过的事:一定照着做,不要再犯。
+- {call_me}在吉隆坡,说话常夹英文和马来文(例如 book、lunch、tapau、mamak、Grab、Mid Valley、Shopee)。
+  用说的问题是语音识别转出来的,可能把这些词写成发音相近的中文字或奇怪的词:按发音去猜真正的意思,真的猜不到再问。
 
 ## 关于你自己
 你的程序(星期五自己的代码)装在 {app_dir},{version}。
@@ -1190,6 +1193,46 @@ class WebSession:
                       + ("" if text else "(没写要做什么:简单说说内容;是收据就记账)"))
         if show_user:
             hub.broadcast({"type": "user", "text": text, "source": source})
+        correcting = self._correction_context(text, source) if not blocks and not prefix else None
+        try:
+            answer = self._answer(text, source, speak, prefix, blocks)
+        finally:
+            self._prev_source = source
+        if answer and correcting is not None:
+            self._learn_later(correcting, text)
+        return answer
+
+    _prev_source = ""
+    lessons = None  # 被纠正就记住(friday_lessons.Lessons)
+
+    def _correction_context(self, text: str, source: str):
+        """这句是在纠正上一句?是的话:(上一句, 上一个回答, 上一句是不是用说的)。"""
+        import friday_lessons
+
+        assistant, lessons = self.assistant, self.lessons
+        if lessons is None or assistant is None or source == "task" or not friday_lessons.is_correction(text):
+            return None
+        exchanges = getattr(assistant, "exchanges", None) or []
+        if not exchanges or time.time() - exchanges[-1].get("t", 0) > friday_lessons.WITHIN_SECONDS:
+            return None
+        last = exchanges[-1]
+        return last["q"], last.get("a") or "", self._prev_source in ("voice", "ptt", "wake", "discord_voice")
+
+    def _learn_later(self, context, correction: str) -> None:
+        def run() -> None:
+            question, answer, voice_input = context
+            try:
+                notes = self.lessons.learn(question, answer, correction, voice=voice_input)
+            except Exception as e:  # noqa: BLE001
+                print(f"记教训没成功:{type(e).__name__}: {e}", flush=True)
+                return
+            for note in notes:
+                self.hub.broadcast({"type": "status", "text": f"📝 {note}(不对的话说“忘掉刚才那条教训”)"})
+
+        threading.Thread(target=run, daemon=True, name="friday-lesson").start()
+
+    def _answer(self, text: str, source: str, speak: bool, prefix: str, blocks: list) -> str | None:
+        hub = self.hub
         interpreter = getattr(self, "interpreter", None)
         if interpreter is not None and interpreter.active and source in ("web", "voice") and not blocks and not prefix:
             return self._interpret(text, source)
@@ -1817,6 +1860,18 @@ def scenes_state(session) -> dict | None:
     return {"list": scenes.scenes, "help": friday_scenes.STEP_HELP}
 
 
+def vocab_state(session) -> dict | None:
+    import friday_lessons
+    import friday_voicefix
+
+    vocab = getattr(session, "vocab", None)
+    if vocab is None:
+        return None
+    lessons = getattr(session, "lessons", None)
+    return {"fixes": vocab.fixes, "words": vocab.words, "learn": friday_lessons.learning_enabled(),
+            "mixed": friday_voicefix.mixed_enabled(), "lessons": len(lessons.items()) if lessons is not None else 0}
+
+
 def memtidy_state(session) -> dict | None:
     tidy = getattr(session, "memtidy", None)
     if tidy is None:
@@ -2255,6 +2310,8 @@ def settings_state(session, meter=None) -> dict:
         "event_lead": __import__("friday_events").lead_minutes() if google_ready(session) else None,
         "mail_alert": mail_alert_state(session),
         "memtidy": memtidy_state(session),
+        "vocab": vocab_state(session),
+        "background": session.background.state() if getattr(session, "background", None) is not None else None,
         "scenes": scenes_state(session),
         "cleanup": getattr(session, "cleanup_items", None) if os.name == "nt" or getattr(session, "cleanup_items", None) else None,
         "weekly_report": __import__("friday_alerts").weekly_enabled(),
@@ -2596,6 +2653,46 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
                 said, steps = friday_scenes.run(scene, getattr(toolbox, "computer", None),
                                                 on_say=getattr(session.quick, "on_say", None))
                 done.append(f"「{scene['name']}」:" + (";".join(steps) or "做好了"))
+        except ValueError as e:
+            return {"error": str(e)}
+    for field, key, on_text, off_text in (
+            ("learn", "FRIDAY_LEARN", "被纠正时我会把教训记下来", "被纠正时不自动记教训了"),
+            ("stt_mixed", "FRIDAY_STT_MIXED", "中文听得没把握时,我会再用英文听一次", "只用中文听")):
+        if field in payload:
+            on = bool(payload[field])
+            save_env_value(env, key, "on" if on else "off")
+            os.environ[key] = "on" if on else "off"
+            done.append(on_text if on else off_text)
+    jobs = getattr(session, "background", None)
+    if payload.get("bg_cancel") or payload.get("bg_open"):
+        if jobs is None:
+            return {"error": "后台任务现在用不了"}
+        if payload.get("bg_cancel"):
+            done.append(jobs.cancel())
+        if payload.get("bg_open"):
+            if os.name != "nt":
+                return {"error": "只能在 Windows 上打开文件夹"}
+            jobs.reports.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(jobs.reports))  # noqa: S606
+            done.append("打开了报告文件夹")
+    vocab = getattr(session, "vocab", None)
+    if any(k in payload for k in ("vocab_add", "vocab_remove", "vocab_words")):
+        if vocab is None:
+            return {"error": "词库还没准备好"}
+        try:
+            if isinstance(payload.get("vocab_add"), dict):
+                heard, meant = str(payload["vocab_add"].get("heard", "")), str(payload["vocab_add"].get("meant", ""))
+                vocab.add(heard, meant)
+                done.append(f"以后听到“{heard.strip()}”就改成“{meant.strip()}”")
+            if "vocab_remove" in payload:
+                if not vocab.remove(str(payload["vocab_remove"])):
+                    return {"error": "找不到这一条"}
+                done.append("删掉了")
+            if "vocab_words" in payload:
+                import re as _re
+
+                words = vocab.set_words(_re.split(r"[,，、\n]", str(payload["vocab_words"])[:3000]))
+                done.append(f"常用词存好了({len(words)} 个)")
         except ValueError as e:
             return {"error": str(e)}
     if payload.get("memtidy_run") or "memtidy_apply" in payload or payload.get("memtidy_dismiss"):
@@ -3295,6 +3392,81 @@ def start_auto_lock(session, interval: float = 15) -> None:
             time.sleep(interval)
 
     threading.Thread(target=lambda: _quietly(loop), daemon=True, name="friday-auto-lock").start()
+
+
+def start_background(session, toolbox: Toolbox, data_dir: str):
+    """后台长任务:要查很多资料的事交给后台,做完报告推到窗口和手机。"""
+    import friday_background
+    import friday_router
+
+    assistant = getattr(session, "assistant", None)
+    if assistant is None or toolbox is None:
+        return None
+
+    def work(goal: str, progress, should_stop) -> str:
+        budget = getattr(session, "budget", None)
+        if budget is not None:
+            budget.before_ask()
+        system = friday_background.SYSTEM.format(today=datetime.date.today().isoformat(), call_me=_call_me(session),
+                                                 memory=toolbox.memory.as_prompt())
+        worker = Assistant(client=assistant.client, model=friday_router.SONNET, effort="high", system=system,
+                           toolbox=friday_background.ReadOnlyTools(toolbox, should_stop))
+        worker.on_usage = assistant.on_usage
+
+        def on_text(delta: str) -> None:
+            if should_stop():
+                raise friday_background.Cancelled()
+        try:
+            return worker.ask(goal, on_text, progress)
+        except friday_background.Cancelled:
+            raise
+        except Exception as e:
+            described = error_text(e)
+            if described:
+                raise RuntimeError(described[0]) from e
+            raise
+
+    def done(job: dict, report: str) -> None:
+        where = f"(也存在 friday_reports\\{job['file']})" if job.get("file") else ""
+        session.hub.broadcast({"type": "reminder", "text": f"📋 后台任务做完了:{job['goal']}{where}\n\n{report}"})
+        phone_alert(session, f"📋 后台任务做完了:{job['goal']}\n\n{report[:1700]}" + ("……(完整的在电脑窗口里)" if len(report) > 1700 else ""))
+        if session.assistant is not None:
+            _quietly(lambda: session.assistant.remember_local(f"(交给后台的任务){job['goal']}", report))
+        line = report.splitlines()[0][:100] if report else ""
+        care = getattr(session, "care", None)
+        if session.speak_enabled and session.hub.connected and not session.busy and not (care is not None and care.quiet_now()):
+            session.speak(f"{_call_me(session)},后台任务做完了。{line}")
+
+    def failed(job: dict, error: str) -> None:
+        text = f"⚠ 后台任务没做成:{job['goal']}({error[:160]})"
+        session.hub.broadcast({"type": "reminder", "text": text})
+        push_to_phone(session, text)
+
+    jobs = friday_background.BackgroundJobs(os.path.join(data_dir, "friday_background.json"),
+                                            os.path.join(data_dir, "friday_reports"), work, done, failed)
+    session.background = jobs
+    toolbox.background = jobs.start
+    toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+    quick = getattr(session, "quick", None)
+    if quick is not None:
+        quick.background = jobs
+    return jobs
+
+
+def start_lessons(session, toolbox: Toolbox, data_dir: str):
+    """被纠正就记住 + 你自己的听错改正词库。"""
+    import friday_lessons
+    import friday_voicefix
+
+    vocab = friday_voicefix.use_vocab(os.path.join(data_dir, "friday_vocab.json"))
+    session.vocab = vocab
+    assistant = getattr(session, "assistant", None)
+    session.lessons = friday_lessons.Lessons(toolbox.memory, client=getattr(assistant, "client", None), vocab=vocab,
+                                             on_usage=getattr(assistant, "on_usage", None))
+    quick = getattr(session, "quick", None)
+    if quick is not None:
+        quick.lessons, quick.vocab = session.lessons, vocab
+    return session.lessons
 
 
 def start_memory_tidy(session, toolbox: Toolbox, data_dir: str):
@@ -4726,6 +4898,8 @@ def run_web(args) -> None:
     session.quick.known_games = getattr(session, "known_games", None)
     session.quick.gamereport = getattr(session, "gamereport", None)
     session.quick.env_file = session.env_file
+    _startup_step(session, "被纠正就记住", lambda: start_lessons(session, toolbox, data_dir))
+    _startup_step(session, "后台长任务", lambda: start_background(session, toolbox, data_dir))
     toolbox.meter, toolbox.budget = session.meter, getattr(session, "budget", None)
     import friday_scenes
 

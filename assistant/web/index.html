@@ -288,11 +288,30 @@
       <div class="set-row"><span></span><button type="button" class="mini-btn" id="sceneAdd">+ 新场景</button></div>
     </div>
 
+    <div class="set-group" id="bgGroup" hidden data-cat="life">
+      <h3>后台长任务</h3>
+      <div class="set-note" id="bgNow">说“在后台帮我研究一下……”或“……做完告诉我”,我在后台慢慢做,做完窗口和手机都会收到报告。后台只能查资料,不能发邮件、不能改东西。</div>
+      <div id="bgList"></div>
+      <div class="set-row"><span></span><span class="set-ctl"><button type="button" class="mini-btn" id="bgCancel" hidden>停掉正在做的</button><button type="button" class="mini-btn" id="bgOpen">打开报告文件夹</button></span></div>
+    </div>
+
     <div class="set-group" id="memtidyGroup" hidden data-cat="life">
       <h3>记忆整理</h3>
       <div class="set-row"><span id="memtidyNote">每周用最便宜的 Haiku 帮星期五整理一次记忆,只给建议,你勾了才改</span><button type="button" class="mini-btn" id="memtidyRun">现在整理</button></div>
       <div id="memtidyList"></div>
       <div class="set-row" id="memtidyActions" hidden><span></span><span class="set-ctl"><button type="button" class="mini-btn" id="memtidyApply">按勾选的改</button><button type="button" class="mini-btn" id="memtidyDismiss">全部忽略</button></span></div>
+    </div>
+
+    <div class="set-group" id="learnGroup" hidden data-cat="voice">
+      <h3>听懂我(被纠正就记住、中英马混着说)</h3>
+      <div class="set-row"><label for="setLearn">被纠正就记住:你说“不是这个意思”“我是说……”,我把教训记进记忆(每次约 RM0.005)</label><input type="checkbox" class="switch" id="setLearn"></div>
+      <div class="set-row"><label for="setSttMixed">中英马混着说:中文听得没把握时,再用英文听一次</label><input type="checkbox" class="switch" id="setSttMixed"></div>
+      <div class="set-row"><label for="vocabWords">我的常用词(听到好几个可能时,优先选有这些词的)</label>
+        <span class="set-ctl"><input class="mini-input wide" id="vocabWords" maxlength="1500" placeholder="例如 Mid Valley, Grab, tapau, mamak"><button type="button" class="mini-btn" id="vocabWordsSave">保存</button></span></div>
+      <div class="set-row"><label for="vocabHeard">听错改正:听到 → 改成</label>
+        <span class="set-ctl"><input class="mini-input" id="vocabHeard" maxlength="12" placeholder="例如 米谷"><input class="mini-input" id="vocabMeant" maxlength="30" placeholder="例如 Mid Valley"><button type="button" class="mini-btn" id="vocabAdd">加</button></span></div>
+      <div id="vocabList"></div>
+      <div class="set-note" id="vocabNote">也可以直接说“以后听到米谷就是 Mid Valley”。被你纠正“你听错了,我说的是……”时,我也会自己加进来。</div>
     </div>
 
     <div class="set-group" id="healthGroup" hidden data-cat="pc">
@@ -429,7 +448,7 @@
       <div class="set-row" id="askHotkeyRow" hidden><label for="setAskHotkey">选中就问:选中文字后按,帮你翻译或解释</label>
         <select class="mini-select" id="setAskHotkey"></select></div>
       <div class="set-note" id="askHotkeyNote" hidden></div>
-      <div class="set-row" id="quickRow" hidden><label for="setQuick">简单指令不问 Claude(调音量、切歌、几点了、记账……不花钱)</label><input type="checkbox" class="switch" id="setQuick"></div>
+      <div class="set-row" id="quickRow" hidden><label for="setQuick">简单指令不问 Claude(调音量、切歌、几点了、记账、天气、提醒、待办……不花钱)</label><input type="checkbox" class="switch" id="setQuick"></div>
     </div>
 
     <div class="set-group" data-cat="other">

@@ -83,6 +83,9 @@ class QuickCommands:
         self.dota_advice = None  # friday_dota_advice.DotaAdvice
         self.selfcheck = None  # friday_selfcheck.SelfCheck
         self.party = None  # (开始开黑, 不玩了):两个函数
+        self.lessons = None  # 被纠正就记住(friday_lessons.Lessons)
+        self.vocab = None  # 听错改正词库(friday_voicefix.Vocab)
+        self.background = None  # 后台长任务(friday_background.BackgroundJobs)
         self.env_file = None  # 改设定时存到哪个 .env
         self.sleep_timer = None  # friday_sleeptimer.SleepTimer
         self.diary = None  # friday_diary.Diary
@@ -186,6 +189,23 @@ class QuickCommands:
                 reply = str(e)
             if reply:
                 return reply
+        for helper in (self.lessons, self.vocab, self.background):
+            if helper is not None and len(text) <= (400 if helper is self.background else 80):
+                try:
+                    reply = helper.handle(text)
+                except Exception:
+                    reply = None
+                if reply:
+                    return reply
+        if len(text) <= 80:
+            try:
+                reply = self._local_ask(text)
+            except ValueError as e:
+                reply = str(e)
+            except Exception:
+                reply = None
+            if reply:
+                return reply
         if len(text) > 30:
             return None
         sentence = clean(text)
@@ -220,6 +240,83 @@ class QuickCommands:
                 except Exception:
                     return None  # 办不成:交给 Claude 处理
         return None
+
+    # ---------- 天气、待办、提醒(friday_localask) ----------
+    def _local_ask(self, text: str) -> str | None:
+        import friday_localask as local
+
+        toolbox = self.toolbox
+        reminders = getattr(toolbox, "reminders", None)
+        todos = getattr(toolbox, "todos", None)
+        if reminders is not None:
+            parsed = local.parse_reminder(text, self.clock())
+            if parsed is not None:
+                return self._add_reminder(*parsed)
+        sentence = local.normalize(text)
+        if len(sentence) > 30:
+            return None
+        if reminders is not None:
+            if local.LIST.match(sentence):
+                import friday_daily
+
+                items = reminders.upcoming()
+                if not items:
+                    return "现在没有提醒。说“十分钟后提醒我……”就能设。"
+                return f"现在有 {len(items)} 个提醒:\n" + "\n".join(friday_daily.describe_reminder(i) for i in items[:15])
+            found = local.CANCEL.match(sentence)
+            if found:
+                key = (found.group("k") or found.group("k2") or "").strip()
+                if key and key not in ("所有", "全部", "这个", "那个"):
+                    reply, failed = toolbox._reminder({"action": "cancel", "key": key}, lambda status: None)
+                    return None if failed else reply
+        if todos is not None:
+            if local.TODO_LIST.match(sentence):
+                import friday_daily
+
+                items = todos.pending()
+                if not items:
+                    return "待办清单是空的,都做完了。"
+                return f"还有 {len(items)} 件待办:\n" + "\n".join(friday_daily.describe_todo(i) for i in items[:20])
+            found = local.TODO_ADD.match(sentence)
+            if found:
+                item = todos.add(found.group("t") or found.group("t2") or found.group("t3"))
+                return f"加到待办了:{item['text']}。"
+            found = local.TODO_DONE.match(sentence)
+            if found:
+                key = (found.group("t") or found.group("t2") or "").strip()
+                if key.startswith("待办"):
+                    key = key[2:]
+                matches = [i for i in todos.pending() if key and (key in i["text"] or i["text"] in key)]
+                if len(matches) == 1:
+                    done = todos.complete(matches[0]["text"])
+                    left = len(todos.pending())
+                    if done:
+                        return f"好,“{done[0]['text']}”打勾了。" + (f"还有 {left} 件待办。" if left else "待办全部做完了!")
+        weather = local.parse_weather(text)
+        if weather is not None:
+            place, day, rain_only = weather
+            try:
+                return local.weather(place, day, rain_only, getattr(toolbox, "weather_fetch", None))
+            except ValueError:
+                return None  # 地名找不到之类:交给 Claude
+        return None
+
+    def _add_reminder(self, when, repeat: str, message: str) -> str:
+        import friday_daily
+
+        item = self.toolbox.reminders.add(when.strftime(friday_daily.TIME_FORMAT), message, "notify", repeat)
+        when = friday_daily.parse_time(item["time"])
+        today = self.clock().date()
+        day = {0: "今天", 1: "明天", 2: "后天"}.get((when.date() - today).days,
+                                                f"{when.month}月{when.day}日(星期{WEEKDAYS[when.weekday()]})")
+        label = {"daily": "每天 ", "weekdays": "每个工作日 ", "weekly": f"每周{WEEKDAYS[when.weekday()]} "}.get(repeat, "")
+        when_text = f"{label}{when:%H:%M}" + (f"(第一次是{day})" if label else "") if label else f"{day} {when:%H:%M}"
+        try:
+            calendar = self.toolbox._reminder_to_calendar(item)
+        except Exception:
+            calendar = ""
+        tail = "手机上也会响。" if "也放进了 Google 日历" in calendar else ""
+        return f"好,{when_text} 提醒你:{message}。{tail}"
 
     # ---------- 时间 ----------
     def _time(self, found):
