@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import io
 import json
 import os
 import queue
@@ -1924,10 +1925,13 @@ def ptt_state(session) -> dict | None:
         return None
     import friday_ptt
 
-    key = friday_ptt.key_setting()
-    return {"key": "custom" if key.startswith("vk:") else key,
-            "keys": [[k, label] for k, (label, _) in friday_ptt.KEYS.items()],
-            "custom": friday_ptt.key_info(key)[0] if key.startswith("vk:") else ""}
+    keys = [[k, label] for k, (label, _) in friday_ptt.KEYS.items()]
+    state = {}
+    for which in ("ptt", "shot"):
+        key = friday_ptt.key_setting(which)
+        state[which] = {"key": "custom" if key.startswith("vk:") else key,
+                        "custom": friday_ptt.key_info(key, which)[0] if key.startswith("vk:") else ""}
+    return {**state["ptt"], "keys": keys, "shot": state["shot"]}
 
 
 def start_ptt(session, ctx, events: queue.Queue, voice_module) -> None:
@@ -1986,17 +1990,72 @@ def ptt_say(session, text: str) -> None:
     threading.Thread(target=run, daemon=True, name="friday-ptt-say").start()
 
 
+SHOT_WAIT = 20  # 秒:截图后这么久内按住说话,问题就带着这张截图;没说就自动帮你看看画面
+SHOT_DEFAULT = ("这是我电脑现在的画面(我按了截图键)。简单说说上面有什么重要的;如果是游戏,"
+                "看看我现在的情况给一两个有用的提示;如果有错误信息,告诉我怎么解决。")
+
+
+def take_pending_shot(session, max_age: float = SHOT_WAIT + 5) -> list | None:
+    shot = getattr(session, "pending_shot", None)
+    session.pending_shot = None
+    if not shot or time.monotonic() - shot[0] > max_age:
+        return None
+    return [("screen.jpg", "image/jpeg", shot[1])]
+
+
+def screen_jpeg(grab=None, max_side: int = 1568) -> bytes:
+    """截下整个主屏幕,缩小成 JPEG(Claude 看图最大就这么大,再大只是更贵)。"""
+    from PIL import ImageGrab
+
+    image = (grab or ImageGrab.grab)().convert("RGB")
+    image.thumbnail((max_side, max_side))
+    out = io.BytesIO()
+    image.save(out, "JPEG", quality=80)
+    return out.getvalue()
+
+
+def start_screenshot(session, ctx, events: queue.Queue) -> None:
+    """截图问星期五:按一下键截下画面;20 秒内按住说话问,问题就带着截图;没问就自动帮你看看。"""
+    if os.name != "nt":
+        return
+    import friday_ptt
+
+    def take() -> None:
+        def work() -> None:
+            try:
+                data = screen_jpeg()
+            except Exception as e:  # noqa: BLE001
+                session.hub.broadcast({"type": "error", "text": f"📸 截图没成功:{type(e).__name__}"})
+                return
+            stamp = time.monotonic()
+            session.pending_shot = (stamp, data)
+            friday_ptt.beep(True)
+            friday_ptt.beep(True)
+            session.hub.broadcast({"type": "status", "text": f"📸 截好了:{SHOT_WAIT} 秒内按住说话说你要问什么,不说就自动帮你看看画面"})
+            time.sleep(SHOT_WAIT)
+            shot = getattr(session, "pending_shot", None)
+            if shot and shot[0] == stamp:  # 一直没问:自动问
+                events.put(("ptt", SHOT_DEFAULT))
+        threading.Thread(target=work, daemon=True, name="friday-shot").start()
+
+    session.shot_tap = friday_ptt.KeyTap(take, paused=lambda: bool(ctx.locked()))
+    key = friday_ptt.key_setting("shot")
+    if key != "off":
+        print(session.shot_tap.start(key), flush=True)
+
+
 def ptt_answer(session, text: str) -> None:
     """按住说话问的:不跳窗口、一定读出来(窗口关着就用电脑直接读);要你允许的事也读出来问。"""
     approver = getattr(session, "ptt_approver", None)
     if approver is not None:
         approver.voice = lambda action: ptt_say(
             session, f"要我{action[:80]}吗?按住说“允许”或者“不要”。")
+    files = take_pending_shot(session)
     try:
         if session.hub.connected:
-            session.ask(text, source="ptt", speak=True)
+            session.ask(text, source="ptt", speak=True, files=files)
             return
-        reply = session.ask(text, source="ptt", speak=False)
+        reply = session.ask(text, source="ptt", speak=False, files=files)
     finally:
         if approver is not None:
             approver.voice = None
@@ -2512,10 +2571,13 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         save_env_value(env, "FRIDAY_AUTO_UPDATE", "on" if on else "off")
         os.environ["FRIDAY_AUTO_UPDATE"] = "on" if on else "off"
         done.append("半夜没在用电脑时会自己更新,早上告诉你更新了什么" if on else "不会自己更新了,要更新就点“检查更新”")
-    if "ptt_key" in payload:
+    for field, which, attr, what in (("ptt_key", "ptt", "ptt", "按住说话"), ("shot_key", "shot", "shot_tap", "截图问星期五")):
+        if field not in payload:
+            continue
         import friday_ptt
 
-        raw = payload["ptt_key"]
+        raw = payload[field]
+        key_env, label_env = friday_ptt.SETTINGS[which]
         if isinstance(raw, dict):  # 自定义:窗口里按下的那个键 {vk, label}
             try:
                 vk = int(raw.get("vk"))
@@ -2527,16 +2589,16 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
             if friday_ptt.custom_key(key) is None:
                 return {"error": "这个键不能用,换一个"}
             label = friday_ptt.clean_label(raw.get("label"))
-            save_env_value(env, "FRIDAY_PTT_LABEL", label)
-            os.environ["FRIDAY_PTT_LABEL"] = label
+            save_env_value(env, label_env, label)
+            os.environ[label_env] = label
         else:
             key = str(raw).strip().lower()
             if key != "off" and key not in friday_ptt.KEYS:
                 return {"error": "没有这个键"}
-        save_env_value(env, "FRIDAY_PTT_KEY", key)
-        os.environ["FRIDAY_PTT_KEY"] = key
-        ptt = getattr(session, "ptt", None)
-        done.append(ptt.start(key) if ptt is not None else "按住说话只能在 Windows 上用")
+        save_env_value(env, key_env, key)
+        os.environ[key_env] = key
+        worker = getattr(session, attr, None)
+        done.append(worker.start(key) if worker is not None else f"{what}只能在 Windows 上用")
     if "game_report" in payload:
         on = bool(payload["game_report"])
         save_env_value(env, "FRIDAY_GAME_REPORT", "on" if on else "off")
@@ -4414,6 +4476,7 @@ def run_web(args) -> None:
     _startup_step(session, "仪表板", lambda: start_dashboard(session, toolbox, ctx))
     _startup_step(session, "桌面小光球", lambda: start_floatorb(session, ctx, data_dir))
     _startup_step(session, "按住说话", lambda: start_ptt(session, ctx, events, voice_module))
+    _startup_step(session, "截图问星期五", lambda: start_screenshot(session, ctx, events))
     _startup_step(session, "半夜自动更新", lambda: start_autoupdate(session, events, data_dir))
     if getattr(toolbox, "screen", None) is not None:
         toolbox.screen.on_change = lambda active, text: takeover_notice(session, active, text)

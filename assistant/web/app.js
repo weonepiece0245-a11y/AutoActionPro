@@ -970,17 +970,19 @@ function fillSettings() {
   }
   $("setAutoUpdate").checked = s.auto_update !== false;
   fillLightLink(s.lightlink);
-  $("pttRow").hidden = !s.ptt;
-  if (s.ptt) {
-    const sel = $("setPtt");
+  for (const [row, select, button, state] of [["pttRow", "setPtt", "pttCapture", s.ptt],
+                                                ["shotRow", "setShot", "shotCapture", s.ptt && s.ptt.shot]]) {
+    $(row).hidden = !state;
+    if (!state) continue;
+    const sel = $(select);
     if (sel.options.length <= 1) {
       for (const [key, label] of s.ptt.keys) sel.append(new Option(label, key));
       sel.append(new Option("自定义…", "custom"));
     }
-    if (!pttCapturing) {
-      sel.value = s.ptt.key;
-      $("pttCapture").hidden = s.ptt.key !== "custom";
-      $("pttCapture").textContent = s.ptt.custom ? `现在是 ${s.ptt.custom}(按这里换)` : "按这里,再按你要的键";
+    if (keyCapturing !== button) {
+      sel.value = state.key;
+      $(button).hidden = state.key !== "custom";
+      $(button).textContent = state.custom ? `现在是 ${state.custom}(按这里换)` : "按这里,再按你要的键";
     }
   }
   const c = s.cloud;
@@ -1384,11 +1386,14 @@ $("setRemindCalendar").onchange = (e) => saveSetting({ remind_calendar: e.target
 $("setGameQuiet").onchange = (e) => saveSetting({ game_quiet: e.target.checked });
 $("setGameBoost").onchange = (e) => saveSetting({ game_boost: e.target.checked });
 $("setGameReport").onchange = (e) => saveSetting({ game_report: e.target.checked });
-$("setPtt").onchange = (e) => {
-  if (e.target.value === "custom") { $("pttCapture").hidden = false; startPttCapture(); return; }
-  $("pttCapture").hidden = true;
-  saveSetting({ ptt_key: e.target.value });
-};
+for (const [select, button, field] of [["setPtt", "pttCapture", "ptt_key"], ["setShot", "shotCapture", "shot_key"]]) {
+  $(select).onchange = (e) => {
+    if (e.target.value === "custom") { $(button).hidden = false; startKeyCapture(button, field); return; }
+    $(button).hidden = true;
+    saveSetting({ [field]: e.target.value });
+  };
+  $(button).onclick = () => startKeyCapture(button, field);
+}
 
 // 自定义按住说话的键:按下“按这里”后,下一个按下的键盘键或鼠标键(中键、侧键)就是它
 const VK_NAMED = {
@@ -1401,7 +1406,7 @@ const VK_NAMED = {
   ArrowRight: [0x27, "→"], ArrowDown: [0x28, "↓"], Pause: [0x13, "Pause"], ScrollLock: [0x91, "Scroll Lock"],
   NumpadMultiply: [0x6A, "小键盘 *"], NumpadAdd: [0x6B, "小键盘 +"], NumpadSubtract: [0x6D, "小键盘 -"],
   NumpadDecimal: [0x6E, "小键盘 ."], NumpadDivide: [0x6F, "小键盘 /"], NumpadEnter: [0x0D, "小键盘 Enter"],
-  Enter: [0x0D, "Enter"], Backspace: [0x08, "Backspace"], ContextMenu: [0x5D, "菜单键"], IntlBackslash: [0xE2, "\\"],
+  Enter: [0x0D, "Enter"], Backspace: [0x08, "Backspace"], ContextMenu: [0x5D, "菜单键"], PrintScreen: [0x2C, "Print Screen"], IntlBackslash: [0xE2, "\\"],
 };
 function keyToVk(e) {
   const code = e.code || "";
@@ -1413,20 +1418,21 @@ function keyToVk(e) {
   return VK_NAMED[code] || null;
 }
 const MOUSE_VK = { 1: [0x04, "鼠标中键"], 3: [0x05, "鼠标侧键(后)"], 4: [0x06, "鼠标侧键(前)"] };
-let pttCapturing = false;
-function startPttCapture() {
-  if (pttCapturing) return;
-  pttCapturing = true;
-  const btn = $("pttCapture");
+let keyCapturing = null;  // 正在等你按键的那个按钮
+function startKeyCapture(buttonId, field) {
+  if (keyCapturing) return;
+  keyCapturing = buttonId;
+  const btn = $(buttonId);
   btn.textContent = "请按你要的键……(Esc 取消)";
   btn.classList.add("waiting");
   const finish = (choice) => {
-    pttCapturing = false;
+    keyCapturing = null;
     btn.classList.remove("waiting");
     window.removeEventListener("keydown", onKey, true);
+    window.removeEventListener("keyup", onKeyUp, true);
     window.removeEventListener("mousedown", onMouse, true);
     window.removeEventListener("auxclick", block, true);
-    if (choice) saveSetting({ ptt_key: { vk: choice[0], label: choice[1] } }).then(() => setTimeout(() => loadState().then(fillSettings), 300));
+    if (choice) saveSetting({ [field]: { vk: choice[0], label: choice[1] } }).then(() => setTimeout(() => loadState().then(fillSettings), 300));
     else setTimeout(() => loadState().then(fillSettings), 50);
   };
   const block = (e) => { e.preventDefault(); e.stopPropagation(); };
@@ -1443,11 +1449,12 @@ function startPttCapture() {
     block(e);
     if (MOUSE_VK[e.button]) finish(MOUSE_VK[e.button]);
   };
+  const onKeyUp = (e) => { if (e.code === "PrintScreen") onKey(e); };  // Print Screen 在网页里常常只有放开那一下
   window.addEventListener("keydown", onKey, true);
+  window.addEventListener("keyup", onKeyUp, true);
   window.addEventListener("mousedown", onMouse, true);
   window.addEventListener("auxclick", block, true);
 }
-$("pttCapture").onclick = startPttCapture;
 $("setAutoUpdate").onchange = (e) => saveSetting({ auto_update: e.target.checked });
 
 // 家里的灯联动:开游戏时调灯、离开时关灯

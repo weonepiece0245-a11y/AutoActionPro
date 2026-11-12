@@ -6325,7 +6325,7 @@ class PushToTalkTest(unittest.TestCase):
     def test_ptt_answer_speaks_without_window(self):
         session = app.WebSession(None, app.default_persona(), friday_web.Hub())
         asked, spoken = [], []
-        session.ask = lambda text, source, speak: asked.append((text, source, speak)) or "现在 3 点"
+        session.ask = lambda text, source, speak, files=None: asked.append((text, source, speak)) or "现在 3 点"
         session.local_speaker = SimpleNamespace(speak=spoken.append)
         app.ptt_answer(session, "几点了")  # 窗口关着:用电脑直接读
         self.assertEqual(asked, [("几点了", "ptt", False)])
@@ -6373,7 +6373,7 @@ class PushToTalkTest(unittest.TestCase):
         session.speak = said.append
         session.hub.subscribe()
 
-        def ask(text, source, speak):
+        def ask(text, source, speak, files=None):
             seen.append(session.ptt_approver.voice is not None)
             session.ptt_approver.voice("关机")
             return "好"
@@ -6382,6 +6382,57 @@ class PushToTalkTest(unittest.TestCase):
         self.assertEqual(seen, [True])
         self.assertIn("要我关机吗?按住说“允许”或者“不要”。", said)
         self.assertIsNone(session.ptt_approver.voice)  # 问完就关掉
+
+    def test_key_tap_fires_once_per_press(self):
+        presses, script = [], [False, True, True, True, False, True, False, False]
+        tap = friday_ptt.KeyTap(lambda: presses.append(1), key_down=lambda vk: script[0])
+
+        def sleep(seconds):
+            script.pop(0)
+            if len(script) <= 1:
+                tap.running = False
+        tap.sleep = sleep
+        tap.vk, tap.running = 0x77, True
+        tap._loop()
+        self.assertEqual(len(presses), 2)  # 按住不放只算一次
+        locked = friday_ptt.KeyTap(lambda: presses.append(1), key_down=lambda vk: True, paused=lambda: True)
+        locked.sleep = lambda s: setattr(locked, "running", False)
+        locked.vk, locked.running = 0x77, True
+        locked._loop()
+        self.assertEqual(len(presses), 2)  # 锁着不截图
+
+    def test_screenshot_goes_with_next_question(self):
+        from PIL import Image
+
+        data = app.screen_jpeg(grab=lambda: Image.new("RGB", (3840, 2160), "red"))
+        self.assertTrue(data.startswith(b"\xff\xd8"))  # JPEG
+        self.assertEqual(Image.open(io.BytesIO(data)).size, (1568, 882))  # 缩小,省钱
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        sent = []
+        session.ask = lambda text, source, speak, files=None: sent.append(files) or "好"
+        session.local_speaker = SimpleNamespace(speak=lambda t: None)
+        session.pending_shot = (time.monotonic(), data)
+        app.ptt_answer(session, "这个任务怎么过")
+        self.assertEqual(sent[0], [("screen.jpg", "image/jpeg", data)])
+        app.ptt_answer(session, "下一个问题")
+        self.assertIsNone(sent[1])  # 截图只跟一个问题
+        session.pending_shot = (time.monotonic() - 120, data)
+        app.ptt_answer(session, "很久以后")
+        self.assertIsNone(sent[2])  # 太久以前的截图不带
+
+    def test_shot_key_setting(self):
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        started = []
+        session.shot_tap = SimpleNamespace(start=lambda key: started.append(key) or f"按一下 {key} 就截图问星期五")
+        env = Path(tempfile.mkdtemp(), ".env")
+        env.write_text("")
+        with mock.patch.dict(os.environ, {}):
+            app.apply_settings({"shot_key": {"vk": 0x2C, "label": "Print Screen"}}, session, SimpleNamespace(), env)
+            self.assertEqual(friday_ptt.key_info(friday_ptt.key_setting("shot"), "shot"), ("Print Screen", 0x2C))
+            self.assertEqual(friday_ptt.key_setting("ptt"), "off")  # 两个设定分开
+            self.assertIn("error", app.apply_settings({"shot_key": {"vk": 1}}, session, SimpleNamespace(), env))
+        self.assertEqual(started, ["vk:44"])
+        self.assertIn("FRIDAY_SHOT_KEY=vk:44", env.read_text())
 
     def test_settings_payload(self):
         session = app.WebSession(None, app.default_persona(), friday_web.Hub())
@@ -6410,8 +6461,8 @@ class PushToTalkTest(unittest.TestCase):
             time.sleep(0.05)
             ptt.stop()
             self.assertIn(0x05, watched)  # 真的在看这个键
-            self.assertEqual(app.ptt_state(session), {"key": "custom", "keys": app.ptt_state(session)["keys"],
-                                                      "custom": "鼠标侧键(后)"})
+            state = app.ptt_state(session)
+            self.assertEqual((state["key"], state["custom"], state["shot"]), ("custom", "鼠标侧键(后)", {"key": "off", "custom": ""}))
             self.assertIn("FRIDAY_PTT_KEY=vk:5", env.read_text())
             app.apply_settings({"ptt_key": {"vk": 0x47, "label": "G"}}, session, SimpleNamespace(), env)
             ptt.stop()

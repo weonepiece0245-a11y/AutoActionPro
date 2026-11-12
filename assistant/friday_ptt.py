@@ -40,8 +40,12 @@ def custom_key(name: str) -> int | None:
     return vk if 3 <= vk <= 254 and vk not in NOT_ALLOWED else None
 
 
-def key_setting() -> str:
-    name = os.environ.get("FRIDAY_PTT_KEY", "off").strip().lower()
+# 用到按键的功能:(存哪个键的设定, 存自定义键名字的设定)
+SETTINGS = {"ptt": ("FRIDAY_PTT_KEY", "FRIDAY_PTT_LABEL"), "shot": ("FRIDAY_SHOT_KEY", "FRIDAY_SHOT_LABEL")}
+
+
+def key_setting(which: str = "ptt") -> str:
+    name = os.environ.get(SETTINGS[which][0], "off").strip().lower()
     return name if name in KEYS or custom_key(name) is not None else "off"
 
 
@@ -50,14 +54,14 @@ def clean_label(label: str) -> str:
     return label or "自定义的键"
 
 
-def key_info(name: str) -> tuple[str, int] | None:
+def key_info(name: str, which: str = "ptt") -> tuple[str, int] | None:
     """(给你看的名字, Windows 键码);关着或不认识返回 None。"""
     if name in KEYS:
         return KEYS[name]
     vk = custom_key(name)
     if vk is None:
         return None
-    return clean_label(os.environ.get("FRIDAY_PTT_LABEL", "")), vk
+    return clean_label(os.environ.get(SETTINGS[which][1], "")), vk
 
 
 def to_wav(pcm: bytes, rate: int = RATE) -> bytes:
@@ -206,3 +210,55 @@ class PushToTalk:
                 self.recorder.stop()
             except Exception:
                 pass
+
+
+class KeyTap:
+    """按一下某个键就做一件事(截图问星期五用)。和按住说话一样只是看键有没有按下,不拦截。"""
+
+    def __init__(self, on_press: Callable[[], None], key_down: Callable[[int], bool] | None = None,
+                 sleep: Callable[[float], None] = time.sleep, paused: Callable[[], bool] = lambda: False,
+                 which: str = "shot") -> None:
+        self.on_press = on_press
+        self.key_down = key_down or key_down_windows
+        self.sleep = sleep
+        self.paused = paused
+        self.which = which
+        self.key = "off"
+        self.vk = 0
+        self.running = False
+        self.thread: threading.Thread | None = None
+
+    def start(self, key: str, what: str = "截图问星期五") -> str:
+        self.stop()
+        info = key_info(key, self.which)
+        self.key = key if info else "off"
+        if self.key == "off":
+            return f"{what}关掉了。"
+        if os.name != "nt" and self.key_down is key_down_windows:
+            return f"{what}只能在 Windows 上用。"
+        self.vk = info[1]
+        self.running = True
+        self.thread = threading.Thread(target=self._loop, daemon=True, name=f"friday-key-{self.which}")
+        self.thread.start()
+        return f"按一下 {info[0]} 就{what}。"
+
+    def stop(self) -> None:
+        self.running = False
+        if self.thread is not None and self.thread is not threading.current_thread():
+            self.thread.join(1)
+        self.thread = None
+
+    def _loop(self) -> None:
+        was_down = False
+        while self.running:
+            try:
+                down = self.key_down(self.vk)
+            except Exception:
+                down = False
+            if down and not was_down and not self.paused():
+                try:
+                    self.on_press()
+                except Exception:
+                    pass
+            was_down = down
+            self.sleep(POLL)
