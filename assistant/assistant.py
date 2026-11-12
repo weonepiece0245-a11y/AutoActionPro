@@ -3323,6 +3323,8 @@ def start_dashboard(session, toolbox, ctx) -> None:
 
     board.actions = {"music": music_action, "light": light_action}
     ctx.dashboard = session.dashboard = board
+    ctx.history = lambda query, date: (toolbox.archive.browse(query, date) if toolbox.archive is not None
+                                       else {"days": [], "items": [], "total": 0})
 
 
 def start_connected_apps(session, toolbox, ctx, data_dir: str, port: int) -> None:

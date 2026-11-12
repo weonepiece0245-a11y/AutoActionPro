@@ -181,7 +181,65 @@ const log = $("log");
 let current = null; // 正在生成的回答气泡
 
 function scrollDown() { log.scrollTop = log.scrollHeight; }
-function addMessage(kind, text, source) {
+// 对话里按日期分隔(“今天”“昨天”“11月10日 星期一”)
+let lastDay = "";
+function dayKey(ts) { const d = new Date(ts * 1000); return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`; }
+function dayLabel(date) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const day = new Date(date); day.setHours(0, 0, 0, 0);
+  const diff = Math.round((today - day) / 86400000);
+  if (diff === 0) return "今天";
+  if (diff === 1) return "昨天";
+  if (diff === 2) return "前天";
+  const year = day.getFullYear() === today.getFullYear() ? "" : `${day.getFullYear()}年`;
+  return `${year}${day.getMonth() + 1}月${day.getDate()}日 星期${WEEK[day.getDay()]}`;
+}
+function maybeDayDivider(ts) {
+  if (!ts) return;
+  const key = dayKey(ts);
+  if (key === lastDay) return;
+  const hadDay = lastDay !== "";
+  lastDay = key;
+  if (!hadDay && key === dayKey(Date.now() / 1000)) return;  // 全都是今天的:不用分隔
+  const div = document.createElement("div");
+  div.className = "day-divider";
+  div.textContent = dayLabel(ts * 1000);
+  log.append(div);
+}
+// 复制:窗口是本机网页,剪贴板一般能用;不能用时退回老方法
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch {}
+  const area = document.createElement("textarea");
+  area.value = text; area.style.position = "fixed"; area.style.opacity = "0";
+  document.body.append(area); area.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch {}
+  area.remove();
+  return ok;
+}
+const LONG_ANSWER = 700;
+function decorateAnswer(el, text) {
+  el.querySelector(".msg-tools")?.remove();
+  el.querySelector(".msg-more")?.remove();
+  el.classList.remove("long", "open");
+  if (!text) return;
+  const tools = document.createElement("div");
+  tools.className = "msg-tools";
+  const copy = document.createElement("button");
+  copy.type = "button"; copy.className = "msg-copy"; copy.title = "复制这个回答"; copy.textContent = "复制";
+  copy.onclick = async () => { copy.textContent = (await copyText(text)) ? "已复制 ✓" : "复制失败"; setTimeout(() => { copy.textContent = "复制"; }, 1600); };
+  tools.append(copy);
+  el.append(tools);
+  if (text.length > LONG_ANSWER || text.split("\n").length > 14) {
+    el.classList.add("long");
+    const more = document.createElement("button");
+    more.type = "button"; more.className = "msg-more"; more.textContent = "展开全部 ▾";
+    more.onclick = () => { const open = el.classList.toggle("open"); more.textContent = open ? "收起 ▴" : "展开全部 ▾"; };
+    el.append(more);
+  }
+}
+function addMessage(kind, text, source, ts) {
+  maybeDayDivider(ts);
   const el = document.createElement("div");
   el.className = `msg ${kind}${source && source !== "web" ? " source-" + source : ""}`;
   const who = document.createElement("span");
@@ -203,8 +261,8 @@ function addLine(text, cls = "") {
   scrollDown();
   return el;
 }
-function startAnswer(source) {
-  current = addMessage("friday", "", source);
+function startAnswer(source, ts) {
+  current = addMessage("friday", "", source, ts);
   current.classList.add("typing");
   current.querySelector(".text").innerHTML = '<span class="thinking"><b></b><b></b><b></b></span>';
   current.dataset.empty = "1";
@@ -221,6 +279,7 @@ function finishAnswer(text, source) {
   current.classList.remove("typing");
   current.querySelector(".text").textContent = text;
   delete current.dataset.empty;
+  decorateAnswer(current, text);
   if (text && (!source || source === "web" || source === "voice")) addChips(current);
   current = null;
   scrollDown();
@@ -257,10 +316,10 @@ function handle(ev) {
   switch (ev.type) {
     case "user":
       removeChips();
-      addMessage("user", ev.text, ev.source);
+      addMessage("user", ev.text, ev.source, ev.ts);
       break;
     case "thinking":
-      busy = true; refreshMode(); startAnswer(ev.source); break;
+      busy = true; refreshMode(); startAnswer(ev.source, ev.ts); break;
     case "delta":
       appendDelta(ev.text); break;
     case "status":
@@ -317,7 +376,7 @@ function handle(ev) {
     case "locked":
       showLock(); break;
     case "cleared":
-      log.innerHTML = ""; current = null; addLine("已开始新话题"); break;
+      log.innerHTML = ""; current = null; lastDay = ""; addLine("已开始新话题"); break;
   }
   $("sendBtn").disabled = busy;
 }
@@ -327,7 +386,7 @@ function connect() {
   if (source) source.close();
   source = new EventSource(`/events?t=${encodeURIComponent(token)}`);
   // 每次连上都会先收到之前的对话;先清空,断线重连时才不会重复
-  source.onopen = () => { log.innerHTML = ""; current = null; };
+  source.onopen = () => { log.innerHTML = ""; current = null; lastDay = ""; };
   source.onmessage = (e) => { try { handle(JSON.parse(e.data)); } catch (err) { console.error(err); } };
   source.onerror = () => { setMode("idle"); };
 }
@@ -919,6 +978,80 @@ async function saveSetting(change, ms = 3200) {
   fillSettings();
   return true;
 }
+// ---------- 聊天记录:按日期看、搜索、复制 ----------
+let histDate = "";
+let histTimer = null;
+function histDayLabel(date) {
+  const [y, m, d] = date.split("-").map(Number);
+  return dayLabel(new Date(y, m - 1, d).getTime());
+}
+function renderHistory(r, query) {
+  const nav = $("histDays");
+  const all = document.createElement("button");
+  all.type = "button"; all.className = "set-tab" + (!histDate ? " on" : "");
+  all.innerHTML = '<span class="set-tab-icon" aria-hidden="true">🕘</span><span>最近</span>';
+  all.onclick = () => { histDate = ""; loadHistory(); };
+  nav.replaceChildren(all, ...(r.days || []).map((d) => {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "set-tab" + (histDate === d.date ? " on" : "");
+    const label = document.createElement("span"); label.textContent = histDayLabel(d.date);
+    const count = document.createElement("small"); count.className = "hist-count"; count.textContent = d.count;
+    b.append(label, count);
+    b.onclick = () => { histDate = d.date; loadHistory(); };
+    return b;
+  }));
+  const list = $("histList");
+  const items = r.items || [];
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "set-empty";
+    empty.textContent = query ? `没有找到“${query}”。换个关键词试试。` : "这里还没有聊天记录。";
+    list.replaceChildren(empty);
+    return;
+  }
+  const head = document.createElement("div");
+  head.className = "hist-summary";
+  head.textContent = (query ? `找到 ${r.total} 条` : histDate ? `${histDayLabel(histDate)}共 ${r.total} 条` : `最近的问答`) +
+    (r.total > items.length ? `(显示最新 ${items.length} 条)` : "");
+  list.replaceChildren(head, ...items.map((e) => {
+    const card = document.createElement("article");
+    card.className = "hist-item";
+    const top = document.createElement("div"); top.className = "hist-top";
+    const time = document.createElement("span"); time.className = "hist-time"; time.textContent = e.time;
+    const copy = document.createElement("button"); copy.type = "button"; copy.className = "msg-copy"; copy.textContent = "复制回答";
+    copy.onclick = async () => { copy.textContent = (await copyText(e.a)) ? "已复制 ✓" : "复制失败"; setTimeout(() => { copy.textContent = "复制回答"; }, 1600); };
+    const ask = document.createElement("button"); ask.type = "button"; ask.className = "msg-copy"; ask.textContent = "再问一次";
+    ask.title = "把这个问题放进输入框";
+    ask.onclick = () => { closeHistory(); $("input").value = e.q; $("input").focus(); };
+    top.append(time, ask, copy);
+    const q = document.createElement("div"); q.className = "hist-q"; q.textContent = e.q;
+    const a = document.createElement("div"); a.className = "hist-a"; a.textContent = e.a;
+    card.append(top, q, a);
+    if (e.a.length > 320) {
+      card.classList.add("long");
+      const more = document.createElement("button"); more.type = "button"; more.className = "msg-more"; more.textContent = "展开全部 ▾";
+      more.onclick = () => { const open = card.classList.toggle("open"); more.textContent = open ? "收起 ▴" : "展开全部 ▾"; };
+      card.append(more);
+    }
+    return card;
+  }));
+  list.scrollTop = 0;
+}
+async function loadHistory() {
+  const query = $("histSearch").value.trim();
+  const params = new URLSearchParams({ q: query, date: query ? "" : histDate });
+  const r = await api(`/api/history?${params}`).catch(() => ({ error: "读不到聊天记录" }));
+  if (r.error) { toast(r.error); return; }
+  renderHistory(r, query);
+}
+function openHistory() { $("historyModal").hidden = false; $("histSearch").value = ""; histDate = ""; loadHistory(); $("histSearch").focus(); }
+function closeHistory() { $("historyModal").hidden = true; }
+$("historyBtn").onclick = openHistory;
+$("historyClose").onclick = closeHistory;
+$("historyModal").addEventListener("click", (e) => { if (e.target === $("historyModal")) closeHistory(); });
+$("histSearch").addEventListener("input", () => { clearTimeout(histTimer); histTimer = setTimeout(loadHistory, 300); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("historyModal").hidden) closeHistory(); });
+
 // ---------- 齿轮设定:左边分类、上面搜索 ----------
 const SET_CATS = [
   ["general", "⚙", "常用"], ["voice", "🔊", "声音"], ["look", "🎨", "外观"], ["remind", "⏰", "提醒"],

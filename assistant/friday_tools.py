@@ -85,6 +85,26 @@ class ConversationArchive:
             entries = matched
         return entries[-limit:]
 
+    def browse(self, query: str = "", date: str = "", limit: int = 60) -> dict:
+        """给窗口的“聊天记录”用:{"days": [{date, count}](最近的在前), "items": [{n, time, q, a}](新的在前)}。
+
+        date(YYYY-MM-DD)只看那一天;query 全部关键词都要出现;都没给就是最近的。
+        """
+        entries = self._entries()
+        day_of = lambda e: datetime.datetime.fromtimestamp(e.get("t", 0)).strftime("%Y-%m-%d")  # noqa: E731
+        counts: dict[str, int] = {}
+        for e in entries:
+            counts[day_of(e)] = counts.get(day_of(e), 0) + 1
+        days = [{"date": d, "count": c} for d, c in sorted(counts.items(), reverse=True)[:120]]
+        if date:
+            entries = [e for e in entries if day_of(e) == date]
+        words = [w.lower() for w in str(query or "").replace(",", " ").replace("，", " ").split() if w][:8]
+        if words:
+            entries = [e for e in entries if all(w in (e["q"] + " " + str(e.get("a", ""))).lower() for w in words)]
+        items = [{"n": e["n"], "time": datetime.datetime.fromtimestamp(e.get("t", 0)).strftime("%Y-%m-%d %H:%M"),
+                  "q": e["q"], "a": str(e.get("a", ""))} for e in reversed(entries[-limit:])]
+        return {"days": days, "items": items, "total": len(entries)}
+
     def describe(self, entries: list[dict], full: bool | None = None) -> str:
         """full=None:只有一两条就给完整回答,多了先给开头,并告诉编号。"""
         if not entries:

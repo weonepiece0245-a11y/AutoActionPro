@@ -316,6 +316,7 @@ class WebContext:
         self.orb_state: Callable[[], dict] | None = None  # 桌面小光球要的状态(在听/在说/颜色/声音大小)
         self.orb_action: Callable[[str], None] | None = None  # 小光球被点了:click / open / hide
         self.dashboard = None  # 主画面仪表板(friday_dashboard.Dashboard)
+        self.history: Callable[[str, str], dict] | None = None  # 聊天记录(关键词, 日期)
         self.spotify_callback: Callable[[dict], str] | None = None  # Spotify 登录跳回来
 
     def locked(self) -> bool:
@@ -415,6 +416,14 @@ def make_handler(ctx: WebContext):
                 return self._json(423, {"error": "locked"})
             if url.path == "/api/dashboard":
                 return self._json(200, ctx.dashboard.data() if ctx.dashboard is not None else {})
+            if url.path == "/api/history":
+                if ctx.history is None:
+                    return self._json(200, {"days": [], "items": [], "total": 0})
+                q = (query.get("q") or [""])[0][:100]
+                date = (query.get("date") or [""])[0]
+                if date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+                    return self._json(400, {"error": "日期不对"})
+                return self._json(200, ctx.history(q, date))
             if url.path == "/events":
                 return self._events()
             if url.path == "/api/state":

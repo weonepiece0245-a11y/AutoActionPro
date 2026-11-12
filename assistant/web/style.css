@@ -448,3 +448,72 @@ body[data-theme="matrix"] { --speak: #6ee7b7; --c-rgb: 52, 211, 153; --b-rgb: 16
 .home-tile:disabled { opacity: .6; cursor: progress; }
 .hud > .panel:not(.grow) { flex-shrink: 0; }
 .hud > .panel.grow:not(.collapsed) { flex: 1 0 140px; }
+
+/* ---------- 对话:日期分隔、复制、长回答收起 ---------- */
+.day-divider { align-self: center; display: flex; align-items: center; gap: 10px; width: min(420px, 80%); margin: 6px 0; font-size: 11px; letter-spacing: .15em; color: var(--muted); }
+.day-divider::before, .day-divider::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, transparent, var(--cyan-line), transparent); }
+.msg { position: relative; }
+.msg-tools { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; opacity: 0; transition: opacity .2s; }
+.msg:hover .msg-tools, .msg:focus-within .msg-tools { opacity: 1; }
+@media (hover: none) { .msg-tools { opacity: .8; } }
+.msg-copy { font: inherit; font-size: 11px; color: var(--muted); background: rgba(var(--c-rgb), .06); border: 1px solid var(--cyan-line); border-radius: 999px; padding: 2px 10px; cursor: pointer; transition: color .15s, border-color .15s, background .15s; }
+.msg-copy:hover { color: var(--text); border-color: var(--accent); background: rgba(var(--c-rgb), .14); }
+.msg.long:not(.open) .text, .hist-item.long:not(.open) .hist-a { display: block; max-height: 13.5em; overflow: hidden; -webkit-mask-image: linear-gradient(180deg, #000 70%, transparent); mask-image: linear-gradient(180deg, #000 70%, transparent); }
+.msg-more { display: block; margin: 4px auto 0; font: inherit; font-size: 12px; color: var(--accent); background: none; border: 0; cursor: pointer; padding: 2px 8px; }
+.msg-more:hover { text-decoration: underline; }
+
+/* ---------- 聊天记录 ---------- */
+#historyModal .history-card { width: min(920px, 94vw); height: min(720px, 88vh); max-height: none; display: flex; flex-direction: column; overflow: hidden; padding: 18px 20px 14px; }
+.hist-days .set-tab { justify-content: space-between; font-size: 13px; padding: 8px 10px; }
+.hist-count { font-family: var(--mono); font-size: 10px; color: var(--muted); background: rgba(var(--c-rgb), .08); border-radius: 999px; padding: 1px 7px; }
+.hist-summary { font-size: 12px; color: var(--muted); margin: 0 0 8px; }
+.hist-item { padding: 12px 14px; margin-bottom: 10px; border: 1px solid var(--cyan-line); border-radius: 12px; background: rgba(6,24,44,.5); animation: setIn .2s ease-out; }
+.hist-top { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.hist-time { font-family: var(--mono); font-size: 11px; color: var(--accent); margin-right: auto; }
+.hist-q { font-size: 14px; color: #bfdbfe; margin-bottom: 6px; white-space: pre-wrap; word-break: break-word; }
+.hist-q::before { content: "YOU · "; font-family: var(--display); font-size: 10px; letter-spacing: .2em; color: #93c5fd; }
+.hist-a { font-size: 14px; line-height: 1.65; color: var(--text); white-space: pre-wrap; word-break: break-word; }
+.hist-a::before { content: "FRIDAY · "; font-family: var(--display); font-size: 10px; letter-spacing: .2em; color: var(--accent); }
+@media (max-width: 640px) {
+  #historyModal .history-card { height: 92vh; padding: 14px; }
+  .hist-days .set-tab { gap: 6px; }
+}
+
+/* ---------- 细节美化 ---------- */
+.modal:not([hidden]) { animation: fadeIn .18s ease-out; }
+.modal:not([hidden]) .modal-card { animation: popIn .22s cubic-bezier(.2, .9, .3, 1.2); }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes popIn { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: none; } }
+button:focus-visible, .switch:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.icon-btn { transition: transform .15s, background .2s, border-color .2s, box-shadow .2s; }
+.icon-btn:hover { transform: translateY(-1px); }
+.icon-btn:active { transform: scale(.95); }
+.mini-btn { transition: background .15s, color .15s; }
+.mini-btn:hover { background: rgba(var(--c-rgb), .15); }
+.log, .set-pane, .set-nav, .list { scrollbar-width: thin; scrollbar-color: var(--cyan-line) transparent; }
+.log::-webkit-scrollbar, .set-pane::-webkit-scrollbar, .hud::-webkit-scrollbar, .list::-webkit-scrollbar { width: 6px; }
+.log::-webkit-scrollbar-thumb, .set-pane::-webkit-scrollbar-thumb, .hud::-webkit-scrollbar-thumb, .list::-webkit-scrollbar-thumb { background: var(--cyan-line); border-radius: 999px; }
+.panel { transition: border-color .3s, box-shadow .3s; }
+.panel:hover { box-shadow: 0 0 18px rgba(var(--c-rgb), .08); }
+.status-line { animation: rise .3s ease-out; }
+.toast { animation: popIn .2s ease-out; }
+@media (max-width: 1000px) {
+  .top-right { gap: 8px; }
+}
+@media (max-width: 640px) {
+  .top-right .icon-btn.small { width: 32px; height: 32px; }
+  #clockTime { font-size: 16px; }
+  .msg { font-size: 14px; }
+}
+/* 窄窗口:上面一排放不下时分两行,按钮不会被挤出画面 */
+@media (max-width: 760px) {
+  .topbar { flex-wrap: wrap; row-gap: 8px; }
+  .top-right { margin-left: auto; }
+}
+@media (max-width: 640px) {
+  .brand-name { font-size: 18px; letter-spacing: .25em; }
+  .topbar { justify-content: space-between; }
+  .top-right { width: 100%; justify-content: space-between; }
+  .top-right .clock { margin-left: auto; }
+}
+.hist-days .set-tab:first-child { justify-content: flex-start; }

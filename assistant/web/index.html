@@ -50,6 +50,9 @@
     <button type="button" class="icon-btn small" id="miniBtn" title="桌面小光球(永远在最上面)" aria-label="桌面小光球">
       <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="14" rx="2"/><rect x="12" y="11" width="7" height="5" rx="1"/></svg>
     </button>
+    <button type="button" class="icon-btn small" id="historyBtn" title="聊天记录(搜索、按日期看)" aria-label="聊天记录">
+      <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>
+    </button>
     <button type="button" class="icon-btn small" id="settingsBtn" title="设定" aria-label="设定">
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
     </button>
@@ -151,6 +154,19 @@
       <button class="btn ghost" id="approveAll">10 分钟内都允许</button>
     </div>
     <div class="modal-note" id="approvalNote"></div>
+  </div>
+</div>
+
+<div class="modal" id="historyModal" hidden>
+  <div class="modal-card settings-card history-card" role="dialog" aria-modal="true" aria-labelledby="historyTitle">
+    <div class="modal-head"><span class="settings-title" id="historyTitle">HISTORY</span>聊天记录
+      <input class="set-search" id="histSearch" type="search" placeholder="🔍 搜索聊天记录,例如 Spotify、汇率、Apex" aria-label="搜索聊天记录" autocomplete="off">
+      <button type="button" class="close-x" id="historyClose" aria-label="关闭">×</button></div>
+    <div class="set-layout">
+      <nav class="set-nav hist-days" id="histDays" aria-label="按日期"></nav>
+      <div class="set-pane hist-list" id="histList"></div>
+    </div>
+    <div class="modal-note" id="histNote">所有问答都存在这台电脑上;手机 Discord、Telegram 上问的也在。</div>
   </div>
 </div>
 

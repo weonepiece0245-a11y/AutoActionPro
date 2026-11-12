@@ -4230,6 +4230,26 @@ class WebServerTest(TempDirTest):
     def auth(self, extra=None):
         return {"X-Friday-Token": "secret", **(extra or {})}
 
+    def test_history_route(self):
+        archive = tools.ConversationArchive(os.path.join(self.tmp, "a.jsonl"))
+        day1 = datetime.datetime(2026, 11, 10, 9, 0).timestamp()
+        day2 = datetime.datetime(2026, 11, 11, 20, 0).timestamp()
+        archive.add("天气怎么样", "多云", day1)
+        archive.add("放周杰伦", "好,放周杰伦的《晴天》", day2)
+        archive.add("Spotify 没声音", "Spotify 刚打开还没连上", day2 + 60)
+        self.ctx.history = lambda q, d: archive.browse(q, d)
+        status, body = self.request("GET", "/api/history", headers=self.auth())
+        data = json.loads(body)
+        self.assertEqual(data["days"], [{"date": "2026-11-11", "count": 2}, {"date": "2026-11-10", "count": 1}])
+        self.assertEqual([i["q"] for i in data["items"]], ["Spotify 没声音", "放周杰伦", "天气怎么样"])  # 新的在前
+        data = json.loads(self.request("GET", "/api/history?date=2026-11-10", headers=self.auth())[1])
+        self.assertEqual([i["q"] for i in data["items"]], ["天气怎么样"])
+        q = urllib.parse.quote("spotify 连上")
+        data = json.loads(self.request("GET", f"/api/history?q={q}", headers=self.auth())[1])
+        self.assertEqual((data["total"], data["items"][0]["n"]), (1, 3))
+        self.assertEqual(self.request("GET", "/api/history?date=../../x", headers=self.auth())[0], 400)
+        self.assertEqual(self.request("GET", "/api/history")[0], 403)
+
     def test_dashboard_routes(self):
         self.assertEqual(self.request("GET", "/api/dashboard", headers=self.auth()), (200, b"{}"))
         self.assertEqual(self.request("POST", "/api/dashboard", body="{}", headers=self.auth())[0], 404)
