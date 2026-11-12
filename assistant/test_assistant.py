@@ -4242,6 +4242,12 @@ class WebServerTest(TempDirTest):
     def auth(self, extra=None):
         return {"X-Friday-Token": "secret", **(extra or {})}
 
+    def test_subtitle_route(self):
+        self.assertEqual(self.request("GET", "/api/subtitle", headers=self.auth()), (200, b"{}"))
+        self.ctx.subtitle_state = lambda: {"id": 3, "text": "好"}
+        self.assertEqual(json.loads(self.request("GET", "/api/subtitle", headers=self.auth())[1])["id"], 3)
+        self.assertEqual(self.request("GET", "/api/subtitle")[0], 403)
+
     def test_history_route(self):
         archive = tools.ConversationArchive(os.path.join(self.tmp, "a.jsonl"))
         day1 = datetime.datetime(2026, 11, 10, 9, 0).timestamp()
@@ -7101,6 +7107,91 @@ class SelfCheckTest(TempDirTest):
         quick = friday_quick.QuickCommands(SimpleNamespace())
         quick.selfcheck = SimpleNamespace(run=lambda: [{"name": "天气", "status": "ok", "detail": ""}])
         self.assertEqual(quick.handle("自我检查"), "自我检查:都正常(天气)。")
+
+
+import friday_subtitle  # noqa: E402
+
+
+class SubtitleTest(unittest.TestCase):
+    def test_wrap_and_render(self):
+        measure = lambda s: len(s) * 10  # noqa: E731
+        self.assertEqual(friday_subtitle.wrap("一二三四五六七八九十" * 2, measure, 100), ["一二三四五六七八九十"] * 2)
+        self.assertEqual(friday_subtitle.wrap("hello world this is friday", measure, 100),
+                         ["hello", "world this", "is friday"])  # 英文不拆词
+        lines = friday_subtitle.wrap("字" * 200, measure, 100)
+        self.assertEqual(len(lines), friday_subtitle.MAX_LINES)
+        self.assertTrue(lines[-1].endswith("…"))  # 太长:最后加“…”
+        image = friday_subtitle.render("Apex 现在是世界尽头,还有 12 分钟换图。")
+        self.assertEqual(image.mode, "RGBA")
+        self.assertLessEqual(image.size[0], friday_subtitle.MAX_WIDTH)
+        self.assertEqual(image.getpixel((0, 0))[3], 0)  # 圆角外面是透明的
+        self.assertEqual(friday_subtitle.show_seconds("短"), 4.18)
+        self.assertEqual(friday_subtitle.show_seconds("长" * 500), 20.0)
+
+    def test_process_shows_new_text_and_hides(self):
+        now = [0.0]
+        shown, hidden = [], []
+
+        class Window:
+            visible = False
+
+            def pump(self):
+                pass
+
+            def show(self, image):
+                shown.append(image.size)
+                self.visible = True
+
+            def hide(self):
+                hidden.append(now[0])
+                self.visible = False
+        states = [{"id": 1, "text": "下午三点"}, {"id": 1, "text": "下午三点"}] + [{"id": 1, "text": "下午三点"}] * 30
+        calls = []
+
+        def call(method, path, body):
+            calls.append(path)
+            if not states:
+                raise OSError("星期五关了")
+            return states.pop(0)
+
+        def sleep(seconds):
+            now[0] += seconds
+        alive = [True]
+        with mock.patch.object(friday_subtitle, "GIVE_UP_SECONDS", 1):
+            def connect():
+                return call
+            window = Window()
+            original = friday_subtitle.render
+            friday_subtitle.render = lambda text, accent=None: original(text)
+            try:
+                with mock.patch.object(friday_subtitle, "POLL_SECONDS", 0.25):
+                    def sleep_and_die(seconds):
+                        sleep(seconds)
+                        if now[0] > 12:
+                            alive[0] = False
+                    friday_subtitle.run_process(Path("."), 1, connect=connect, parent_alive=lambda: alive[0],
+                                                window=window, sleep=sleep_and_die, clock=lambda: now[0])
+            finally:
+                friday_subtitle.render = original
+        self.assertEqual(len(shown), 1)  # 同一句只显示一次
+        self.assertTrue(hidden and hidden[0] < 6)  # 几秒后自己收起来
+        self.assertEqual(calls[0], "/api/subtitle")
+
+    def test_show_subtitle_only_while_gaming(self):
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        started = []
+        session.subtitle_proc = SimpleNamespace(running=False, start=lambda: started.append(1))
+        with mock.patch.object(app.os, "name", "nt"), mock.patch.object(friday_care, "_now_playing", None):
+            app.show_subtitle(session, "好")
+        self.assertIsNone(getattr(session, "subtitle", None))  # 没在打游戏:不显示
+        with mock.patch.object(app.os, "name", "nt"), mock.patch.object(friday_care, "_now_playing", "Apex"), \
+                mock.patch.dict(os.environ, {"FRIDAY_SUBTITLES": "on"}):
+            app.show_subtitle(session, "下午三点")
+            app.show_subtitle(session, "好的")
+            time.sleep(0.05)
+        self.assertEqual(session.subtitle["id"], 2)
+        self.assertEqual(session.subtitle["text"], "好的")
+        self.assertTrue(started)
 
 
 class LedgerTest(TempDirTest):

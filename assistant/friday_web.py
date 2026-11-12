@@ -345,6 +345,7 @@ class WebContext:
         self.orb_action: Callable[[str], None] | None = None  # 小光球被点了:click / open / hide
         self.dashboard = None  # 主画面仪表板(friday_dashboard.Dashboard)
         self.history: Callable[[str, str], dict] | None = None  # 聊天记录(关键词, 日期)
+        self.subtitle_state: Callable[[], dict] | None = None  # 游戏字幕小程序来拿现在要显示的字
         self.spotify_callback: Callable[[dict], str] | None = None  # Spotify 登录跳回来
 
     def locked(self) -> bool:
@@ -444,6 +445,8 @@ def make_handler(ctx: WebContext):
                 return self._json(423, {"error": "locked"})
             if url.path == "/api/dashboard":
                 return self._json(200, ctx.dashboard.data() if ctx.dashboard is not None else {})
+            if url.path == "/api/subtitle":
+                return self._json(200, ctx.subtitle_state() if ctx.subtitle_state is not None else {})
             if url.path == "/api/history":
                 if ctx.history is None:
                     return self._json(200, {"days": [], "items": [], "total": 0})

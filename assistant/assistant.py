@@ -1935,7 +1935,8 @@ def ptt_state(session) -> dict | None:
                         "custom": friday_ptt.key_info(key, which)[0] if key.startswith("vk:") else ""}
     import friday_audio
 
-    return {**state["ptt"], "keys": keys, "shot": state["shot"], "duck": friday_audio.duck_enabled()}
+    return {**state["ptt"], "keys": keys, "shot": state["shot"], "duck": friday_audio.duck_enabled(),
+            "subtitles": subtitles_enabled()}
 
 
 def start_ptt(session, ctx, events: queue.Queue, voice_module) -> None:
@@ -1972,6 +1973,8 @@ def start_ptt(session, ctx, events: queue.Queue, voice_module) -> None:
         threading.Thread(target=work, daemon=True, name="friday-ptt-ask").start()
 
     session.ptt_approver = ctx.approver
+    session.subtitle_ctx = ctx
+    ctx.subtitle_state = lambda: getattr(session, "subtitle", None) or {}
     session.ptt = friday_ptt.PushToTalk(
         on_audio, on_status=lambda text, failed: session.hub.broadcast({"type": "error" if failed else "status",
                                                                           "text": "🎙 " + text}),
@@ -2011,8 +2014,30 @@ def ptt_heard(session, approver, events: queue.Queue, text: str, confidence: flo
     events.put(("ptt", text))
 
 
+def subtitles_enabled() -> bool:
+    return os.environ.get("FRIDAY_SUBTITLES", "on") != "off"
+
+
+def show_subtitle(session, text: str) -> None:
+    """打游戏时:回答也在画面下方显示几秒(另一个小程序画,点不到、不抢焦点)。"""
+    import friday_care
+
+    if not text or os.name != "nt" or not subtitles_enabled() or not friday_care.playing():
+        return
+    session.subtitle_seq = getattr(session, "subtitle_seq", 0) + 1
+    ctx = getattr(session, "subtitle_ctx", None)
+    accent = ctx.activity.get("accent", "") if ctx is not None else ""
+    session.subtitle = {"id": session.subtitle_seq, "text": str(text)[:600], "accent": accent}
+    proc = getattr(session, "subtitle_proc", None)
+    if proc is None:
+        proc = session.subtitle_proc = OrbProcess(getattr(session, "data_dir", "."), script="friday_subtitle.py")
+    if not proc.running:
+        threading.Thread(target=lambda: _quietly(proc.start), daemon=True, name="friday-subtitle-start").start()
+
+
 def ptt_say(session, text: str) -> None:
     """按住说话时要马上读的一句话(窗口开着在窗口里读,关着用电脑直接读,不等它读完)。"""
+    show_subtitle(session, text)
     if session.hub.connected:
         session.speak(text)
         return
@@ -2136,9 +2161,10 @@ def ptt_answer(session, text: str) -> None:
               "要打开程序或网页就直接打开,会自动在后台开,游戏不会被切掉。回答要短,适合听。]") if game else ""
     try:
         if session.hub.connected:
-            session.ask(text, source="ptt", speak=True, files=files, prefix=prefix)
+            show_subtitle(session, session.ask(text, source="ptt", speak=True, files=files, prefix=prefix))
             return
         reply = session.ask(text, source="ptt", speak=False, files=files, prefix=prefix)
+        show_subtitle(session, reply)
     finally:
         if approver is not None:
             approver.voice = None
@@ -2649,6 +2675,11 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
             save_env_value(env, key, value)
             os.environ[key] = value
         done.append("家里的灯联动设好了")
+    if "subtitles" in payload:
+        on = bool(payload["subtitles"])
+        save_env_value(env, "FRIDAY_SUBTITLES", "on" if on else "off")
+        os.environ["FRIDAY_SUBTITLES"] = "on" if on else "off"
+        done.append("打游戏时回答也会在画面下方显示字幕" if on else "不显示游戏字幕了")
     if "ptt_duck" in payload:
         on = bool(payload["ptt_duck"])
         save_env_value(env, "FRIDAY_PTT_DUCK", "on" if on else "off")
@@ -3911,13 +3942,14 @@ def start_tapo(session, toolbox, install: bool = False) -> str | None:
 class OrbProcess:
     """桌面小光球在另一个小程序里跑:它卡住也只有它自己卡,不会拖住星期五。"""
 
-    def __init__(self, data_dir: str, launch=None) -> None:
+    def __init__(self, data_dir: str, launch=None, script: str = "friday_floatorb.py") -> None:
         self.data_dir = data_dir
         self.proc = None
+        self.script = script  # 字幕也用同一套:friday_subtitle.py
         self.launch = launch or self._launch
 
     def _launch(self):
-        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "friday_floatorb.py")
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), self.script)
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         return subprocess.Popen([sys.executable, script, self.data_dir, str(os.getpid())],
                                 cwd=os.path.dirname(script), creationflags=flags,
@@ -4421,6 +4453,7 @@ def run_web(args) -> None:
     events: queue.Queue = queue.Queue()
     session = WebSession(assistant, persona, hub, voice_module.synthesize_mp3, startup_error)
     session.env_file = args.env_file  # 要早设:启动时好几个功能都靠它存设定
+    session.data_dir = data_dir
     session.meter = meter
     session.router = router
     session.call_me = call_me
@@ -4678,6 +4711,8 @@ def run_web(args) -> None:
         friday_guard.write_heartbeat(Path(data_dir), "restarting" if session.restart else "quit")
         if getattr(session, "floatorb", None) is not None:
             _quietly(session.floatorb.stop)  # 小光球跟着关(重开后会再开)
+        if getattr(session, "subtitle_proc", None) is not None:
+            _quietly(session.subtitle_proc.stop)
         session.wake.stop()
         if session.cloud is not None:
             session.cloud.stop()
