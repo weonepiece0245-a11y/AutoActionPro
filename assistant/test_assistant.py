@@ -6325,7 +6325,7 @@ class PushToTalkTest(unittest.TestCase):
     def test_ptt_answer_speaks_without_window(self):
         session = app.WebSession(None, app.default_persona(), friday_web.Hub())
         asked, spoken = [], []
-        session.ask = lambda text, source, speak, files=None: asked.append((text, source, speak)) or "现在 3 点"
+        session.ask = lambda text, source, speak, files=None, prefix="": asked.append((text, source, speak)) or "现在 3 点"
         session.local_speaker = SimpleNamespace(speak=spoken.append)
         app.ptt_answer(session, "几点了")  # 窗口关着:用电脑直接读
         self.assertEqual(asked, [("几点了", "ptt", False)])
@@ -6373,7 +6373,7 @@ class PushToTalkTest(unittest.TestCase):
         session.speak = said.append
         session.hub.subscribe()
 
-        def ask(text, source, speak, files=None):
+        def ask(text, source, speak, files=None, prefix=""):
             seen.append(session.ptt_approver.voice is not None)
             session.ptt_approver.voice("关机")
             return "好"
@@ -6409,7 +6409,7 @@ class PushToTalkTest(unittest.TestCase):
         self.assertEqual(Image.open(io.BytesIO(data)).size, (1568, 882))  # 缩小,省钱
         session = app.WebSession(None, app.default_persona(), friday_web.Hub())
         sent = []
-        session.ask = lambda text, source, speak, files=None: sent.append(files) or "好"
+        session.ask = lambda text, source, speak, files=None, prefix="": sent.append(files) or "好"
         session.local_speaker = SimpleNamespace(speak=lambda t: None)
         session.pending_shot = (time.monotonic(), data)
         app.ptt_answer(session, "这个任务怎么过")
@@ -6874,6 +6874,63 @@ class DiscordVoiceTest(unittest.TestCase):
         self.assertTrue(voice.owner_left(42, "other room"))
         self.assertFalse(voice.owner_left(42, "room"))
         self.assertFalse(voice.owner_left(7, None))
+
+
+class KeepGameFrontTest(unittest.TestCase):
+    """打游戏时叫星期五开东西:新窗口跳出来就缩下去,游戏放回最前面;不在打游戏就不管。"""
+
+    class Api:
+        def __init__(self, front):
+            self.front = front
+            self.log = []
+
+        def foreground(self):
+            return self.front
+
+        def exe(self, hwnd):
+            return {1: "r5apex.exe", 2: "chrome.exe"}.get(hwnd, "")
+
+        def minimize(self, hwnd):
+            self.log.append(("min", hwnd))
+
+        def bring_back(self, hwnd):
+            self.log.append(("back", hwnd))
+            self.front = hwnd
+
+    def run_guard(self, playing, front, jump_to=None):
+        api = self.Api(front)
+        now = [0.0]
+        steps = []
+
+        def sleep(seconds):
+            now[0] += seconds
+            if jump_to and len(steps) == 2:
+                api.front = jump_to  # 浏览器开起来抢到最前面
+            steps.append(1)
+        keeper = friday_care.ForegroundKeeper(api, clock=lambda: now[0], sleep=sleep)
+        started = []
+        with mock.patch.object(friday_care, "_now_playing", playing), \
+                mock.patch.object(friday_care.threading if hasattr(friday_care, "threading") else __import__("threading"),
+                                  "Thread", lambda target, **kw: SimpleNamespace(start=lambda: (started.append(1), target()))):
+            result = keeper.guard(seconds=2)
+        return result, api.log
+
+    def test_new_window_goes_back_down(self):
+        result, log = self.run_guard("Apex", front=1, jump_to=2)
+        self.assertTrue(result)
+        self.assertEqual(log[:2], [("min", 2), ("back", 1)])
+
+    def test_not_playing_or_not_in_game(self):
+        self.assertEqual(self.run_guard(None, front=1, jump_to=2), (False, []))
+        self.assertEqual(self.run_guard("Apex", front=2, jump_to=1), (False, []))  # 你已经切到浏览器:不管
+
+    def test_show_desktop_refused_while_playing(self):
+        computer = friday_pc.Computer() if hasattr(friday_pc, "Computer") else None
+        if computer is None:
+            self.skipTest("没有 Computer")
+        pc = SimpleNamespace(hotkey=lambda keys: self.fail("不该按 Win+D"))
+        with mock.patch.object(friday_care, "_now_playing", "Apex"):
+            self.assertIn("没有显示桌面", computer._do_show_desktop(pc, "", None))
 
 
 class LedgerTest(TempDirTest):
@@ -8170,6 +8227,16 @@ class CleanupTest(TempDirTest):
         items = friday_cleanup.candidates(result)
         self.assertEqual([(Path(i["path"]).name, i["kind"]) for i in items], [("movie (1).mp4", "dup"), ("big.iso", "big")])
         self.assertIn("1 组一模一样的文件", friday_cleanup.describe(result))
+
+    def test_overlapping_folders_never_make_a_file_its_own_duplicate(self):
+        """几个要扫的文件夹重叠(例如桌面在 OneDrive 里面):同一个文件只算一次,不会把唯一那份当成多余的。"""
+        root = Path(self.tmp, "Docs")
+        (root / "Desktop").mkdir(parents=True)
+        (root / "Desktop" / "only.mp4").write_bytes(os.urandom(2 * 1024 * 1024))
+        result = friday_cleanup.scan([root, root / "Desktop", root])
+        self.assertEqual(result["dups"], [])
+        self.assertEqual(result["files"], 1)
+        self.assertEqual(friday_cleanup.candidates(result), [])
 
     def test_recycle_only_listed_files(self):
         root = self.make_files()
@@ -9924,6 +9991,11 @@ class TakeoverNoticeTest(unittest.TestCase):
 
 class OpenAppReliablyTest(unittest.TestCase):
     """打开程序后确认真的开起来了;开始菜单打不开就换办法;不会乱打字。"""
+
+    def setUp(self):
+        patcher = mock.patch.object(friday_care, "_now_playing", None)  # 别的测试留下的“在打游戏”不算
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     class PC:
         def __init__(self, start_output="Spotify|SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify", appear_after=None,

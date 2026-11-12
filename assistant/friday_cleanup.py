@@ -53,6 +53,7 @@ def scan(roots: list[Path], clock=time.monotonic) -> dict:
     """-> {"big": [{path, size, modified}], "dups": [{size, paths}], "files": n, "partial": bool}"""
     started = clock()
     files: list[tuple[Path, int, float]] = []
+    seen: set = set()  # 同一个文件只算一次(几个文件夹重叠时,不会变成“跟自己重复”,把唯一那份当成多余的)
     partial = False
     for root in roots:
         if not Path(root).is_dir():
@@ -67,6 +68,10 @@ def scan(roots: list[Path], clock=time.monotonic) -> dict:
                     stat = path.stat()
                 except OSError:
                     continue
+                key = (stat.st_dev, stat.st_ino) if stat.st_ino else os.path.normcase(os.path.realpath(path))
+                if key in seen:
+                    continue
+                seen.add(key)
                 files.append((path, stat.st_size, stat.st_mtime))
                 if len(files) >= MAX_FILES or clock() - started > TIME_LIMIT:
                     partial = True

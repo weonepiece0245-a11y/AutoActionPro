@@ -242,6 +242,14 @@ class WindowsPC:
             return None
 
     def open(self, target: str) -> None:
+        import friday_care
+
+        if friday_care.playing():  # 打游戏时:在后台开(缩小着开,跳出来也马上缩回去),游戏不会被切掉
+            friday_care.keep_game_front()
+            import ctypes
+
+            if ctypes.windll.shell32.ShellExecuteW(None, "open", target, None, None, 7) > 32:  # SW_SHOWMINNOACTIVE
+                return
         os.startfile(target)  # noqa: S606
 
     def run(self, args: list[str]) -> tuple[int, str]:
@@ -709,7 +717,10 @@ class Computer:
                 if result:
                     return result
         safe_name = re.fullmatch(r"[0-9A-Za-z一-鿿 ._+&-]{1,40}", value) is not None  # 只打程序名,不打命令、路径、网址
-        if check and safe_name and approve is not _allow and hasattr(pc, "foreground_exe"):
+        import friday_care
+
+        gaming = friday_care.playing()
+        if check and safe_name and approve is not _allow and hasattr(pc, "foreground_exe") and not gaming:
             if approve(f"用开始菜单搜索打开“{value}”(会按 Win 键、打字“{value}”、按回车;过程中别动键盘)"):
                 if self._start_search(pc, value):
                     result = self._wait_open(pc, value, hints or [_token(value)], before)
@@ -718,6 +729,8 @@ class Computer:
                 else:
                     return "开始菜单没弹出来,我就没打字(免得打进别的窗口)。你自己在开始菜单点一下试试。"
         if not found:
+            if gaming:
+                return f"开始菜单里没有找到“{value}”。你在打游戏,我就不用开始菜单搜了(会把游戏切掉),打完再叫我。"
             return f"开始菜单里没有找到名字包含“{value}”的程序,可以换个叫法"
         return (f"已经叫 Windows 打开 {name},但 {OPEN_WAIT:.0f} 秒内没看到它开起来。可能还在慢慢启动(等一下再看),"
                 "或者它出了问题;你自己在开始菜单点一下试试。")
@@ -830,6 +843,10 @@ class Computer:
         return f"已切到:{title}"
 
     def _do_show_desktop(self, pc, value, approve, **_):
+        import friday_care
+
+        if friday_care.playing():
+            return "你在打游戏,我没有显示桌面(会把游戏缩小)。要开什么直接叫我,我会在后台开。"
         pc.hotkey([KEY_CODES["win"], ord("D")])
         return "已显示桌面"
 

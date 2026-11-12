@@ -205,6 +205,95 @@ def display_requested() -> bool:
         return False
 
 
+# ======================== 打游戏时开东西不抢走游戏 ========================
+
+_now_playing: str | None = None  # 正在玩的游戏(主动关心每 30 秒更新)
+
+
+def playing() -> str | None:
+    """现在在打什么游戏;没在打就 None。"""
+    return _now_playing
+
+
+class ForegroundKeeper:
+    """打游戏时叫星期五开东西:新开的窗口跳到前面的话,把它缩下去,游戏放回最前面(几秒内)。
+
+    api 要有 foreground() / minimize(hwnd) / bring_back(hwnd) / exe(hwnd);测试时换成假的。
+    """
+
+    def __init__(self, api=None, clock=None, sleep=None) -> None:
+        import time
+
+        self.api = api if api is not None else WindowsWindows()
+        self.clock = clock or time.monotonic
+        self.sleep = sleep or time.sleep
+
+    def guard(self, seconds: float = 8.0) -> bool:
+        """在后台看着;开始时最前面是游戏才看。返回有没有开始看。"""
+        if not playing():
+            return False
+        game = self.api.foreground()
+        if not game or (self.api.exe(game) or "") in NOT_GAMES:
+            return False  # 最前面不是游戏(你切出来了):不用管
+
+        def run() -> None:
+            end = self.clock() + seconds
+            while self.clock() < end:
+                front = self.api.foreground()
+                if front and front != game:
+                    self.api.minimize(front)
+                    self.api.bring_back(game)
+                self.sleep(0.2)
+        import threading
+
+        threading.Thread(target=run, daemon=True, name="friday-keep-game").start()
+        return True
+
+
+class WindowsWindows:
+    def __init__(self) -> None:
+        import ctypes
+
+        self.user32, self.kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+        self.user32.GetForegroundWindow.restype = ctypes.c_void_p
+        for name in ("ShowWindow", "IsIconic", "SetForegroundWindow", "BringWindowToTop"):
+            getattr(self.user32, name).argtypes = [ctypes.c_void_p] + ([ctypes.c_int] if name == "ShowWindow" else [])
+        self.user32.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+
+    def foreground(self):
+        return self.user32.GetForegroundWindow()
+
+    def exe(self, hwnd) -> str:
+        return foreground_app() or ""
+
+    def minimize(self, hwnd) -> None:
+        self.user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE:新开的东西缩到工作列,网页照样有声音
+
+    def bring_back(self, game) -> None:
+        """把游戏放回最前面(星期五不在最前面,要借一下现在最前面那个窗口的输入线程才放得回去)。"""
+        front = self.user32.GetForegroundWindow()
+        front_thread = self.user32.GetWindowThreadProcessId(front, None)
+        me = self.kernel32.GetCurrentThreadId()
+        attached = bool(front_thread) and front_thread != me and self.user32.AttachThreadInput(me, front_thread, True)
+        try:
+            if self.user32.IsIconic(game):
+                self.user32.ShowWindow(game, 9)  # SW_RESTORE
+            self.user32.BringWindowToTop(game)
+            self.user32.SetForegroundWindow(game)
+        finally:
+            if attached:
+                self.user32.AttachThreadInput(me, front_thread, False)
+
+
+def keep_game_front(seconds: float = 8.0) -> bool:
+    if os.name != "nt" or not playing():
+        return False
+    try:
+        return ForegroundKeeper().guard(seconds)
+    except Exception:
+        return False
+
+
 def game_name(exe: str, fullscreen: bool, path: str | None = None, known=None) -> str | None:
     """认识的游戏用名字(学过的、装在游戏文件夹里的也算);不认识但全屏的程序也当游戏(用程序名)。"""
     exe = (exe or "").lower()
@@ -321,11 +410,13 @@ class Care:
         return self.say(text)
 
     def _watch_game(self, game: str | None, now: float) -> str | None:
+        global _now_playing
         if game:
             self.game_seen = now
             if self.game != game:
                 started = self.game is None
                 self.game = game
+                _now_playing = game
                 if started:
                     try:
                         self.on_game(game)
@@ -335,6 +426,7 @@ class Care:
         if self.game is None or now - self.game_seen < GAME_GRACE:
             return None
         finished, self.game = self.game, None
+        _now_playing = None
         try:
             self.on_game_end(finished)
         except Exception:

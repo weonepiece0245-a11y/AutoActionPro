@@ -2091,11 +2091,17 @@ def ptt_answer(session, text: str) -> None:
         approver.voice = lambda action: ptt_say(
             session, f"要我{action[:80]}吗?按住说“允许”或者“不要”。")
     files = take_pending_shot(session)
+    import friday_care
+
+    game = friday_care.playing()
+    # 打游戏时问的:告诉 Claude 别缩小游戏、别切窗口(要开的东西会自动在后台开)
+    prefix = (f"[用户正在玩{game},用按住说话问的。不要缩小游戏、不要显示桌面、不要切换窗口;"
+              "要打开程序或网页就直接打开,会自动在后台开,游戏不会被切掉。回答要短,适合听。]") if game else ""
     try:
         if session.hub.connected:
-            session.ask(text, source="ptt", speak=True, files=files)
+            session.ask(text, source="ptt", speak=True, files=files, prefix=prefix)
             return
-        reply = session.ask(text, source="ptt", speak=False, files=files)
+        reply = session.ask(text, source="ptt", speak=False, files=files, prefix=prefix)
     finally:
         if approver is not None:
             approver.voice = None
