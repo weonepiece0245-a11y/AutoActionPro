@@ -6,7 +6,7 @@ const orbState = { mode: "idle", level: 0 };
 // ---------- 3D 全息球(CDN 打不开时用 CSS 版本) ----------
 import("./orb.js")
   .then((m) => m.start($("orb"), orbState))
-  .catch(() => $("cssOrb").classList.add("on"));
+  .catch(() => { $("cssOrb").classList.add("on"); $("orbTools").hidden = true; });
 
 // 光球亮度(左边“系统”里的滑杆,记在本机)
 function setBrightness(percent) {
@@ -24,6 +24,35 @@ $("brightness").addEventListener("input", (e) => {
   setBrightness(percent);
   try { localStorage.setItem("friday-brightness", String(percent)); } catch {}
 });
+
+// 光球的样子、大小(齿轮设定 → 外观 / 光球旁边的按钮,记在本机)
+const ORB_STYLES = [["classic", "经典"], ["reactor", "反应堆"], ["galaxy", "星系"], ["wave", "声波环"], ["atom", "原子"]];
+function setOrbStyle(name, announce = false) {
+  if (!ORB_STYLES.some(([k]) => k === name)) name = "classic";
+  orbState.style = name;
+  if (orbState.setStyle) orbState.setStyle(name);
+  $("setOrbStyle").value = name;
+  try { localStorage.setItem("friday-orb-style", name); } catch {}
+  if (announce) {
+    const label = $("orbStyleName");
+    label.textContent = ORB_STYLES.find(([k]) => k === name)[1];
+    label.classList.add("show");
+    clearTimeout(setOrbStyle.timer);
+    setOrbStyle.timer = setTimeout(() => label.classList.remove("show"), 1400);
+  }
+}
+try { orbState.style = localStorage.getItem("friday-orb-style") || "classic"; } catch { orbState.style = "classic"; }
+try { orbState.zoom = Number(localStorage.getItem("friday-orb-zoom")) || 1; } catch { orbState.zoom = 1; }
+orbState.onView = (zoom) => { try { localStorage.setItem("friday-orb-zoom", zoom.toFixed(2)); } catch {} };
+$("setOrbStyle").value = orbState.style;
+$("setOrbStyle").addEventListener("change", (e) => setOrbStyle(e.target.value));
+$("orbStyleBtn").onclick = () => {
+  const i = ORB_STYLES.findIndex(([k]) => k === orbState.style);
+  setOrbStyle(ORB_STYLES[(i + 1) % ORB_STYLES.length][0], true);
+};
+$("orbZoomIn").onclick = () => orbState.zoomBy && orbState.zoomBy(1.15);
+$("orbZoomOut").onclick = () => orbState.zoomBy && orbState.zoomBy(1 / 1.15);
+$("orbReset").onclick = () => orbState.resetView && orbState.resetView();
 
 // 颜色主题(齿轮设定 → 外观,记在本机)
 const THEMES = {

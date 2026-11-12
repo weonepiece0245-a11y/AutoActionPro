@@ -20,6 +20,13 @@
   <div class="takeover-bar" id="takeoverBar" hidden role="alert">🖱 星期五正在操控鼠标键盘:<span id="takeoverText"></span> —— 你动一下鼠标,它就会马上停下</div>
 <canvas id="orb" aria-hidden="true"></canvas>
 <div class="css-orb" id="cssOrb" aria-hidden="true"><i></i><i></i><i></i></div>
+<div class="orb-tools" id="orbTools" role="toolbar" aria-label="光球">
+  <button type="button" class="orb-tool" id="orbStyleBtn" title="换光球的样子" aria-label="换光球的样子">🎨</button>
+  <button type="button" class="orb-tool" id="orbZoomIn" title="放大(也可以在光球上滚滚轮)" aria-label="放大">＋</button>
+  <button type="button" class="orb-tool" id="orbZoomOut" title="缩小" aria-label="缩小">−</button>
+  <button type="button" class="orb-tool" id="orbReset" title="转回正面、原来大小(也可以双击光球旁边的空白)" aria-label="复原">⟲</button>
+  <span class="orb-tool-name" id="orbStyleName" aria-live="polite"></span>
+</div>
 <div class="grid-floor" aria-hidden="true"></div>
 <div class="scanlines" aria-hidden="true"></div>
 
@@ -342,6 +349,9 @@
       <h3>外观</h3>
       <div class="set-row"><label for="setTheme">颜色主题</label>
         <select class="mini-select" id="setTheme"><option value="cyan">青蓝(默认)</option><option value="ironman">钢铁红金</option><option value="violet">紫色</option><option value="matrix">绿色</option></select></div>
+      <div class="set-row"><label for="setOrbStyle">光球样子</label>
+        <select class="mini-select" id="setOrbStyle"><option value="classic">经典(全息球)</option><option value="reactor">反应堆</option><option value="galaxy">星系</option><option value="wave">声波环</option><option value="atom">原子</option></select></div>
+      <div class="set-note">在光球上滚滚轮放大缩小,按住拖动可以上下左右转,双击旁边的空白转回正面。</div>
       <div class="set-row"><label for="brightness">光球亮度</label>
         <span class="set-ctl bright"><input type="range" id="brightness" min="20" max="120" step="5" value="70"><output id="brightOut">70%</output></span></div>
       <div class="set-row" id="orbRow" hidden><label for="setOrb">桌面小光球(只有一颗光球浮在所有程序最上面,点一下说话、右键收起)</label><input type="checkbox" class="switch" id="setOrb"></div>
