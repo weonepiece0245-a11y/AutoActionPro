@@ -220,25 +220,38 @@ class GameBoost:
     def active(self) -> bool:
         return self.state is not None
 
-    def start(self, game: str = "游戏") -> str:
-        """开游戏了:游戏优先、后台让路、高性能电源。返回给你看的一句话(什么都没改就是空的)。"""
+    def start(self, game: str = "游戏", game_exe: str = "") -> str:
+        """开游戏了:游戏优先、后台让路、高性能电源。返回给你看的一句话(什么都没改就是空的)。
+
+        game_exe:看到在玩的那个程序名;有的话按名字找游戏(玩家切出去了也不会把别的程序当成游戏)。
+        """
         with self.lock:
             if self.state is not None:
                 return ""
             system = self._sys()
             state = {"game": game, "time": time.time(), "changed": [], "power": None}
-            game_pid = system.foreground_pid()
             names = dict(system.processes())
+            want = _base(game_exe)
+            if want:
+                game_pids = [pid for pid, exe in names.items() if _base(exe) == want]
+            else:
+                front = system.foreground_pid()
+                game_pids = [front] if front else []
+            game_pids = [pid for pid in game_pids if pid != self.own_pid and _base(names.get(pid, "")) not in NEVER]
             done = []
-            if game_pid and game_pid != self.own_pid:
+            raised = False
+            for game_pid in game_pids:
                 old = system.get_priority(game_pid)
                 if old in (NORMAL, BELOW_NORMAL, IDLE) and system.set_priority(game_pid, HIGH):
                     state["changed"].append([game_pid, names.get(game_pid, ""), old])
-                    done.append(f"{game} 设成高优先级")
+                    raised = True
+            if raised:
+                done.append(f"{game} 设成高优先级")
+            game_pid = game_pids[0] if game_pids else None
             slowed = []
             for pid, exe in names.items():
                 base = _base(exe)
-                if pid in (game_pid, self.own_pid) or base not in YIELD or base in NEVER:
+                if pid in game_pids or pid == self.own_pid or base not in YIELD or base in NEVER:
                     continue
                 old = system.get_priority(pid)
                 if old in (NORMAL, ABOVE_NORMAL) and system.set_priority(pid, BELOW_NORMAL):

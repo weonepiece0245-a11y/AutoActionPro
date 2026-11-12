@@ -137,6 +137,12 @@ def rollback(assistant_dir: Path, clock=time.time, max_age: float = ROLLBACK_WIN
     for relative in manifest.get("changed") or []:
         target = root / relative
         try:
+            target.resolve().relative_to(root.resolve())  # 清单被改过也不会动到外面的文件
+            if PurePosixPath(relative).name in PROTECTED:
+                continue
+        except ValueError:
+            continue
+        try:
             if relative in added:
                 target.unlink(missing_ok=True)
             else:

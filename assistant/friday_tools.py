@@ -1608,7 +1608,9 @@ class Toolbox:
             if action == "not_game" and self.known_games is not None:
                 return self.known_games.mark_not_game(name), False
             if action == "wishlist" and self.wishlist is not None:
-                return self.wishlist.describe(), False
+                from friday_security import mark_external
+
+                return mark_external(self.wishlist.describe()), False  # 游戏名是 Steam 网站上的文字
         except ValueError as e:
             return str(e), True
         return "这个功能在这台电脑上没开(温度要 Windows,愿望单要先连 Steam)", True

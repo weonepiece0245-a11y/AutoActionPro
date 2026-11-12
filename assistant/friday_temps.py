@@ -107,6 +107,9 @@ def lhm_wmi_if_running() -> list[tuple[str, str, float]]:
     return lhm_wmi() if lhm_running() else []
 
 
+lhm_wmi_if_running.slow = True  # 每次要开一个 PowerShell
+
+
 class Temps:
     def __init__(self, gpu: Callable[[], list[dict]] | None = None, lhm: list[Callable[[], list]] | None = None,
                  clock: Callable[[], float] = time.time) -> None:
@@ -130,6 +133,8 @@ class Temps:
 
     def read(self, max_age: float = 20) -> dict:
         """{"cpu": °C 或 None, "gpu": °C 或 None, "gpu_name": ..., "lhm": 有没有读到 Libre Hardware Monitor}。"""
+        if self.lhm_readers and getattr(self.lhm_readers[0], "slow", False) and self.last.get("lhm"):
+            max_age = max(max_age, 60)
         if self.last and self.clock() - self.read_at < max_age:
             return self.last
         sensors = self._sensors()

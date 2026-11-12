@@ -46,6 +46,8 @@ class Wishlist:
         self.sales: list[dict] = []
 
     def _save(self) -> None:
+        if len(self.names) > 500:  # 只留最近查过的
+            self.names = dict(list(self.names.items())[-500:])
         temp = self.path.with_name(f"{self.path.name}.{threading.get_ident()}.tmp")
         temp.write_text(json.dumps({"names": self.names, "told": self.told, "checked": self.checked},
                                    ensure_ascii=False), encoding="utf-8")

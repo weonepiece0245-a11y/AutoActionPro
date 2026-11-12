@@ -2641,8 +2641,9 @@ def start_care(session, ctx, hub, toolbox: Toolbox, voice_module, data_dir: str 
     def boost_game(game: str) -> None:
         if not friday_gameboost.enabled():
             return
+        care_now = getattr(session, "care", None)
         try:
-            text = boost.start(game)
+            text = boost.start(game, getattr(care_now, "app_now", "") or "")
         except Exception as e:
             print(f"游戏优化没做成:{type(e).__name__}: {e}", flush=True)
             return
@@ -3283,7 +3284,7 @@ def start_dashboard(session, toolbox, ctx) -> None:
             return None
         temps = getattr(session, "temps", None)
         if temps is not None:
-            t = temps.read()
+            t = temps.read(max_age=30)
             stats.update({"cpu_temp": t.get("cpu"), "gpu_temp": t.get("gpu")})
         return stats
 
@@ -3954,6 +3955,7 @@ def run_web(args) -> None:
 
     events: queue.Queue = queue.Queue()
     session = WebSession(assistant, persona, hub, voice_module.synthesize_mp3, startup_error)
+    session.env_file = args.env_file  # 要早设:启动时好几个功能都靠它存设定
     session.meter = meter
     session.router = router
     session.call_me = call_me
@@ -4181,15 +4183,15 @@ def run_web(args) -> None:
     import friday_habits
 
     toolbox.habits = session.quick.habits = friday_habits.Habits(os.path.join(data_dir, "friday_habits.json"))
-    start_network(session, toolbox, data_dir)
-    start_fx(session, toolbox, data_dir)
-    start_interpreter(session, ctx)
-    start_reader(session, ctx)
-    start_folder_backup(session, toolbox, data_dir)
-    start_connected_apps(session, toolbox, ctx, data_dir, ctx.port)
+    for name, step in (("网络", lambda: start_network(session, toolbox, data_dir)),
+                       ("汇率", lambda: start_fx(session, toolbox, data_dir)),
+                       ("口译", lambda: start_interpreter(session, ctx)),
+                       ("读给我听", lambda: start_reader(session, ctx)),
+                       ("文件夹备份", lambda: start_folder_backup(session, toolbox, data_dir)),
+                       ("连接的应用", lambda: start_connected_apps(session, toolbox, ctx, data_dir, ctx.port))):
+        _startup_step(session, name, step)
     _startup_step(session, "仪表板", lambda: start_dashboard(session, toolbox, ctx))
-    session.env_file = args.env_file
-    start_floatorb(session, ctx, data_dir)
+    _startup_step(session, "桌面小光球", lambda: start_floatorb(session, ctx, data_dir))
     if getattr(toolbox, "screen", None) is not None:
         toolbox.screen.on_change = lambda active, text: takeover_notice(session, active, text)
     if toolbox.google is not None:  # 登录了 Google:笔记同时抄到 Google 文档(在后台抄,不拖慢)

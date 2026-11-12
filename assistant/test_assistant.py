@@ -5797,6 +5797,17 @@ class GameBoostTest(TempDirTest):
         self.assertFalse(Path(self.tmp, friday_gameboost.STATE_FILE).exists())
         self.assertEqual(boost.stop(), "")
 
+    def test_boosts_game_by_name_not_whatever_is_in_front(self):
+        """审计:玩家切出去了(最前面是 Chrome),游戏优化也要找对游戏。"""
+        system = FakeBoostSystem()
+        system.foreground_pid = lambda: 200  # chrome 在最前面
+        system.procs[101] = "r5apex.exe"  # 游戏有两个程序
+        system.prio[101] = friday_gameboost.NORMAL
+        friday_gameboost.GameBoost(self.tmp, system=system, own_pid=900).start("Apex", "r5apex.exe")
+        self.assertEqual((system.prio[100], system.prio[101]), (friday_gameboost.HIGH,) * 2)
+        self.assertEqual(system.prio[200], friday_gameboost.BELOW_NORMAL)  # chrome 还是让路,不会被当成游戏
+        friday_gameboost._gaming.clear()
+
     def test_recover_after_crash(self):
         system = FakeBoostSystem()
         friday_gameboost.GameBoost(self.tmp, system=system, own_pid=900).start("Dota 2")
@@ -5992,6 +6003,22 @@ class TempsTest(unittest.TestCase):
         sensors = friday_temps.lhm_wmi(run=lambda cmd: json.dumps(rows))
         self.assertEqual(friday_temps._pick_cpu(sensors), 88.5)  # 先用 Package
 
+    def test_slow_wmi_reader_is_not_called_too_often(self):
+        calls, now = [], [0.0]
+
+        def wmi():
+            calls.append(1)
+            return [("CPU Package", "/intelcpu/0", 60.0)]
+        wmi.slow = True
+        temps = friday_temps.Temps(gpu=None, lhm=[wmi], clock=lambda: now[0])
+        temps.read()
+        now[0] += 30
+        temps.read(max_age=10)
+        self.assertEqual(len(calls), 1)  # PowerShell 一分钟最多开一次
+        now[0] += 31
+        temps.read(max_age=10)
+        self.assertEqual(len(calls), 2)
+
     def test_describe_and_alert(self):
         now = [1000.0]
         cpu = [[("Core (Tctl/Tdie)", "cpu", 95.0)]]
@@ -6020,8 +6047,9 @@ class FakeSampler:
     def __init__(self):
         self.t = {1: ["r5apex.exe", 0.0], 2: ["audiodg.exe", 0.0], 3: ["chrome.exe", 0.0], 99: ["pythonw.exe", 0.0]}
 
-    def cpu_times(self):
-        return {pid: (name, total) for pid, (name, total) in self.t.items()}
+    def cpu_times(self, skip=frozenset()):
+        self.skipped = skip
+        return {pid: (name, total) for pid, (name, total) in self.t.items() if name[:-4] not in skip}
 
     def own_memory(self):
         return 270.0
@@ -6051,6 +6079,8 @@ class GameReportTest(unittest.TestCase):
         self.assertNotIn("Chrome", text)
         self.assertNotIn("r5apex", text)
         self.assertEqual(report.describe(), text)
+        self.assertIn("r5apex", sampler.skipped)  # 不去打开游戏本身
+        self.assertIn("easyanticheat", sampler.skipped)  # 也不碰防作弊
 
     def test_short_game_not_reported(self):
         now = [0.0]
@@ -6138,6 +6168,9 @@ class WishlistTest(TempDirTest):
         text, failed = toolbox._gaming({"action": "wishlist"}, None)
         self.assertFalse(failed)
         self.assertIn("艾尔登法环", text)
+        import friday_security
+
+        self.assertEqual(text, friday_security.mark_external(toolbox.wishlist.describe()))  # 网站上的文字要标出来
         self.assertTrue(toolbox._gaming({"action": "temps"}, None)[1])  # 没有温度:说清楚
 
 
@@ -7748,6 +7781,20 @@ class SelfRescueTest(TempDirTest):
         later = time.time() + friday_update.ROLLBACK_WINDOW + 60
         self.assertFalse(friday_update.rollback(folder, clock=lambda: later))  # 用了很久都没事:不是更新的问题
         self.assertEqual((folder / "assistant.py").read_text(), "new")
+
+    def test_rollback_stays_inside_install_folder(self):
+        """审计:清单被改过也不会删到安装文件夹外面、或碰到私人文件。"""
+        folder = self.update_dir()
+        outside = Path(self.tmp, "outside.txt")
+        outside.write_text("keep")
+        backup = folder / friday_update.BACKUP_DIR
+        backup.mkdir()
+        (backup / "manifest.json").write_text(json.dumps({
+            "time": time.time(), "changed": ["../outside.txt", "assistant/.env"], "added": ["../outside.txt", "assistant/.env"],
+            "version": "", "used": False}))
+        self.assertTrue(friday_update.rollback(folder))
+        self.assertEqual(outside.read_text(), "keep")
+        self.assertEqual((folder / ".env").read_text(), "SECRET=mine")
 
     def test_guard_rollback_uses_script_folder(self):
         folder = self.update_dir()

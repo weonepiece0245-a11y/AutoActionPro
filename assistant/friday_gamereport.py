@@ -14,6 +14,8 @@ from typing import Callable
 
 MIN_SECONDS = 5 * 60
 BUSY_PERCENT = 3.0  # 平均用到整台电脑 3% 以上才算“比较忙”
+ANTI_CHEAT = {"easyanticheat", "easyanticheat_eos", "beservice", "vgc", "vgtray", "faceitclient", "faceit",
+              "eac_launcher", "battleye", "gameguard", "xigncode", "ace-base", "acetutor"}
 SKIP = {"system idle process", "[system process]", "idle", "memory compression", "registry", "secure system"}
 FRIENDLY = {
     "audiodg": "Windows 音频处理(偏高通常是音效软件,比如 Razer THX、音频增强)",
@@ -66,12 +68,12 @@ class WindowsSampler:
         self.kernel.CloseHandle.argtypes = [wintypes.HANDLE]
         self.cpus = os.cpu_count() or 1
 
-    def cpu_times(self) -> dict[int, tuple[str, float]]:
-        """{pid: (程序名, 一共用了几秒 CPU)}。"""
+    def cpu_times(self, skip: set[str] = frozenset()) -> dict[int, tuple[str, float]]:
+        """{pid: (程序名, 一共用了几秒 CPU)}。skip 里的程序(游戏本身、防作弊)不去打开。"""
         ctypes, wintypes = self.ctypes, self.wintypes
         found = {}
         for pid, name in self.system.processes():
-            if not pid:
+            if not pid or _base(name) in skip:
                 continue
             handle = self.kernel.OpenProcess(0x1000, False, pid)
             if not handle:
@@ -140,8 +142,9 @@ class GameReport:
                 return
             sampler = self._sam()
             now = self.clock()
+            skip = set(ANTI_CHEAT) | ({state["game_exe"]} if state["game_exe"] else set())
             try:
-                times = sampler.cpu_times()
+                times = sampler.cpu_times(skip=skip)
             except Exception:
                 times = {}
             cpus = self.cpus or getattr(sampler, "cpus", None) or os.cpu_count() or 1
