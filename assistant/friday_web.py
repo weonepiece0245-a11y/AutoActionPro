@@ -36,6 +36,9 @@ STATIC_FILES = {
 }
 APPROVAL_TIMEOUT = 300  # 秒:确认请求等这么久没人点,就当拒绝
 ALLOW_ALL_SECONDS = 10 * 60  # 点了“这段时间都允许”:只管 10 分钟,之后又会逐一询问
+VOICE_APPROVAL_TIMEOUT = 90  # 打游戏时用声音确认:等这么久没回答,就当拒绝
+VOICE_NO = re.compile(r"不要|不行|不可以|不用|不好|不对|不是|拒绝|取消|算了|别|停|no\b|nope", re.I)
+VOICE_YES = re.compile(r"允许|可以|好的?|确认|确定|同意|没问题|做吧|去吧|行|是的|对|yes|ok|okay", re.I)
 MAX_UPLOAD = 25 * 1024 * 1024
 MAX_ATTACHMENTS = 4
 HISTORY_TYPES = {"user", "done", "status", "error", "reminder", "cleared"}  # 重新打开窗口时补发的事件
@@ -240,6 +243,8 @@ class WebApprover:
         self.remote: Callable[[str], bool] | None = None
         self.lock = threading.Lock()
         self.pending: dict[str, list] = {}
+        self.voice: Callable[[str], None] | None = None  # 按住说话问的时候:把要确认的事读出来
+        self.voice_pending: str | None = None  # 正在等你用声音回答的那个请求
 
     def __call__(self, action: str) -> bool:
         if self.remote is not None:
@@ -266,20 +271,43 @@ class WebApprover:
         return self._ask(action, always=True)
 
     def _ask(self, action: str, always: bool) -> bool:
-        if self.hub.connected == 0:
-            return False  # 窗口没开,没人能确认
+        voice = self.voice
+        if self.hub.connected == 0 and voice is None:
+            return False  # 窗口没开,也不是按住说话问的:没人能确认
         request_id = uuid.uuid4().hex
         event = threading.Event()
         with self.lock:
             self.pending[request_id] = [event, None]
         self.hub.broadcast({"type": "approval", "id": request_id, "text": action, "always": always})
-        event.wait(self.timeout)
+        if voice is not None:  # 打游戏时:读出来问,按住说“允许”或“不要”
+            self.voice_pending = request_id
+            try:
+                voice(action)
+            except Exception:
+                pass
+        event.wait(VOICE_APPROVAL_TIMEOUT if voice is not None else self.timeout)
         with self.lock:
             answer = self.pending.pop(request_id, [None, None])[1]
+            if self.voice_pending == request_id:
+                self.voice_pending = None
         self.hub.broadcast({"type": "approval_done", "id": request_id, "answer": answer or "timeout"})
         if answer == "all" and not always:
             self.allow_until = self.clock() + ALLOW_ALL_SECONDS
         return answer in ("yes", "all")
+
+    def answer_by_voice(self, text: str) -> str | None:
+        """按住说话说的话:有在等声音确认就当成回答。返回 "yes" / "no" / "unclear";没在等返回 None。"""
+        request_id = self.voice_pending
+        if request_id is None:
+            return None
+        said = str(text or "").strip()
+        if VOICE_NO.search(said):
+            value = "no"
+        elif VOICE_YES.search(said):
+            value = "yes"
+        else:
+            return "unclear"
+        return value if self.answer(request_id, value) else None
 
     def answer(self, request_id: str, value: str) -> bool:
         with self.lock:

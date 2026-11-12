@@ -6335,6 +6335,54 @@ class PushToTalkTest(unittest.TestCase):
         self.assertEqual(asked[-1], ("几点了", "ptt", True))
         self.assertEqual(len(spoken), 1)
 
+    def test_voice_approval(self):
+        """按住说话问的事要你允许:读出来问,按住说“允许”或“不要”就好,不用切出游戏。"""
+        hub = friday_web.Hub()
+        approver = friday_web.WebApprover(hub, timeout=5)
+        self.assertFalse(approver("执行命令 dir"))  # 窗口没开、也不是按住说话:没人能确认
+        heard = []
+        approver.voice = heard.append
+        results = []
+        worker = threading.Thread(target=lambda: results.append(approver("执行命令 dir")))
+        worker.start()
+        for _ in range(100):
+            if approver.voice_pending:
+                break
+            time.sleep(0.01)
+        self.assertEqual(heard, ["执行命令 dir"])
+        self.assertEqual(approver.answer_by_voice("嗯那个"), "unclear")
+        self.assertEqual(approver.answer_by_voice("不可以"), "no")  # “不可以”里有“可以”:也算不要
+        worker.join(2)
+        self.assertEqual(results, [False])
+        self.assertIsNone(approver.voice_pending)
+        self.assertIsNone(approver.answer_by_voice("允许"))  # 没在等:当成平常的问题
+        worker = threading.Thread(target=lambda: results.append(approver.confirm("发邮件给老板")))
+        worker.start()
+        for _ in range(100):
+            if approver.voice_pending:
+                break
+            time.sleep(0.01)
+        self.assertEqual(approver.answer_by_voice("好的允许"), "yes")
+        worker.join(2)
+        self.assertEqual(results, [False, True])
+
+    def test_ptt_answer_turns_voice_approval_on_and_off(self):
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.ptt_approver = friday_web.WebApprover(session.hub)
+        said, seen = [], []
+        session.speak = said.append
+        session.hub.subscribe()
+
+        def ask(text, source, speak):
+            seen.append(session.ptt_approver.voice is not None)
+            session.ptt_approver.voice("关机")
+            return "好"
+        session.ask = ask
+        app.ptt_answer(session, "关机")
+        self.assertEqual(seen, [True])
+        self.assertIn("要我关机吗?按住说“允许”或者“不要”。", said)
+        self.assertIsNone(session.ptt_approver.voice)  # 问完就关掉
+
     def test_settings_payload(self):
         session = app.WebSession(None, app.default_persona(), friday_web.Hub())
         started = []

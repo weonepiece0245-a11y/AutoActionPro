@@ -1948,9 +1948,17 @@ def start_ptt(session, ctx, events: queue.Queue, voice_module) -> None:
                 friday_ptt.beep(False)
                 session.hub.broadcast({"type": "status", "text": "🎙 按住说话:没听清,再说一次"})
                 return
+            verdict = ctx.approver.answer_by_voice(text)  # 正在等你用声音确认?
+            if verdict == "unclear":
+                ptt_say(session, "听不出来是允许还是不要。按住再说一次“允许”或者“不要”。")
+                return
+            if verdict is not None:
+                session.hub.broadcast({"type": "status", "text": f"🎙 你说“{text}”:{'允许' if verdict == 'yes' else '不做'}"})
+                return
             events.put(("ptt", text))
         threading.Thread(target=work, daemon=True, name="friday-ptt-ask").start()
 
+    session.ptt_approver = ctx.approver
     session.ptt = friday_ptt.PushToTalk(
         on_audio, on_status=lambda text, failed: session.hub.broadcast({"type": "error" if failed else "status",
                                                                           "text": "🎙 " + text}),
@@ -1960,12 +1968,38 @@ def start_ptt(session, ctx, events: queue.Queue, voice_module) -> None:
         print(session.ptt.start(key), flush=True)
 
 
-def ptt_answer(session, text: str) -> None:
-    """按住说话问的:不跳窗口、一定读出来(窗口关着就用电脑直接读)。"""
+def ptt_say(session, text: str) -> None:
+    """按住说话时要马上读的一句话(窗口开着在窗口里读,关着用电脑直接读,不等它读完)。"""
     if session.hub.connected:
-        session.ask(text, source="ptt", speak=True)
+        session.speak(text)
         return
-    reply = session.ask(text, source="ptt", speak=False)
+
+    def run() -> None:
+        try:
+            if getattr(session, "local_speaker", None) is None:
+                import voice as voice_module
+
+                session.local_speaker = voice_module.make_speaker(on_status=lambda t: None)
+            session.local_speaker.speak(text)
+        except Exception as e:  # noqa: BLE001
+            print(f"按住说话没读出来:{type(e).__name__}: {e}", flush=True)
+    threading.Thread(target=run, daemon=True, name="friday-ptt-say").start()
+
+
+def ptt_answer(session, text: str) -> None:
+    """按住说话问的:不跳窗口、一定读出来(窗口关着就用电脑直接读);要你允许的事也读出来问。"""
+    approver = getattr(session, "ptt_approver", None)
+    if approver is not None:
+        approver.voice = lambda action: ptt_say(
+            session, f"要我{action[:80]}吗?按住说“允许”或者“不要”。")
+    try:
+        if session.hub.connected:
+            session.ask(text, source="ptt", speak=True)
+            return
+        reply = session.ask(text, source="ptt", speak=False)
+    finally:
+        if approver is not None:
+            approver.voice = None
     if reply:
         try:
             if getattr(session, "local_speaker", None) is None:
