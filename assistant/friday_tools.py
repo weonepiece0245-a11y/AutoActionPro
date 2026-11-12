@@ -871,6 +871,15 @@ DOTA_TOOL = {
         "action": {"type": "string", "enum": ["last", "recent", "heroes", "profile"]}}, "required": ["action"]},
 }
 
+DOTA_ADVICE_TOOL = {
+    "name": "dota_advice",
+    "description": ("Dota 2 选英雄和出装建议(OpenDota 公开数据,不花钱,不用连 Steam):counters 给对面的英雄找克制的英雄"
+                    "(heroes 填对面英雄,中文名/外号/英文名都行,用顿号或逗号分开);build 某个英雄最近最常出的装备(heroes 填那个英雄)。"),
+    "input_schema": {"type": "object", "properties": {
+        "action": {"type": "string", "enum": ["counters", "build"]}, "heroes": {"type": "string"}},
+        "required": ["action", "heroes"]},
+}
+
 APEX_TOOL = {
     "name": "apex",
     "description": "Apex 英雄:maps 现在普通和排位是什么地图、几点换;player 排位分和等级(name 可空,默认是用户自己)。",
@@ -1096,6 +1105,7 @@ class Toolbox:
         self.gamereport = None  # friday_gamereport.GameReport
         self.known_games = None  # friday_games.KnownGames
         self.gameboost = None  # friday_gameboost.GameBoost
+        self.dota_advice = None  # friday_dota_advice.DotaAdvice
         self.wishlist = None  # friday_wishlist.Wishlist
         self.folder_backup = None  # (friday_folderbackup.FolderBackup, 马上备份() -> 话)
         self.reader = None  # (friday_reader.Reader, 开始读(标题, 段落) -> 话)
@@ -1166,6 +1176,7 @@ class Toolbox:
             "steam": self._steam,
             "nvidia": self._nvidia,
             "gaming": self._gaming,
+            "dota_advice": self._dota_advice,
             "folder_backup": self._folder_backup,
             "read_aloud": self._read_aloud,
             "spotify": self._spotify,
@@ -1245,6 +1256,8 @@ class Toolbox:
             tools = tools + [INTERPRETER_TOOL]
         if self.dota is not None and self.steam is not None:
             tools = tools + [DOTA_TOOL]
+        if self.dota_advice is not None:
+            tools = tools + [DOTA_ADVICE_TOOL]
         if self.apex is not None:
             tools = tools + [APEX_TOOL]
         if self.sleep_timer is not None and self.local_tools:
@@ -1703,6 +1716,20 @@ class Toolbox:
         except ValueError as e:
             return str(e), True
         return f"不支持的 action:{action}", True
+
+    def _dota_advice(self, args, on_status):
+        advice = self.dota_advice
+        heroes = advice.find_heroes(str(args.get("heroes") or "")) if advice is not None else []
+        try:
+            if not heroes:
+                return "没认出是哪个英雄,换个写法(中文名、外号或英文名)", True
+            if args.get("action") == "build":
+                return advice.build(heroes[0]), False
+            if args.get("action") == "counters":
+                return advice.counters(heroes), False
+        except ValueError as e:
+            return str(e), True
+        return f"不支持的 action:{args.get('action')}", True
 
     def _apex(self, args, on_status):
         action = args.get("action")

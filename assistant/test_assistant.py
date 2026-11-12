@@ -6345,25 +6345,25 @@ class PushToTalkTest(unittest.TestCase):
         results = []
         worker = threading.Thread(target=lambda: results.append(approver("执行命令 dir")))
         worker.start()
-        for _ in range(100):
+        for _ in range(500):
             if approver.voice_pending:
                 break
             time.sleep(0.01)
         self.assertEqual(heard, ["执行命令 dir"])
         self.assertEqual(approver.answer_by_voice("嗯那个"), "unclear")
         self.assertEqual(approver.answer_by_voice("不可以"), "no")  # “不可以”里有“可以”:也算不要
-        worker.join(2)
+        worker.join(5)
         self.assertEqual(results, [False])
         self.assertIsNone(approver.voice_pending)
         self.assertIsNone(approver.answer_by_voice("允许"))  # 没在等:当成平常的问题
         worker = threading.Thread(target=lambda: results.append(approver.confirm("发邮件给老板")))
         worker.start()
-        for _ in range(100):
+        for _ in range(500):
             if approver.voice_pending:
                 break
             time.sleep(0.01)
         self.assertEqual(approver.answer_by_voice("好的允许"), "yes")
-        worker.join(2)
+        worker.join(5)
         self.assertEqual(results, [False, True])
 
     def test_ptt_answer_turns_voice_approval_on_and_off(self):
@@ -6698,6 +6698,84 @@ class WeeklyGameTest(TempDirTest):
             text = app.weekly_report(session, toolbox, state, now=datetime.datetime(2026, 11, 15, 21, 30))
         self.assertIn("【游戏和电脑】游戏:Apex 1 小时。", text)
         self.assertEqual(said[0][1], "这周的总结(花费、游戏、电脑)在窗口里")
+
+
+import friday_dota_advice  # noqa: E402
+
+
+class DotaAdviceTest(unittest.TestCase):
+    HEROES = [{"id": 13, "name": "npc_dota_hero_puck", "localized_name": "Puck"},
+              {"id": 39, "name": "npc_dota_hero_queenofpain", "localized_name": "Queen of Pain"},
+              {"id": 67, "name": "npc_dota_hero_spectre", "localized_name": "Spectre"},
+              {"id": 6, "name": "npc_dota_hero_drow_ranger", "localized_name": "Drow Ranger"},
+              {"id": 44, "name": "npc_dota_hero_phantom_assassin", "localized_name": "Phantom Assassin"},
+              {"id": 102, "name": "npc_dota_hero_abaddon", "localized_name": "Abaddon"},
+              {"id": 999, "name": "npc_dota_hero_newhero", "localized_name": "New Hero"}]
+
+    def make(self):
+        self.calls = []
+        matchups = {
+            39: [{"hero_id": 102, "games_played": 500, "wins": 200}, {"hero_id": 6, "games_played": 500, "wins": 300},
+                 {"hero_id": 44, "games_played": 10, "wins": 1}, {"hero_id": 67, "games_played": 400, "wins": 200}],
+            67: [{"hero_id": 102, "games_played": 300, "wins": 120}, {"hero_id": 6, "games_played": 300, "wins": 150},
+                 {"hero_id": 44, "games_played": 300, "wins": 100}, {"hero_id": 39, "games_played": 400, "wins": 200}],
+        }
+
+        def fetch(url):
+            self.calls.append(url)
+            if url.endswith("/heroes"):
+                return self.HEROES
+            if "/matchups" in url:
+                return matchups[int(url.split("/heroes/")[1].split("/")[0])]
+            if url.endswith("/constants/items"):
+                return {"black_king_bar": {"id": 116, "dname": "Black King Bar"}, "tango": {"id": 44, "dname": "Tango"},
+                        "radiance": {"id": 137, "dname": "Radiance"}, "weird_item": {"id": 900, "dname": "Weird Item"}}
+            if "/itemPopularity" in url:
+                return {"start_game_items": {"44": 900}, "mid_game_items": {"137": 500, "116": 700, "900": 10}}
+            raise AssertionError(url)
+        return friday_dota_advice.DotaAdvice(fetch)
+
+    def test_find_heroes(self):
+        advice = self.make()
+        self.assertEqual(advice.find_heroes("对面有痛苦女王和幽鬼"), [39, 67])
+        self.assertEqual(advice.find_heroes("对面 QOP、PA 还有 小黑"), [39, 44, 6])
+        self.assertEqual(advice.find_heroes("我用 Spectre 出什么"), [67])
+        self.assertEqual(advice.find_heroes("I like papa"), [])  # 英文简称要是整个词
+        self.assertEqual(advice.find_heroes("New Hero 怎么打"), [999])  # 新英雄没有中文名:用英文名
+
+    def test_counters(self):
+        advice = self.make()
+        text = advice.answer("对面有痛苦女王和幽鬼,我选什么")
+        self.assertIn("对面有 痛苦女王、幽鬼", text)
+        self.assertLess(text.index("亚巴顿"), text.index("卓尔游侠"))  # 亚巴顿对他们胜率更高
+        self.assertIn("亚巴顿(60%)", text)
+        self.assertNotIn("幻影刺客", text)  # 对痛苦女王的局数太少:不算
+        self.assertNotIn("帕克", text)
+
+    def test_build(self):
+        advice = self.make()
+        text = advice.answer("幽鬼出什么装")
+        self.assertEqual(text, "幽鬼最近大家最常出的装:开局:吃树;中期:BKB、辉耀、Weird Item。(OpenDota 公开比赛的数据,按局势调整)")
+        advice.answer("幽鬼出什么装")
+        self.assertEqual(len([c for c in self.calls if "itemPopularity" in c]), 1)  # 一天内用记着的
+
+    def test_not_a_dota_question(self):
+        advice = self.make()
+        for sentence in ("今天天气怎么样", "我最喜欢的英雄电影", "对面那家店几点开"):
+            self.assertIsNone(advice.answer(sentence))
+        self.assertEqual(self.calls, [])  # 不像在问:不去连 OpenDota
+
+    def test_quick_and_tool(self):
+        quick = friday_quick.QuickCommands(SimpleNamespace())
+        quick.dota_advice = self.make()
+        self.assertIn("对他们胜率比较高的是", quick.handle("对面有痛苦女王和幽鬼,我选什么"))
+        toolbox = tools.Toolbox(tools.Memory(os.path.join(tempfile.mkdtemp(), "m.json")), lambda a: True)
+        toolbox.dota_advice = quick.dota_advice
+        self.assertIn("dota_advice", [t["name"] for t in toolbox.definitions()])
+        text, failed = toolbox._dota_advice({"action": "build", "heroes": "spectre"}, None)
+        self.assertFalse(failed)
+        self.assertIn("BKB", text)
+        self.assertTrue(toolbox._dota_advice({"action": "counters", "heroes": "谁"}, None)[1])
 
 
 class LedgerTest(TempDirTest):

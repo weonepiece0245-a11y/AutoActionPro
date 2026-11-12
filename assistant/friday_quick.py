@@ -80,6 +80,7 @@ class QuickCommands:
         self.temps = None  # friday_temps.Temps
         self.gamereport = None  # friday_gamereport.GameReport
         self.wishlist = None  # friday_wishlist.Wishlist
+        self.dota_advice = None  # friday_dota_advice.DotaAdvice
         self.env_file = None  # 改设定时存到哪个 .env
         self.sleep_timer = None  # friday_sleeptimer.SleepTimer
         self.diary = None  # friday_diary.Diary
@@ -581,6 +582,13 @@ class QuickCommands:
         learned = self._learn_games(sentence)
         if learned:
             return learned
+        if self.dota_advice is not None:
+            try:
+                advice = self.dota_advice.answer(sentence)
+            except ValueError as e:
+                return str(e)
+            if advice:
+                return advice
         if self.temps is not None and self.TEMP_RE.match(sentence):
             return self.temps.describe()
         if self.gamereport is not None and self.REPORT_RE.match(sentence):

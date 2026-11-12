@@ -3621,7 +3621,10 @@ def start_connected_apps(session, toolbox, ctx, data_dir: str, port: int) -> Non
         threading.Thread(target=temp_loop, daemon=True, name="friday-temps").start()
     import friday_apex
     import friday_dota
+    import friday_dota_advice
     import friday_sleeptimer
+
+    toolbox.dota_advice = session.quick.dota_advice = friday_dota_advice.DotaAdvice(friday_dota.fetch_json)
 
     if friday_apex.configured():
         toolbox.apex = session.quick.apex = friday_apex.Apex()
