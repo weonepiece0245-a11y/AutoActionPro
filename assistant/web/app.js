@@ -973,8 +973,15 @@ function fillSettings() {
   $("pttRow").hidden = !s.ptt;
   if (s.ptt) {
     const sel = $("setPtt");
-    if (sel.options.length <= 1) for (const [key, label] of s.ptt.keys) sel.append(new Option(label, key));
-    sel.value = s.ptt.key;
+    if (sel.options.length <= 1) {
+      for (const [key, label] of s.ptt.keys) sel.append(new Option(label, key));
+      sel.append(new Option("自定义…", "custom"));
+    }
+    if (!pttCapturing) {
+      sel.value = s.ptt.key;
+      $("pttCapture").hidden = s.ptt.key !== "custom";
+      $("pttCapture").textContent = s.ptt.custom ? `现在是 ${s.ptt.custom}(按这里换)` : "按这里,再按你要的键";
+    }
   }
   const c = s.cloud;
   $("cloudGroup").hidden = !c;
@@ -1377,7 +1384,70 @@ $("setRemindCalendar").onchange = (e) => saveSetting({ remind_calendar: e.target
 $("setGameQuiet").onchange = (e) => saveSetting({ game_quiet: e.target.checked });
 $("setGameBoost").onchange = (e) => saveSetting({ game_boost: e.target.checked });
 $("setGameReport").onchange = (e) => saveSetting({ game_report: e.target.checked });
-$("setPtt").onchange = (e) => saveSetting({ ptt_key: e.target.value });
+$("setPtt").onchange = (e) => {
+  if (e.target.value === "custom") { $("pttCapture").hidden = false; startPttCapture(); return; }
+  $("pttCapture").hidden = true;
+  saveSetting({ ptt_key: e.target.value });
+};
+
+// 自定义按住说话的键:按下“按这里”后,下一个按下的键盘键或鼠标键(中键、侧键)就是它
+const VK_NAMED = {
+  Backquote: [0xC0, "` 键"], Minus: [0xBD, "-"], Equal: [0xBB, "="], BracketLeft: [0xDB, "["], BracketRight: [0xDD, "]"],
+  Backslash: [0xDC, "\\"], Semicolon: [0xBA, ";"], Quote: [0xDE, "'"], Comma: [0xBC, ","], Period: [0xBE, "."], Slash: [0xBF, "/"],
+  Tab: [0x09, "Tab"], CapsLock: [0x14, "Caps Lock"], ShiftLeft: [0xA0, "左 Shift"], ShiftRight: [0xA1, "右 Shift"],
+  ControlLeft: [0xA2, "左 Ctrl"], ControlRight: [0xA3, "右 Ctrl"], AltLeft: [0xA4, "左 Alt"], AltRight: [0xA5, "右 Alt"],
+  Space: [0x20, "空格"], Insert: [0x2D, "Insert"], Delete: [0x2E, "Delete"], Home: [0x24, "Home"], End: [0x23, "End"],
+  PageUp: [0x21, "Page Up"], PageDown: [0x22, "Page Down"], ArrowLeft: [0x25, "←"], ArrowUp: [0x26, "↑"],
+  ArrowRight: [0x27, "→"], ArrowDown: [0x28, "↓"], Pause: [0x13, "Pause"], ScrollLock: [0x91, "Scroll Lock"],
+  NumpadMultiply: [0x6A, "小键盘 *"], NumpadAdd: [0x6B, "小键盘 +"], NumpadSubtract: [0x6D, "小键盘 -"],
+  NumpadDecimal: [0x6E, "小键盘 ."], NumpadDivide: [0x6F, "小键盘 /"], NumpadEnter: [0x0D, "小键盘 Enter"],
+  Enter: [0x0D, "Enter"], Backspace: [0x08, "Backspace"], ContextMenu: [0x5D, "菜单键"], IntlBackslash: [0xE2, "\\"],
+};
+function keyToVk(e) {
+  const code = e.code || "";
+  let m;
+  if ((m = /^Key([A-Z])$/.exec(code))) return [m[1].charCodeAt(0), m[1]];
+  if ((m = /^Digit([0-9])$/.exec(code))) return [0x30 + Number(m[1]), m[1]];
+  if ((m = /^F([0-9]{1,2})$/.exec(code)) && Number(m[1]) >= 1 && Number(m[1]) <= 24) return [0x6F + Number(m[1]), code];
+  if ((m = /^Numpad([0-9])$/.exec(code))) return [0x60 + Number(m[1]), `小键盘 ${m[1]}`];
+  return VK_NAMED[code] || null;
+}
+const MOUSE_VK = { 1: [0x04, "鼠标中键"], 3: [0x05, "鼠标侧键(后)"], 4: [0x06, "鼠标侧键(前)"] };
+let pttCapturing = false;
+function startPttCapture() {
+  if (pttCapturing) return;
+  pttCapturing = true;
+  const btn = $("pttCapture");
+  btn.textContent = "请按你要的键……(Esc 取消)";
+  btn.classList.add("waiting");
+  const finish = (choice) => {
+    pttCapturing = false;
+    btn.classList.remove("waiting");
+    window.removeEventListener("keydown", onKey, true);
+    window.removeEventListener("mousedown", onMouse, true);
+    window.removeEventListener("auxclick", block, true);
+    if (choice) saveSetting({ ptt_key: { vk: choice[0], label: choice[1] } }).then(() => setTimeout(() => loadState().then(fillSettings), 300));
+    else setTimeout(() => loadState().then(fillSettings), 50);
+  };
+  const block = (e) => { e.preventDefault(); e.stopPropagation(); };
+  const onKey = (e) => {
+    block(e);
+    if (e.code === "Escape") { finish(null); return; }
+    const choice = keyToVk(e);
+    if (!choice) { btn.textContent = "这个键认不出来,换一个(Esc 取消)"; return; }
+    finish(choice);
+  };
+  const onMouse = (e) => {
+    if (e.button === 0 && e.target === btn) return;  // 刚按下“按这里”那一下
+    if (e.button === 0 || e.button === 2) { btn.textContent = "鼠标左右键不能用,换一个(Esc 取消)"; block(e); return; }
+    block(e);
+    if (MOUSE_VK[e.button]) finish(MOUSE_VK[e.button]);
+  };
+  window.addEventListener("keydown", onKey, true);
+  window.addEventListener("mousedown", onMouse, true);
+  window.addEventListener("auxclick", block, true);
+}
+$("pttCapture").onclick = startPttCapture;
 $("setAutoUpdate").onchange = (e) => saveSetting({ auto_update: e.target.checked });
 
 // 家里的灯联动:开游戏时调灯、离开时关灯

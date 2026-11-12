@@ -1,6 +1,6 @@
 """打游戏时按住说话:按住一个键对星期五说话,放开就问;她直接用声音回答,不跳出窗口、不挡游戏画面。
 
-在 齿轮设定 → 游戏 选键(F7/F8/F9、鼠标侧键、` 键),默认关。
+在 齿轮设定 → 游戏 选键(F7/F8/F9、鼠标侧键、` 键),或选“自定义”再按一下你想用的键(键盘上的键、鼠标中键或侧键),默认关。
 只是“看”那个键有没有按着(和游戏读键盘一样),不拦截、不改按键,游戏照样收到这个键,所以选一个游戏里没用到的。
 按下时“嘀”一声开始录音,放开“嘟”一声就送出去;按不到半秒当成按错,不问。最长录 30 秒。
 第一次用会自动安装录音组件 sounddevice。
@@ -26,9 +26,38 @@ MAX_SECONDS = 30
 POLL = 0.025
 
 
+NOT_ALLOWED = {0x01: "鼠标左键", 0x02: "鼠标右键"}  # 每次点东西都会触发,不能用
+
+
+def custom_key(name: str) -> int | None:
+    """“vk:119” -> 119;不是自定义的键、或不能用的键返回 None。"""
+    if not str(name).startswith("vk:"):
+        return None
+    try:
+        vk = int(str(name)[3:])
+    except ValueError:
+        return None
+    return vk if 3 <= vk <= 254 and vk not in NOT_ALLOWED else None
+
+
 def key_setting() -> str:
     name = os.environ.get("FRIDAY_PTT_KEY", "off").strip().lower()
-    return name if name in KEYS else "off"
+    return name if name in KEYS or custom_key(name) is not None else "off"
+
+
+def clean_label(label: str) -> str:
+    label = " ".join(str(label or "").split())[:20]
+    return label or "自定义的键"
+
+
+def key_info(name: str) -> tuple[str, int] | None:
+    """(给你看的名字, Windows 键码);关着或不认识返回 None。"""
+    if name in KEYS:
+        return KEYS[name]
+    vk = custom_key(name)
+    if vk is None:
+        return None
+    return clean_label(os.environ.get("FRIDAY_PTT_LABEL", "")), vk
 
 
 def to_wav(pcm: bytes, rate: int = RATE) -> bytes:
@@ -105,15 +134,17 @@ class PushToTalk:
     def start(self, key: str) -> str:
         """开始看这个键;返回给你看的一句话。"""
         self.stop()
-        self.key = key if key in KEYS else "off"
+        info = key_info(key)
+        self.key = key if info else "off"
         if self.key == "off":
             return "按住说话关掉了。"
+        self.vk = info[1]
         if os.name != "nt" and self.key_down is key_down_windows:
             return "按住说话只能在 Windows 上用。"
         self.running = True
         self.thread = threading.Thread(target=self._loop, daemon=True, name="friday-ptt")
         self.thread.start()
-        return f"打游戏时按住 {KEYS[self.key][0]} 跟我说话,放开就问。"
+        return f"打游戏时按住 {info[0]} 跟我说话,放开就问。"
 
     def stop(self) -> None:
         self.running = False
@@ -135,7 +166,7 @@ class PushToTalk:
         return self.recorder
 
     def _loop(self) -> None:
-        vk = KEYS[self.key][1]
+        vk = self.vk
         was_down = False
         started = 0.0
         recording = False

@@ -1921,7 +1921,10 @@ def ptt_state(session) -> dict | None:
         return None
     import friday_ptt
 
-    return {"key": friday_ptt.key_setting(), "keys": [[k, label] for k, (label, _) in friday_ptt.KEYS.items()]}
+    key = friday_ptt.key_setting()
+    return {"key": "custom" if key.startswith("vk:") else key,
+            "keys": [[k, label] for k, (label, _) in friday_ptt.KEYS.items()],
+            "custom": friday_ptt.key_info(key)[0] if key.startswith("vk:") else ""}
 
 
 def start_ptt(session, ctx, events: queue.Queue, voice_module) -> None:
@@ -2475,9 +2478,24 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
     if "ptt_key" in payload:
         import friday_ptt
 
-        key = str(payload["ptt_key"]).strip().lower()
-        if key != "off" and key not in friday_ptt.KEYS:
-            return {"error": "没有这个键"}
+        raw = payload["ptt_key"]
+        if isinstance(raw, dict):  # 自定义:窗口里按下的那个键 {vk, label}
+            try:
+                vk = int(raw.get("vk"))
+            except (TypeError, ValueError):
+                return {"error": "没认出这个键"}
+            if vk in friday_ptt.NOT_ALLOWED:
+                return {"error": f"{friday_ptt.NOT_ALLOWED[vk]}不能用(每次点东西都会触发),换一个键"}
+            key = f"vk:{vk}"
+            if friday_ptt.custom_key(key) is None:
+                return {"error": "这个键不能用,换一个"}
+            label = friday_ptt.clean_label(raw.get("label"))
+            save_env_value(env, "FRIDAY_PTT_LABEL", label)
+            os.environ["FRIDAY_PTT_LABEL"] = label
+        else:
+            key = str(raw).strip().lower()
+            if key != "off" and key not in friday_ptt.KEYS:
+                return {"error": "没有这个键"}
         save_env_value(env, "FRIDAY_PTT_KEY", key)
         os.environ["FRIDAY_PTT_KEY"] = key
         ptt = getattr(session, "ptt", None)

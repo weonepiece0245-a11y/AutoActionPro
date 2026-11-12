@@ -6285,7 +6285,7 @@ class PushToTalkTest(unittest.TestCase):
             state["down"], advance = steps.pop(0)
             now[0] += advance
         ptt.sleep = sleep
-        ptt.key = "f8"
+        ptt.key, ptt.vk = "f8", 0x77
         ptt.running = True
         ptt._loop()
         return sent, beeps, started
@@ -6347,6 +6347,34 @@ class PushToTalkTest(unittest.TestCase):
         self.assertEqual(started, ["mouse5"])
         self.assertIn("FRIDAY_PTT_KEY=mouse5", env.read_text())
         self.assertEqual(app.ptt_state(session)["key"], "off")  # 测试里环境变量已经还原
+
+    def test_custom_key(self):
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        watched = []
+        ptt = friday_ptt.PushToTalk(lambda wav: None, key_down=lambda vk: watched.append(vk) or False,
+                                    recorder_factory=lambda: None, sleep=lambda s: time.sleep(0.01))
+        session.ptt = ptt
+        env = Path(tempfile.mkdtemp(), ".env")
+        env.write_text("")
+        with mock.patch.dict(os.environ, {}):
+            result = app.apply_settings({"ptt_key": {"vk": 0x05, "label": "鼠标侧键(后)"}}, session, SimpleNamespace(), env)
+            self.assertIn("按住 鼠标侧键(后)", json.dumps(result, ensure_ascii=False))
+            time.sleep(0.05)
+            ptt.stop()
+            self.assertIn(0x05, watched)  # 真的在看这个键
+            self.assertEqual(app.ptt_state(session), {"key": "custom", "keys": app.ptt_state(session)["keys"],
+                                                      "custom": "鼠标侧键(后)"})
+            self.assertIn("FRIDAY_PTT_KEY=vk:5", env.read_text())
+            app.apply_settings({"ptt_key": {"vk": 0x47, "label": "G"}}, session, SimpleNamespace(), env)
+            ptt.stop()
+            self.assertEqual(friday_ptt.key_info(friday_ptt.key_setting()), ("G", 0x47))
+            for bad in ({"vk": 1, "label": "左键"}, {"vk": 2}, {"vk": 999}, {"vk": "abc"}):
+                self.assertIn("error", app.apply_settings({"ptt_key": bad}, session, SimpleNamespace(), env))
+            self.assertIn("左键不能用", app.apply_settings({"ptt_key": {"vk": 1}}, session, SimpleNamespace(), env)["error"])
+            os.environ["FRIDAY_PTT_KEY"] = "vk:2"  # .env 被改坏了:当成关着
+            self.assertEqual(friday_ptt.key_setting(), "off")
+            os.environ["FRIDAY_PTT_LABEL"] = "x" * 50
+            self.assertEqual(len(friday_ptt.clean_label(os.environ["FRIDAY_PTT_LABEL"])), 20)
 
 
 import friday_autoupdate  # noqa: E402

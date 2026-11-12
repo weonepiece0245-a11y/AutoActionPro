@@ -231,7 +231,9 @@
       <div class="set-row"><label for="setGameQuiet">别打扰:提醒改成右下角小通知,打完再一起说</label><input type="checkbox" class="switch" id="setGameQuiet"></div>
       <div class="set-row"><label for="setGameBoost">游戏优化:游戏优先、后台程序让路、电源换高性能(打完自动改回来)</label><input type="checkbox" class="switch" id="setGameBoost"></div>
       <div class="set-row" id="pttRow" hidden><label for="setPtt">打游戏时按住说话(按住对星期五说话,放开就问,不跳出窗口;选游戏里没用到的键)</label>
-        <select class="mini-select" id="setPtt"><option value="off">关</option></select></div>
+        <span class="set-ctl"><select class="mini-select" id="setPtt"><option value="off">关</option></select>
+        <button type="button" class="mini-btn" id="pttCapture" hidden>按这里,再按你要的键</button></span></div>
+      <div class="set-note" id="pttNote" hidden></div>
       <div class="set-row"><label for="setGameReport">游戏后报告:每局打完说打了多久、电脑多热、星期五用了多少、哪个后台程序比较忙</label><input type="checkbox" class="switch" id="setGameReport"></div>
       <div class="set-row"><label for="setGameClose">开游戏时自动关掉</label>
         <span class="set-ctl"><input class="mini-input" id="setGameClose" autocomplete="off" placeholder="例如 chrome, spotify"><button type="button" class="mini-btn" id="saveGameClose">保存</button></span></div>
