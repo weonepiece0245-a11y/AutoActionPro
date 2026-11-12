@@ -127,9 +127,15 @@
 
 <div class="modal" id="settings" hidden>
   <div class="modal-card settings-card" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
-    <div class="modal-head"><span class="settings-title" id="settingsTitle">SETTINGS</span>设定<button type="button" class="close-x" id="settingsClose" aria-label="关闭">×</button></div>
+    <div class="modal-head"><span class="settings-title" id="settingsTitle">SETTINGS</span>设定
+      <input class="set-search" id="setSearch" type="search" placeholder="🔍 搜索设定,例如 游戏、Spotify、提醒" aria-label="搜索设定" autocomplete="off">
+      <button type="button" class="close-x" id="settingsClose" aria-label="关闭">×</button></div>
+    <div class="set-layout">
+    <nav class="set-nav" id="setNav" aria-label="设定分类"></nav>
+    <div class="set-pane" id="setPane">
+    <div class="set-empty" id="setEmpty" hidden>没有找到相关的设定。换个说法试试,或者直接跟星期五说。</div>
 
-    <div class="set-group">
+    <div class="set-group" data-cat="general">
       <h3>星期五</h3>
       <div class="set-row"><label for="setCallMe">怎么称呼你</label>
         <span class="set-ctl"><input class="mini-input" id="setCallMe" maxlength="20"><button type="button" class="mini-btn" id="saveCallMe">保存</button></span></div>
@@ -139,7 +145,7 @@
         </select></div>
     </div>
 
-    <div class="set-group">
+    <div class="set-group" data-cat="voice">
       <h3>声音</h3>
       <div class="set-row"><label for="setSpeak">朗读回答</label><input type="checkbox" class="switch" id="setSpeak"></div>
       <div class="set-row"><label for="setBarge">说话可以打断她(她在说话时你一开口,她就停下来听)</label><input type="checkbox" class="switch" id="setBarge"></div>
@@ -148,7 +154,7 @@
         <span class="set-ctl"><select class="mini-select" id="setVoice"></select><button type="button" class="mini-btn" id="previewVoice">试听</button></span></div>
     </div>
 
-    <div class="set-group" id="budgetGroup" hidden>
+    <div class="set-group" id="budgetGroup" hidden data-cat="money">
       <h3>预算和余额</h3>
       <div class="set-row"><label for="setBudget">每月预算(0 = 不限)</label>
         <span class="set-ctl">RM <input class="mini-input short" id="setBudget" inputmode="decimal"><button type="button" class="mini-btn" id="saveBudget">保存</button></span></div>
@@ -160,7 +166,7 @@
       <div class="set-note" id="consoleNote"></div>
     </div>
 
-    <div class="set-group" id="careGroup" hidden>
+    <div class="set-group" id="careGroup" hidden data-cat="life">
       <h3>主动关心(不花钱)</h3>
       <div class="set-row"><label for="setCareWelcome">离开 20 分钟后回来,跟你打招呼</label><input type="checkbox" class="switch" id="setCareWelcome"></div>
       <div class="set-row"><label for="setCareBreak">连续用电脑多久,提醒休息</label>
@@ -168,7 +174,7 @@
       <div class="set-row"><label for="setCareNight">凌晨 1 点后还在用,提醒睡觉</label><input type="checkbox" class="switch" id="setCareNight"></div>
     </div>
 
-    <div class="set-group" id="gameGroup" hidden>
+    <div class="set-group" id="gameGroup" hidden data-cat="game">
       <h3>打游戏时</h3>
       <div class="set-row"><label for="setGameQuiet">别打扰:提醒改成右下角小通知,打完再一起说</label><input type="checkbox" class="switch" id="setGameQuiet"></div>
       <div class="set-row"><label for="setGameBoost">游戏优化:游戏优先、后台程序让路、电源换高性能(打完自动改回来)</label><input type="checkbox" class="switch" id="setGameBoost"></div>
@@ -180,28 +186,28 @@
       <div class="set-note">说“游戏体检”可以检查 Windows 的游戏设定。全屏运行的程序(看视频的浏览器、播放器除外)和 Apex、Dota 2 等都算游戏。程序是正常关闭的,有没保存的内容会先问你;Discord 这类关窗口只会缩到右下角。msedge 也是星期五的窗口,关掉后星期五仍在后台。</div>
     </div>
 
-    <div class="set-group" id="cloudGroup" hidden>
+    <div class="set-group" id="cloudGroup" hidden data-cat="apps">
       <h3>云端星期五(电脑关机也能用)</h3>
       <div class="set-row"><label for="setCloud">配对码</label>
         <span class="set-ctl"><input class="mini-input" id="setCloud" type="password" autocomplete="off" placeholder="FRIDAY-…"><button type="button" class="mini-btn" id="saveCloud">连接</button><button type="button" class="mini-btn" id="dropCloud" hidden>断开</button></span></div>
       <div class="set-note" id="cloudNote"></div>
     </div>
 
-    <div class="set-group" id="sceneGroup" hidden>
+    <div class="set-group" id="sceneGroup" hidden data-cat="life">
       <h3>场景模式(一句话做好几件事,不花钱)</h3>
       <div class="set-note" id="sceneHelp"></div>
       <div id="sceneList"></div>
       <div class="set-row"><span></span><button type="button" class="mini-btn" id="sceneAdd">+ 新场景</button></div>
     </div>
 
-    <div class="set-group" id="memtidyGroup" hidden>
+    <div class="set-group" id="memtidyGroup" hidden data-cat="life">
       <h3>记忆整理</h3>
       <div class="set-row"><span id="memtidyNote">每周用最便宜的 Haiku 帮星期五整理一次记忆,只给建议,你勾了才改</span><button type="button" class="mini-btn" id="memtidyRun">现在整理</button></div>
       <div id="memtidyList"></div>
       <div class="set-row" id="memtidyActions" hidden><span></span><span class="set-ctl"><button type="button" class="mini-btn" id="memtidyApply">按勾选的改</button><button type="button" class="mini-btn" id="memtidyDismiss">全部忽略</button></span></div>
     </div>
 
-    <div class="set-group" id="healthGroup" hidden>
+    <div class="set-group" id="healthGroup" hidden data-cat="pc">
       <h3>电脑健康(不花钱)</h3>
       <div class="set-row"><label for="setHealth">硬盘快满、内存太紧、很久没重启、下载文件夹太乱时提醒我</label><input type="checkbox" class="switch" id="setHealth"></div>
       <div class="set-note" id="healthNote"></div>
@@ -220,7 +226,7 @@
       <div class="set-row" id="cleanupActions" hidden><span class="set-note" id="cleanupPicked"></span><button type="button" class="mini-btn" id="cleanupRecycle">把勾选的丢进回收站</button></div>
     </div>
 
-    <div class="set-group" id="appsGroup" hidden>
+    <div class="set-group" id="appsGroup" hidden data-cat="apps">
       <h3>连接的应用</h3>
       <div class="set-row"><label for="steamKey">Steam 网页 API 钥匙</label>
         <span class="set-ctl"><input class="mini-input" id="steamKey" type="password" autocomplete="off" placeholder="32 位"></span></div>
@@ -247,7 +253,7 @@
       <div class="set-note" id="nvidiaNote" hidden>✓ 认得到 NVIDIA 显卡:可以说“显卡温度”“刚才那段存下来”“开始录像”“游戏截图”。</div>
     </div>
 
-    <div class="set-group" id="fbGroup" hidden>
+    <div class="set-group" id="fbGroup" hidden data-cat="backup">
       <h3>重要文件夹备份(不花钱)</h3>
       <div class="set-note">每天把这些文件夹复制到另一个硬盘或移动硬盘,只复制新的和改过的;旧版本留 30 天;很多文件同时变了(像中了勒索病毒)会先停下来问你。</div>
       <label class="set-note" for="fbSources">要备份的文件夹(一行一个):</label>
@@ -258,7 +264,7 @@
         <span class="set-ctl"><button type="button" class="mini-btn" id="fbRun">马上备份</button><button type="button" class="mini-btn" id="fbForce" hidden>照样备份</button></span></div>
     </div>
 
-    <div class="set-group" id="securityGroup" hidden>
+    <div class="set-group" id="securityGroup" hidden data-cat="security">
       <h3>安全</h3>
       <div class="set-row"><span>能用手机 Discord 控制星期五的账号</span><button type="button" class="mini-btn" id="discordPair">添加新账号</button></div>
       <div id="discordOwners"></div>
@@ -279,7 +285,7 @@
       <div class="set-note" id="securityNote"></div>
     </div>
 
-    <div class="set-group" id="backupGroup" hidden>
+    <div class="set-group" id="backupGroup" hidden data-cat="backup">
       <h3>备份(Google Drive)</h3>
       <div class="set-row"><label for="setBackup">每周自动备份</label><input type="checkbox" class="switch" id="setBackup"></div>
       <div class="set-row"><span>上次备份 <b class="google-state" id="backupLast">—</b></span>
@@ -287,7 +293,7 @@
       <div class="set-note">备份记忆、提醒、待办和聊天记录到 Drive 的“星期五备份”文件夹,保留最近 8 份。密码和钥匙(.env)不会上传。</div>
     </div>
 
-    <div class="set-group">
+    <div class="set-group" data-cat="look">
       <h3>外观</h3>
       <div class="set-row"><label for="setTheme">颜色主题</label>
         <select class="mini-select" id="setTheme"><option value="cyan">青蓝(默认)</option><option value="ironman">钢铁红金</option><option value="violet">紫色</option><option value="matrix">绿色</option></select></div>
@@ -297,10 +303,8 @@
       <div class="set-row"><label for="setPanels">显示两边的面板</label><input type="checkbox" class="switch" id="setPanels"></div>
     </div>
 
-    <div class="set-group">
-      <h3>其他</h3>
-      <div class="set-row" id="googleRow" hidden><span>Google 账号 <b class="google-state" id="googleState">—</b></span>
-        <button type="button" class="mini-btn" id="googleLogin" title="打开浏览器重新登录 Google(测试模式大约每 7 天要登录一次)">重新登录 Google</button></div>
+    <div class="set-group" data-cat="remind">
+      <h3>提醒和每日</h3>
       <div class="set-row" id="diaryRow" hidden><label for="setDiary">晚上做今天的总结,问你今天过得怎么样(日记,不花钱)</label>
         <select class="mini-select" id="setDiary"><option value="21:00">晚上 9:00</option><option value="22:00">晚上 10:00</option><option value="22:30">晚上 10:30</option><option value="23:00">晚上 11:00</option><option value="23:30">晚上 11:30</option><option value="off">不要</option></select></div>
       <div class="set-row" id="briefRow" hidden><label for="setBrief">早上第一次坐到电脑前,说今天的早安简报(天气、日历、待办、账单……不花钱)</label><input type="checkbox" class="switch" id="setBrief"></div>
@@ -315,10 +319,13 @@
         <div class="set-row sub"><label for="mailImportant">Gmail 标为“重要”的也提醒</label><input type="checkbox" class="switch" id="mailImportant"></div>
       </div>
       <div class="set-row" id="weeklyRow" hidden><label for="setWeekly">每周花费报告(星期天晚上 9 点后,不花钱)</label><input type="checkbox" class="switch" id="setWeekly"></div>
-      <div class="set-row" id="quickRow" hidden><label for="setQuick">简单指令不问 Claude(调音量、切歌、几点了、记账……不花钱)</label><input type="checkbox" class="switch" id="setQuick"></div>
       <div class="set-row" id="calendarRow" hidden><label for="setRemindCalendar">提醒同时放进 Google 日历(电脑关机时手机也会响)</label><input type="checkbox" class="switch" id="setRemindCalendar"></div>
       <div class="set-row" id="pushRow" hidden><label for="setPush">提醒推到手机 Discord</label>
         <select class="mini-select" id="setPush"><option value="always">每次都推</option><option value="away">不在电脑前时才推</option><option value="off">不推</option></select></div>
+    </div>
+
+    <div class="set-group" data-cat="voice">
+      <h3>唤醒和快捷键</h3>
       <div class="set-row" id="wakeRow" hidden><label for="setWake">喊我就回应(语音唤醒)</label><input type="checkbox" class="switch" id="setWake"></div>
       <div class="set-row" id="wakeOptions" hidden><label for="setWakePhrase">唤醒词 / 灵敏度</label>
         <span class="set-ctl"><select class="mini-select" id="setWakePhrase"></select>
@@ -331,6 +338,13 @@
       <div class="set-row" id="askHotkeyRow" hidden><label for="setAskHotkey">选中就问:选中文字后按,帮你翻译或解释</label>
         <select class="mini-select" id="setAskHotkey"></select></div>
       <div class="set-note" id="askHotkeyNote" hidden></div>
+      <div class="set-row" id="quickRow" hidden><label for="setQuick">简单指令不问 Claude(调音量、切歌、几点了、记账……不花钱)</label><input type="checkbox" class="switch" id="setQuick"></div>
+    </div>
+
+    <div class="set-group" data-cat="other">
+      <h3>账号和版本</h3>
+      <div class="set-row" id="googleRow" hidden><span>Google 账号 <b class="google-state" id="googleState">—</b></span>
+        <button type="button" class="mini-btn" id="googleLogin" title="打开浏览器重新登录 Google(测试模式大约每 7 天要登录一次)">重新登录 Google</button></div>
       <div class="set-row" id="autostartRow" hidden><label for="setAutostart">开机自动启动(后台运行)</label><input type="checkbox" class="switch" id="setAutostart"></div>
       <div class="set-row"><label for="setRate">汇率(本月花费用)</label>
         <span class="set-ctl">1 美元 = <input class="mini-input short" id="setRate" inputmode="decimal"> 马币<button type="button" class="mini-btn" id="saveRate">保存</button></span></div>
@@ -338,6 +352,8 @@
       <div class="set-row"><label for="setKeyExpires">Claude 钥匙到期日(提前提醒,也推到手机)</label>
         <span class="set-ctl"><input class="mini-input date" id="setKeyExpires" type="date"><button type="button" class="mini-btn" id="saveKeyExpires">保存</button></span></div>
       <div class="set-row"><span>版本 <b id="versionText">—</b></span><button type="button" class="mini-btn" id="updateBtn" title="从 GitHub 下载最新的星期五并自动重启">检查更新</button></div>
+    </div>
+    </div>
     </div>
     <div class="modal-note">设定会保存起来,下次打开还在。</div>
   </div>

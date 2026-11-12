@@ -919,7 +919,87 @@ async function saveSetting(change, ms = 3200) {
   fillSettings();
   return true;
 }
-function openSettings() { fillSettings(); $("settings").hidden = false; $("settingsClose").focus(); }
+// ---------- 齿轮设定:左边分类、上面搜索 ----------
+const SET_CATS = [
+  ["general", "⚙", "常用"], ["voice", "🔊", "声音"], ["look", "🎨", "外观"], ["remind", "⏰", "提醒"],
+  ["life", "💬", "生活"], ["game", "🎮", "游戏"], ["apps", "🔗", "连接的应用"], ["pc", "🖥", "电脑"],
+  ["backup", "💾", "备份"], ["security", "🔒", "安全"], ["money", "💰", "花费"], ["other", "ℹ", "账号和版本"],
+];
+let setCat = "general";
+try { setCat = localStorage.getItem("friday-set-cat") || "general"; } catch {}
+const setGroups = () => [...document.querySelectorAll("#setPane .set-group")];
+function groupHasContent(g) {
+  if (g.hasAttribute("hidden")) return false;
+  return [...g.children].some((c) => c.tagName !== "H3" && !c.hidden);
+}
+function buildSetNav() {
+  const nav = $("setNav");
+  const live = new Set(setGroups().filter(groupHasContent).map((g) => g.dataset.cat));
+  if (!live.has(setCat)) setCat = "general";
+  nav.replaceChildren(...SET_CATS.filter(([key]) => live.has(key)).map(([key, icon, label]) => {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "set-tab" + (key === setCat && !$("setSearch").value ? " on" : "");
+    b.dataset.cat = key;
+    b.innerHTML = `<span class="set-tab-icon" aria-hidden="true">${icon}</span><span>${label}</span>`;
+    b.onclick = () => { setCat = key; $("setSearch").value = ""; try { localStorage.setItem("friday-set-cat", key); } catch {} showSetCat(); };
+    return b;
+  }));
+}
+function markFirstGroup() {
+  let first = true;
+  for (const g of setGroups()) {
+    const visible = !g.classList.contains("set-off") && groupHasContent(g);
+    g.classList.toggle("set-first", visible && first);
+    if (visible) first = false;
+  }
+}
+function clearSetSearch() {
+  document.querySelectorAll("#setPane .set-miss").forEach((el) => el.classList.remove("set-miss"));
+  document.querySelectorAll("#setPane mark.set-hit").forEach((m) => m.replaceWith(m.textContent));
+}
+function showSetCat() {
+  clearSetSearch();
+  $("setEmpty").hidden = true;
+  for (const g of setGroups()) g.classList.toggle("set-off", g.dataset.cat !== setCat);
+  buildSetNav();
+  markFirstGroup();
+  $("setPane").scrollTop = 0;
+}
+function searchSettings(text) {
+  const words = text.trim().toLowerCase();
+  clearSetSearch();
+  if (!words) { showSetCat(); return; }
+  let found = 0;
+  for (const g of setGroups()) {
+    const title = (g.querySelector("h3")?.textContent || "").toLowerCase();
+    const groupHit = title.includes(words) || (SET_CATS.find(([k]) => k === g.dataset.cat)?.[2] || "").includes(words);
+    let rows = 0;
+    for (const row of g.querySelectorAll(":scope > .set-row, :scope > .set-note, :scope > div:not(.set-row):not(.set-note)")) {
+      if (row.hidden) continue;
+      const hit = groupHit || row.textContent.toLowerCase().includes(words);
+      row.classList.toggle("set-miss", !hit);
+      if (hit) rows++;
+    }
+    const show = rows > 0 && groupHasContent(g);
+    g.classList.toggle("set-off", !show);
+    if (show) found++;
+  }
+  $("setEmpty").hidden = found > 0;
+  markFirstGroup();
+  document.querySelectorAll("#setNav .set-tab").forEach((b) => b.classList.remove("on"));
+}
+$("setSearch").addEventListener("input", (e) => searchSettings(e.target.value));
+$("setSearch").addEventListener("keydown", (e) => { if (e.key === "Escape" && e.target.value) { e.stopPropagation(); e.target.value = ""; showSetCat(); } });
+new MutationObserver(() => { if (!$("settings").hidden && !$("setSearch").value) buildSetNav(); })
+  .observe($("setPane"), { attributes: true, attributeFilter: ["hidden"], subtree: true });
+
+function openSettings() {
+  fillSettings();
+  $("settings").hidden = false;
+  $("setSearch").value = "";
+  showSetCat();
+  $("setSearch").focus();
+}
 function closeSettings() { $("settings").hidden = true; }
 $("settingsBtn").onclick = openSettings;
 $("settingsClose").onclick = closeSettings;

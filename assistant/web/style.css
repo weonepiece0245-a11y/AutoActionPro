@@ -359,3 +359,31 @@ body[data-theme="matrix"] { --speak: #6ee7b7; --c-rgb: 52, 211, 153; --b-rgb: 16
   animation: takeover-pulse 1.6s ease-in-out infinite;
 }
 @keyframes takeover-pulse { 50% { background: #991b1b; } }
+
+/* ---------- 齿轮设定:分类 + 搜索 ---------- */
+#settings .settings-card { width: min(880px, 94vw); height: min(680px, 88vh); max-height: none; display: flex; flex-direction: column; overflow: hidden; padding: 18px 20px 14px; }
+.settings-card .modal-head { flex-wrap: nowrap; }
+.set-search { flex: 1; min-width: 0; max-width: 360px; margin-left: 12px; font: inherit; font-size: 13px; color: var(--text); background: rgba(0,0,0,.35); border: 1px solid var(--cyan-line); border-radius: 999px; padding: 7px 14px; transition: border-color .2s, box-shadow .2s; }
+.set-search:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(var(--c-rgb), .15); }
+.set-layout { flex: 1; min-height: 0; display: grid; grid-template-columns: 168px minmax(0, 1fr); gap: 16px; }
+.set-nav { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; padding-right: 4px; border-right: 1px solid var(--cyan-line); }
+.set-tab { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; font: inherit; font-size: 14px; color: var(--muted); background: none; border: 0; border-radius: 8px; padding: 9px 10px; cursor: pointer; transition: background .15s, color .15s; }
+.set-tab:hover { color: var(--text); background: rgba(var(--c-rgb), .07); }
+.set-tab.on { color: var(--text); background: rgba(var(--c-rgb), .16); box-shadow: inset 3px 0 0 var(--accent); }
+.set-tab-icon { width: 20px; text-align: center; }
+.set-pane { overflow-y: auto; padding-right: 6px; scroll-behavior: smooth; }
+.set-pane .set-group { animation: setIn .2s ease-out; }
+.set-pane .set-group.set-first { border-top: 0; padding-top: 2px; }
+.set-off, .set-miss { display: none !important; }
+.set-empty { padding: 40px 10px; text-align: center; color: var(--muted); font-size: 14px; }
+@keyframes setIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@media (max-width: 640px) {
+  #settings .settings-card { height: 92vh; padding: 14px; }
+  .settings-card .modal-head { flex-wrap: wrap; }
+  .set-search { order: 3; max-width: none; flex-basis: 100%; margin: 8px 0 0; }
+  .set-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 8px; }
+  .set-nav { flex-direction: row; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: 1px solid var(--cyan-line); padding: 0 0 6px; scrollbar-width: none; }
+  .set-tab { width: auto; white-space: nowrap; padding: 7px 10px; font-size: 13px; }
+  .set-tab.on { box-shadow: inset 0 -2px 0 var(--accent); }
+  .set-row { flex-wrap: wrap; }
+}
