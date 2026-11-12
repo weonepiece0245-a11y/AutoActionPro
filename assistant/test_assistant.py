@@ -6034,6 +6034,79 @@ class GameReportTest(unittest.TestCase):
         self.assertEqual(quick.handle("刚才那局电脑怎么样"), "报告")
 
 
+import friday_wishlist  # noqa: E402
+
+
+class WishlistTest(TempDirTest):
+    def make(self, prices):
+        self.calls, self.now = [], [100000.0]
+        self.prices = prices
+        steam = SimpleNamespace(my_id=lambda: "76561198000000000",
+                                _call=lambda path, **kw: self.calls.append(path) or
+                                {"response": {"items": [{"appid": 10, "priority": 2}, {"appid": 20, "priority": 1},
+                                                        {"appid": 30, "priority": 3}]}})
+
+        def fetch(url):
+            self.calls.append(url)
+            if "filters=price_overview" in url:
+                return {str(a): ({"success": True, "data": {"price_overview": p}} if p else {"success": True, "data": []})
+                        for a, p in self.prices.items()}
+            appid = url.split("appids=")[1].split("&")[0]
+            return {appid: {"success": True, "data": {"name": {"10": "艾尔登法环", "20": "赛博朋克 2077"}.get(appid, "X")}}}
+        return friday_wishlist.Wishlist(steam, os.path.join(self.tmp, "w.json"), fetch=fetch, clock=lambda: self.now[0])
+
+    @staticmethod
+    def price(pct, final, initial):
+        return {"currency": "MYR", "discount_percent": pct, "final_formatted": final, "initial_formatted": initial}
+
+    def test_alerts_once_per_sale_and_again_when_deeper(self):
+        w = self.make({10: self.price(40, "RM 120.00", "RM 200.00"), 20: self.price(0, "RM 199.00", "RM 199.00"), 30: None})
+        with mock.patch.dict(os.environ, {"FRIDAY_STEAM_CC": "my"}):
+            text = w.check()
+        self.assertEqual(text, "Steam 愿望单有 1 个游戏在打折:艾尔登法环 -40% RM 120.00(原价 RM 200.00)。")
+        self.assertTrue(any("cc=my" in str(c) for c in self.calls))
+        self.assertIsNone(w.check())  # 同一次打折不重复
+        self.prices[10] = self.price(60, "RM 80.00", "RM 200.00")
+        self.assertIn("-60%", w.check())  # 折扣更大了:再说
+        self.prices[10] = self.price(0, "RM 200.00", "RM 200.00")
+        self.assertIsNone(w.check())  # 打完折了
+        self.prices[10] = self.price(30, "RM 140.00", "RM 200.00")
+        again = self.make(self.prices)  # 重开星期五也记得
+        self.assertIn("-30%", again.check())  # 新的一次打折:再提醒
+        name_lookups = [c for c in self.calls if "l=schinese" in str(c)]
+        self.assertEqual(name_lookups, [])  # 名字记住了,不用再查
+
+    def test_describe_and_quick(self):
+        w = self.make({10: self.price(40, "RM 120.00", "RM 200.00"), 20: self.price(75, "RM 49.75", "RM 199.00"), 30: None})
+        text = w.describe()
+        self.assertTrue(text.startswith("愿望单里在打折的(2 个)"))
+        self.assertLess(text.index("赛博朋克"), text.index("艾尔登"))  # 折扣大的在前
+        quick = friday_quick.QuickCommands(SimpleNamespace())
+        quick.wishlist = w
+        self.assertIn("在打折的", quick.handle("愿望单有什么在打折"))
+        self.assertIn("在打折的", quick.handle("steam有什么游戏在打折"))
+        self.prices = {10: None, 20: None, 30: None}
+        self.assertIn("现在都没打折", w.describe())
+
+    def test_private_wishlist(self):
+        w = self.make({})
+        w.steam._call = lambda path, **kw: {"response": {}}
+        with self.assertRaises(ValueError) as e:
+            w.check()
+        self.assertIn("公开", str(e.exception))
+
+    def test_gaming_tool(self):
+        toolbox = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m.json")), lambda a: True, local_tools=True)
+        names = [t["name"] for t in toolbox.definitions()]
+        self.assertNotIn("gaming", names)
+        toolbox.wishlist = self.make({10: self.price(40, "RM 120.00", "RM 200.00"), 20: None, 30: None})
+        self.assertIn("gaming", [t["name"] for t in toolbox.definitions()])
+        text, failed = toolbox._gaming({"action": "wishlist"}, None)
+        self.assertFalse(failed)
+        self.assertIn("艾尔登法环", text)
+        self.assertTrue(toolbox._gaming({"action": "temps"}, None)[1])  # 没有温度:说清楚
+
+
 class LedgerTest(TempDirTest):
     def make(self, when=datetime.datetime(2026, 11, 10, 13, 0)):
         self.now = [when]

@@ -79,6 +79,7 @@ class QuickCommands:
         self.known_games = None  # friday_games.KnownGames
         self.temps = None  # friday_temps.Temps
         self.gamereport = None  # friday_gamereport.GameReport
+        self.wishlist = None  # friday_wishlist.Wishlist
         self.env_file = None  # 改设定时存到哪个 .env
         self.sleep_timer = None  # friday_sleeptimer.SleepTimer
         self.diary = None  # friday_diary.Diary
@@ -573,6 +574,9 @@ class QuickCommands:
     REPORT_RE = re.compile(r"^(游戏报告|上一局报告|刚才那局电脑(怎么样|有没有问题)|(刚才)?打游戏(的)?时候电脑(怎么样|有没有问题)"
                            r"|你(刚才)?(打游戏时)?(用了|占了)多少(资源|CPU|cpu|内存))$")
 
+    WISHLIST_RE = re.compile(r"^(steam|Steam|STEAM)?(的)?(愿望单|愿望清单)(里)?(有什么|有没有|有哪些|哪些)?(游戏)?(在)?(打折|特价|降价)(吗|了吗|了没)?$"
+                             r"|^(steam|Steam|STEAM)(上)?(有什么|有哪些|哪些)?(游戏)?(在)?(打折|特价)(吗)?$|^(看看|查查)?(我的)?(steam|Steam)?愿望单$")
+
     def _games(self, sentence: str) -> str | None:
         learned = self._learn_games(sentence)
         if learned:
@@ -581,6 +585,11 @@ class QuickCommands:
             return self.temps.describe()
         if self.gamereport is not None and self.REPORT_RE.match(sentence):
             return self.gamereport.describe()
+        if self.wishlist is not None and self.WISHLIST_RE.match(sentence):
+            try:
+                return self.wishlist.describe()
+            except ValueError as e:
+                return str(e)
         if self.gameboost is not None:
             if self.GAME_CHECK.match(sentence):
                 import friday_gameboost

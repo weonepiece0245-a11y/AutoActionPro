@@ -793,6 +793,18 @@ NVIDIA_TOOL = {
         "action": {"type": "string", "enum": ["status", "replay", "record", "screenshot"]}}, "required": ["action"]},
 }
 
+GAMING_TOOL = {
+    "name": "gaming",
+    "description": ("打游戏相关(都不花钱):temps 现在 CPU/显卡温度;last_report 上一局的游戏报告(打了多久、星期五用了多少、"
+                    "最热几度、哪个后台程序忙);checkup 检查 Windows 有没有拖慢游戏的设定;boost_status 游戏优化现在在做什么;"
+                    "known_games 学过的游戏;mark_game 把程序记成游戏(name 填游戏名或“刚才那个”);not_game 不是游戏;"
+                    "wishlist Steam 愿望单里在打折的游戏。"),
+    "input_schema": {"type": "object", "properties": {
+        "action": {"type": "string", "enum": ["temps", "last_report", "checkup", "boost_status", "known_games",
+                                              "mark_game", "not_game", "wishlist"]},
+        "name": {"type": "string"}}, "required": ["action"]},
+}
+
 FOLDER_BACKUP_TOOL = {
     "name": "folder_backup",
     "description": ("重要文件夹每天自动备份到另一个硬盘/移动硬盘(只复制新的和改过的,旧版本留 30 天,很多文件同时变了会先停下):"
@@ -1060,6 +1072,11 @@ class Toolbox:
         self.news = None  # friday_news.News
         self.steam = None  # friday_steam.Steam
         self.nvidia = False  # 有 NVIDIA 显卡
+        self.temps = None  # friday_temps.Temps
+        self.gamereport = None  # friday_gamereport.GameReport
+        self.known_games = None  # friday_games.KnownGames
+        self.gameboost = None  # friday_gameboost.GameBoost
+        self.wishlist = None  # friday_wishlist.Wishlist
         self.folder_backup = None  # (friday_folderbackup.FolderBackup, 马上备份() -> 话)
         self.reader = None  # (friday_reader.Reader, 开始读(标题, 段落) -> 话)
         self.spotify = None  # friday_spotify.Spotify
@@ -1128,6 +1145,7 @@ class Toolbox:
             "news": self._news,
             "steam": self._steam,
             "nvidia": self._nvidia,
+            "gaming": self._gaming,
             "folder_backup": self._folder_backup,
             "read_aloud": self._read_aloud,
             "spotify": self._spotify,
@@ -1195,6 +1213,8 @@ class Toolbox:
             tools = tools + [STEAM_TOOL]
         if self.nvidia and self.local_tools:
             tools = tools + [NVIDIA_TOOL]
+        if self.local_tools and (self.gameboost is not None or self.wishlist is not None):
+            tools = tools + [GAMING_TOOL]
         if self.folder_backup is not None and self.local_tools:
             tools = tools + [FOLDER_BACKUP_TOOL]
         if self.reader is not None and self.local_tools:
@@ -1546,6 +1566,32 @@ class Toolbox:
         except RuntimeError as e:
             return str(e), True
         return f"不支持的 action:{action}", True
+
+    def _gaming(self, args, on_status):
+        action = args.get("action")
+        name = str(args.get("name") or "")
+        try:
+            if action == "temps" and self.temps is not None:
+                return self.temps.describe(), False
+            if action == "last_report" and self.gamereport is not None:
+                return self.gamereport.describe(), False
+            if action == "checkup":
+                import friday_gameboost
+
+                return friday_gameboost.checkup(), False
+            if action == "boost_status" and self.gameboost is not None:
+                return self.gameboost.describe(), False
+            if action == "known_games" and self.known_games is not None:
+                return self.known_games.describe(), False
+            if action == "mark_game" and self.known_games is not None:
+                return self.known_games.mark_game(name), False
+            if action == "not_game" and self.known_games is not None:
+                return self.known_games.mark_not_game(name), False
+            if action == "wishlist" and self.wishlist is not None:
+                return self.wishlist.describe(), False
+        except ValueError as e:
+            return str(e), True
+        return "这个功能在这台电脑上没开(温度要 Windows,愿望单要先连 Steam)", True
 
     def _folder_backup(self, args, on_status):
         backup, run_now = self.folder_backup

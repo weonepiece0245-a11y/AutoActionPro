@@ -2634,7 +2634,7 @@ def start_care(session, ctx, hub, toolbox: Toolbox, voice_module, data_dir: str 
     import friday_gameboost
 
     boost = friday_gameboost.GameBoost(data_dir)
-    session.gameboost = boost  # 简单指令那边等 session.quick 建好后再接上(这时还没有)
+    session.gameboost = toolbox.gameboost = boost  # 简单指令那边等 session.quick 建好后再接上(这时还没有)
     if boost.recover():
         print("上次打游戏时星期五意外关掉了:游戏优化已经改回原样", flush=True)
 
@@ -2654,7 +2654,7 @@ def start_care(session, ctx, hub, toolbox: Toolbox, voice_module, data_dir: str 
 
     report = friday_gamereport.GameReport(
         temps=lambda: session.temps.read() if getattr(session, "temps", None) is not None else {})
-    session.gamereport = report
+    session.gamereport = toolbox.gamereport = report
 
     def report_game(game: str) -> None:
         if os.environ.get("FRIDAY_GAME_REPORT", "on") == "off" or os.name != "nt":
@@ -2709,7 +2709,7 @@ def start_care(session, ctx, hub, toolbox: Toolbox, voice_module, data_dir: str 
         reminders=todays_reminders, toast=toast, on_game=game_started, on_game_end=game_ended)
     import friday_games
 
-    care.known = session.known_games = friday_games.KnownGames(os.path.join(data_dir, "friday_games.json"))
+    care.known = session.known_games = toolbox.known_games = friday_games.KnownGames(os.path.join(data_dir, "friday_games.json"))
     if os.name == "nt":
         care.app_path = friday_care.foreground_path
     care.start()
@@ -3231,6 +3231,33 @@ def start_folder_backup(session, toolbox, data_dir: str, interval: float = 600) 
     threading.Thread(target=loop, daemon=True, name="friday-folder-backup-daily").start()
 
 
+def start_wishlist(session, toolbox, data_dir: str) -> None:
+    """Steam 愿望单打折提醒:每 6 小时看一次,有新打折就说(也推到手机)。"""
+    import friday_wishlist
+
+    wishlist = friday_wishlist.Wishlist(toolbox.steam, os.path.join(data_dir, "friday_wishlist.json"))
+    toolbox.wishlist = session.quick.wishlist = session.wishlist = wishlist
+
+    def loop() -> None:
+        time.sleep(600)
+        while True:
+            def check() -> None:
+                if os.environ.get("FRIDAY_WISHLIST", "on") == "off" or not wishlist.due():
+                    return
+                text = wishlist.check()
+                if text:
+                    announce(session, text, "🛒", "Steam 愿望单有游戏在打折")
+            try:
+                check()
+            except ValueError as e:
+                print(f"愿望单没看成:{e}", flush=True)
+            except Exception as e:  # noqa: BLE001
+                print(f"愿望单没看成:{type(e).__name__}: {e}", flush=True)
+            time.sleep(30 * 60)
+
+    threading.Thread(target=loop, daemon=True, name="friday-wishlist").start()
+
+
 def start_connected_apps(session, toolbox, ctx, data_dir: str, port: int) -> None:
     """连接的应用:新闻、Steam、NVIDIA、Spotify。"""
     import friday_news
@@ -3241,6 +3268,7 @@ def start_connected_apps(session, toolbox, ctx, data_dir: str, port: int) -> Non
     toolbox.news = session.quick.news = friday_news.News()
     if friday_steam.configured():
         toolbox.steam = session.quick.steam = friday_steam.Steam()
+        start_wishlist(session, toolbox, data_dir)
     import friday_diary
     import friday_shopping
 
