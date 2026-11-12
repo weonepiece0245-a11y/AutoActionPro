@@ -973,6 +973,7 @@ function fillSettings() {
   $("subtitleRow").hidden = !s.ptt;
   if (s.ptt) { $("setPttDuck").checked = s.ptt.duck !== false; $("setSubtitles").checked = s.ptt.subtitles !== false; }
   fillLightLink(s.lightlink);
+  fillParty(s.party);
   for (const [row, select, button, state] of [["pttRow", "setPtt", "pttCapture", s.ptt],
                                                 ["shotRow", "setShot", "shotCapture", s.ptt && s.ptt.shot]]) {
     $(row).hidden = !state;
@@ -1492,6 +1493,19 @@ function saveLightLink() {
   saveSetting({ lightlink: { game_mode: $("lightGameMode").value, game: checked($("lightGameList")),
     away_minutes: Number($("lightAwayMin").value), away: checked($("lightAwayList")), back: $("lightBack").checked } });
 }
+function fillParty(p) {
+  $("partyGroup").hidden = !p;
+  if (!p || $("partyGroup").contains(document.activeElement)) return;
+  $("partyApps").value = p.apps; $("partyGame").value = p.game; $("partyPlaylist").value = p.playlist;
+  const sel = $("partyLights");
+  if (!sel.options.length) for (const [k, v] of p.modes) sel.append(new Option(v, k));
+  sel.value = p.lights;
+  $("partyLightsRow").hidden = !p.has_lights;
+  $("partyQuiet").checked = p.quiet; $("partyClose").checked = p.close;
+}
+$("partySave").onclick = () => saveSetting({ party: {
+  apps: $("partyApps").value, game: $("partyGame").value.trim(), playlist: $("partyPlaylist").value.trim(),
+  lights: $("partyLights").value || "none", quiet: $("partyQuiet").checked, close: $("partyClose").checked } });
 $("lightGameMode").onchange = saveLightLink;
 $("lightAwayMin").onchange = saveLightLink;
 $("lightBack").onchange = saveLightLink;

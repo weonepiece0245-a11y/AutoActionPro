@@ -247,6 +247,17 @@
       <div class="set-note">说“游戏体检”可以检查 Windows 的游戏设定。全屏运行的程序(看视频的浏览器、播放器除外)和 Apex、Dota 2 等都算游戏。程序是正常关闭的,有没保存的内容会先问你;Discord 这类关窗口只会缩到右下角。msedge 也是星期五的窗口,关掉后星期五仍在后台。</div>
     </div>
 
+    <div class="set-group" data-cat="game" id="partyGroup" hidden>
+      <h3>一键开黑(说“开黑”开始,说“不玩了”恢复)</h3>
+      <div class="set-row"><label for="partyApps">要打开的程序(逗号分开)</label><input class="mini-input wide" id="partyApps" placeholder="Discord, Steam"></div>
+      <div class="set-row"><label for="partyGame">启动游戏(可以不填)</label><input class="mini-input wide" id="partyGame" placeholder="例如 Apex、Dota 2"></div>
+      <div class="set-row"><label for="partyPlaylist">Spotify 歌单(可以不填)</label><input class="mini-input wide" id="partyPlaylist" placeholder="你在 Spotify 的歌单名"></div>
+      <div class="set-row" id="partyLightsRow"><label for="partyLights">家里的灯(用下面“灯联动”选的那几盏)</label><select class="mini-select" id="partyLights"></select></div>
+      <div class="set-row"><label for="partyQuiet">开启别打扰(提醒改成右下角小通知)</label><input type="checkbox" class="switch" id="partyQuiet"></div>
+      <div class="set-row"><label for="partyClose">说“不玩了”时关掉开黑时打开的程序</label><input type="checkbox" class="switch" id="partyClose"></div>
+      <div class="set-row"><span class="set-note">改好后按保存</span><button type="button" class="mini-btn" id="partySave">保存</button></div>
+    </div>
+
     <div class="set-group" data-cat="game" id="lightGroup" hidden>
       <h3>家里的灯联动(Tapo)</h3>
       <div class="set-row"><label for="lightGameMode">开游戏时,下面选的灯</label><select class="mini-select" id="lightGameMode"></select></div>

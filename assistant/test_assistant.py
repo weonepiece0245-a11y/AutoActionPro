@@ -7252,6 +7252,94 @@ class SubtitleTest(unittest.TestCase):
         self.assertTrue(started)
 
 
+import friday_partymode  # noqa: E402
+
+
+class PartyModeTest(unittest.TestCase):
+    def make(self, cfg):
+        self.log = []
+        log = self.log
+
+        class Computer:
+            available = True
+
+            def do(self, action, value="", approve=None):
+                log.append((action, value))
+                if value == "坏掉的":
+                    return "开始菜单里没有找到"
+                return f"已通过 Steam 启动 {value}" if action == "open_game" else f"已打开 {value}"
+
+            def close_programs(self, names):
+                log.append(("close", tuple(names)))
+                return names
+
+        class Link:
+            def __init__(self):
+                self.config = lambda: {"game_mode": "none", "game": ["客厅灯"]}
+
+            def game_start(self):
+                log.append(("lights", self.config()["game_mode"]))
+                return "开游戏了,客厅灯换成紫色了。"
+
+            def game_end(self):
+                log.append(("lights_back",))
+                return "改回来了"
+        spotify = SimpleNamespace(connected=True, play=lambda q: log.append(("play", q)) or "好,放歌单《开黑》。",
+                                  control=lambda a: log.append(("spotify", a)))
+        self.care = SimpleNamespace(forced_quiet=False)
+        self.link = Link()
+        base = {"apps": ["Discord", "Steam"], "game": "", "playlist": "", "lights": "none", "quiet": True, "close": False}
+        return friday_partymode.PartyMode(lambda: Computer(), spotify=lambda: spotify, lights=lambda: self.link,
+                                          care=lambda: self.care, config=lambda: {**base, **cfg})
+
+    def test_start_and_stop(self):
+        party = self.make({"game": "Apex", "playlist": "开黑", "lights": "紫", "close": True, "apps": ["Discord", "坏掉的"]})
+        text = party.start()
+        self.assertEqual(text, "开黑模式开好了:Discord、Apex、灯、歌单《开黑》、别打扰;坏掉的 没弄好。打完说“不玩了”我就全部恢复。")
+        self.assertIn(("lights", "紫"), self.log)
+        self.assertEqual(self.link.config()["game_mode"], "none")  # 灯联动原来的设定不动
+        self.assertTrue(self.care.forced_quiet)
+        self.log.clear()
+        text = party.stop()
+        self.assertIn("灯改回来了", text)
+        self.assertIn(("spotify", "pause"), self.log)
+        self.assertIn(("close", ("discord",)), self.log)  # 只关开黑时它自己打开的
+        self.assertFalse(self.care.forced_quiet)
+        self.assertEqual(party.stop(), "现在没有在开黑模式。")
+
+    def test_nothing_chosen_and_bad_names(self):
+        party = self.make({"apps": ["rm -rf /", "C:\\x.exe"], "quiet": False})
+        self.assertIn("没有要做的", party.start())
+        self.assertEqual(self.log, [])  # 奇怪的名字不会拿去开
+        self.assertEqual(friday_partymode.clean_name("Dota 2"), "Dota 2")
+        self.assertEqual(friday_partymode.clean_name("a;b"), "")
+
+    def test_quick_words_and_quiet(self):
+        for said in ("开黑", "我要开黑了", "星期五,开黑吧", "开启开黑模式"):
+            self.assertTrue(friday_partymode.START_RE.match(said), said)
+        for said in ("不玩了", "开黑结束", "星期五,下线了"):
+            self.assertTrue(friday_partymode.STOP_RE.match(said), said)
+        self.assertIsNone(friday_partymode.START_RE.match("开黑的时候要注意什么"))
+        care = friday_care.Care(lambda t: True, name=lambda: "老板", idle=lambda: 0, app=lambda: "explorer.exe",
+                                settings=lambda: {"welcome": False, "break_minutes": 0, "night": False, "game_quiet": True},
+                                fullscreen=lambda: False, display=lambda: False)
+        self.assertFalse(care.quiet_now())
+        care.forced_quiet = True
+        self.assertTrue(care.quiet_now())  # 开黑模式:还没进游戏也先别打扰
+
+    def test_settings_payload(self):
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        env = Path(tempfile.mkdtemp(), ".env")
+        env.write_text("")
+        with mock.patch.dict(os.environ, {}):
+            self.assertIn("error", app.apply_settings({"party": {"lights": "彩虹"}}, session, SimpleNamespace(), env))
+            self.assertIn("error", app.apply_settings({"party": {"game": "x & del *.*;"}}, session, SimpleNamespace(), env))
+            app.apply_settings({"party": {"apps": "Discord、Steam, ;bad", "game": "Apex", "playlist": "开黑",
+                                          "lights": "紫", "quiet": True, "close": True}}, session, SimpleNamespace(), env)
+            cfg = friday_partymode.settings()
+        self.assertEqual((cfg["apps"], cfg["game"], cfg["lights"], cfg["close"]), (["Discord", "Steam"], "Apex", "紫", True))
+
+
 class LedgerTest(TempDirTest):
     def make(self, when=datetime.datetime(2026, 11, 10, 13, 0)):
         self.now = [when]
@@ -9407,6 +9495,7 @@ class ClipboardTest(TempDirTest):
             if len(clips.items) == 2:
                 break
             time.sleep(0.01)
+        clips.stop()  # 等背景那一次存完,测试结束删暂存文件夹时才不会撞在一起
         self.assertEqual([i["text"] for i in clips.items], ["第三段", "第一段"])
         with mock.patch.dict(os.environ, {"FRIDAY_CLIPBOARD": "off"}):
             self.assertFalse(clips.add("关掉了"))

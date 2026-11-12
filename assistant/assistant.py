@@ -1909,6 +1909,18 @@ def hotkey_state(session) -> dict | None:
             "ask_options": [[key, label] for key, (label, _, _) in friday_desktop.ASK_HOTKEYS.items()]}
 
 
+def party_state(session) -> dict | None:
+    """一键开黑的设定(只有 Windows 才开得了程序)。"""
+    if getattr(session, "party", None) is None or os.name != "nt":
+        return None
+    import friday_lightlink
+    import friday_partymode
+
+    cfg = friday_partymode.settings()
+    return {**cfg, "apps": ", ".join(cfg["apps"]), "modes": [[k, v] for k, v in friday_lightlink.GAME_MODES.items()],
+            "has_lights": getattr(getattr(session, "quick", None), "home", None) is not None, "active": session.party.active}
+
+
 def lightlink_state(session) -> dict | None:
     """游戏和家里灯联动的设定;连了 Tapo 才有。"""
     home = getattr(getattr(session, "quick", None), "home", None)
@@ -2205,6 +2217,7 @@ def settings_state(session, meter=None) -> dict:
         "ptt": ptt_state(session),
         "auto_update": os.environ.get("FRIDAY_AUTO_UPDATE", "on") != "off",
         "lightlink": lightlink_state(session),
+        "party": party_state(session),
         "push": push_mode() if getattr(session, "discord", None) is not None else None,
         "remind_calendar": remind_calendar_state(session),
         "security": security_state(session),
@@ -2688,6 +2701,27 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         save_env_value(env, "FRIDAY_PTT_DUCK", "on" if on else "off")
         os.environ["FRIDAY_PTT_DUCK"] = "on" if on else "off"
         done.append("按住说话时会先把电脑声音压低,说完恢复" if on else "按住说话时不压低电脑声音")
+    if "party" in payload and isinstance(payload["party"], dict):
+        import friday_lightlink
+        import friday_partymode
+
+        party = payload["party"]
+        apps = [friday_partymode.clean_name(a) for a in re.split(r"[,,、]", str(party.get("apps", "")))]
+        apps = [a for a in apps if a][:6]
+        game = friday_partymode.clean_name(party.get("game", ""))
+        playlist = friday_partymode.clean_name(party.get("playlist", ""))
+        lights = str(party.get("lights", "none"))
+        if lights not in friday_lightlink.GAME_MODES:
+            return {"error": "灯的选项不对"}
+        if (party.get("game") and not game) or (party.get("playlist") and not playlist):
+            return {"error": "名字里有不能用的符号(只能写程序名、游戏名、歌单名)"}
+        values = {"FRIDAY_PARTY_APPS": ", ".join(apps), "FRIDAY_PARTY_GAME": game, "FRIDAY_PARTY_PLAYLIST": playlist,
+                  "FRIDAY_PARTY_LIGHTS": lights, "FRIDAY_PARTY_QUIET": "on" if party.get("quiet", True) else "off",
+                  "FRIDAY_PARTY_CLOSE": "on" if party.get("close") else "off"}
+        for key, value in values.items():
+            save_env_value(env, key, value)
+            os.environ[key] = value
+        done.append("一键开黑设好了:说“开黑”开始,说“不玩了”恢复")
     if "auto_update" in payload:
         on = bool(payload["auto_update"])
         save_env_value(env, "FRIDAY_AUTO_UPDATE", "on" if on else "off")
@@ -4038,6 +4072,27 @@ def floatorb_switch(session, on: bool) -> str:
     return "小光球收起来了。"
 
 
+def start_partymode(session, toolbox) -> None:
+    """一键开黑:说“开黑”打开程序、游戏、灯、歌单、别打扰;说“不玩了”全部恢复。"""
+    import friday_partymode
+
+    party = friday_partymode.PartyMode(
+        computer=lambda: getattr(toolbox, "computer", None), spotify=lambda: getattr(toolbox, "spotify", None),
+        lights=lambda: getattr(session, "lightlink", None), care=lambda: getattr(session, "care", None))
+    session.party = party
+
+    def start() -> str:
+        if party.active:
+            return "已经在开黑模式了。打完说“不玩了”。"
+        threading.Thread(target=lambda: _quietly(lambda: say_here(session, party.start(), "🎮")), daemon=True,
+                         name="friday-party").start()
+        cfg = friday_partymode.settings()
+        steps = [friday_partymode.clean_name(a) for a in cfg["apps"]] + [cfg["game"]]
+        return "好,开黑!正在打开 " + ("、".join(s for s in steps if s) or "要的东西") + ",好了告诉你。"
+
+    session.quick.party = (start, party.stop)
+
+
 def start_selfcheck(session, toolbox, data_dir: str) -> None:
     """自我检查:半夜自动更新完试跑常用功能;说“自我检查”也会马上做一次。"""
     import friday_alerts
@@ -4699,6 +4754,7 @@ def run_web(args) -> None:
     _startup_step(session, "截图问星期五", lambda: start_screenshot(session, ctx, events))
     _startup_step(session, "半夜自动更新", lambda: start_autoupdate(session, events, data_dir))
     _startup_step(session, "自我检查", lambda: start_selfcheck(session, toolbox, data_dir))
+    _startup_step(session, "一键开黑", lambda: start_partymode(session, toolbox))
     if getattr(toolbox, "screen", None) is not None:
         toolbox.screen.on_change = lambda active, text: takeover_notice(session, active, text)
     if toolbox.google is not None:  # 登录了 Google:笔记同时抄到 Google 文档(在后台抄,不拖慢)

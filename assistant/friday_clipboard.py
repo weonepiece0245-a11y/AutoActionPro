@@ -175,11 +175,11 @@ class ClipHistory:
                 return False
             reader = _windows_reader()
         sequence, skip, read = reader
+        self._stop = threading.Event()
 
         def loop() -> None:
             last = sequence()
-            while True:
-                time.sleep(interval)
+            while not self._stop.wait(interval):
                 try:
                     now = sequence()
                     if now == last:
@@ -191,5 +191,13 @@ class ClipHistory:
                 except Exception:
                     pass
 
-        threading.Thread(target=loop, daemon=True, name="friday-clipboard").start()
+        self._thread = threading.Thread(target=loop, daemon=True, name="friday-clipboard")
+        self._thread.start()
         return True
+
+    def stop(self) -> None:
+        """不再看剪贴板(等正在存的那一次存完)。"""
+        stop = getattr(self, "_stop", None)
+        if stop is not None:
+            stop.set()
+            self._thread.join(2)

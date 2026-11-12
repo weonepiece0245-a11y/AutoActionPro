@@ -82,6 +82,7 @@ class QuickCommands:
         self.wishlist = None  # friday_wishlist.Wishlist
         self.dota_advice = None  # friday_dota_advice.DotaAdvice
         self.selfcheck = None  # friday_selfcheck.SelfCheck
+        self.party = None  # (开始开黑, 不玩了):两个函数
         self.env_file = None  # 改设定时存到哪个 .env
         self.sleep_timer = None  # friday_sleeptimer.SleepTimer
         self.diary = None  # friday_diary.Diary
@@ -586,6 +587,13 @@ class QuickCommands:
     DUCK_LOG_RE = re.compile(r"^(按住说话|压低声音)(的)?(诊断|记录|日志)$")
 
     def _games(self, sentence: str) -> str | None:
+        if self.party is not None:
+            import friday_partymode
+
+            if friday_partymode.START_RE.match(sentence):
+                return self.party[0]()
+            if friday_partymode.STOP_RE.match(sentence):
+                return self.party[1]()
         if self.DUCK_LOG_RE.match(sentence):
             ducker = getattr(self, "ducker", None)
             if ducker is None:

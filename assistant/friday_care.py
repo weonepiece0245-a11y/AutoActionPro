@@ -387,8 +387,12 @@ class Care:
         return self.rng.choice(options).format(name=self.name(), **values)
 
     # ---------- 打游戏时 ----------
+    forced_quiet = False  # 开黑模式:还没进游戏也先别打扰
+
     def quiet_now(self) -> bool:
-        """现在在打游戏、而且开着“游戏时别打扰”。"""
+        """现在在打游戏(或开着开黑模式)、而且开着“游戏时别打扰”。"""
+        if self.forced_quiet:
+            return True
         return bool(self.game) and self.settings().get("game_quiet", True)
 
     def hold(self, text: str, short: str | None = None) -> None:
