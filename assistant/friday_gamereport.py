@@ -7,8 +7,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
+from pathlib import Path
 import time
 from typing import Callable
 
@@ -112,7 +114,7 @@ class WindowsSampler:
 
 class GameReport:
     def __init__(self, sampler=None, temps: Callable[[], dict] | None = None, clock: Callable[[], float] = time.time,
-                 own_pid: int | None = None, cpus: int | None = None) -> None:
+                 own_pid: int | None = None, cpus: int | None = None, history: str | os.PathLike | None = None) -> None:
         self.sampler = sampler
         self.temps = temps
         self.clock = clock
@@ -121,6 +123,7 @@ class GameReport:
         self.lock = threading.Lock()
         self.active: dict | None = None
         self.last_text = ""
+        self.history = Path(history) if history else None  # 每局的摘要(给每周总结用),留 120 天
 
     def _sam(self):
         if self.sampler is None:
@@ -188,7 +191,39 @@ class GameReport:
             return ""
         text = self._compose(state, played)
         self.last_text = text
+        self._remember(state, played)
         return text
+
+    def _remember(self, state: dict, played: float) -> None:
+        if self.history is None:
+            return
+        samples = max(state["samples"], 1)
+        busy = [name for avg, name in sorted(((v / samples, k) for k, v in state["usage"].items()), reverse=True)
+                if avg >= BUSY_PERCENT][:3]
+        entry = {"t": state["start"], "game": state["game"], "seconds": round(played), "cpu_temp": state["cpu_temp"],
+                 "gpu_temp": state["gpu_temp"], "own_cpu": round(state["own_cpu"], 1), "busy": busy}
+        cutoff = self.clock() - 120 * 86400
+        try:
+            old = json.loads(self.history.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            old = []
+        kept = [e for e in old if isinstance(e, dict) and e.get("t", 0) >= cutoff] + [entry]
+        try:
+            temp = self.history.with_name(self.history.name + ".tmp")
+            temp.write_text(json.dumps(kept, ensure_ascii=False), encoding="utf-8")
+            os.replace(temp, self.history)
+        except OSError:
+            pass
+
+    def sessions(self, first: float, last: float) -> list[dict]:
+        """这段时间(时间戳)里打过的局。"""
+        if self.history is None:
+            return []
+        try:
+            data = json.loads(self.history.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        return [e for e in data if isinstance(e, dict) and first <= e.get("t", 0) < last]
 
     @staticmethod
     def _compose(state: dict, played: float) -> str:

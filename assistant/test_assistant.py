@@ -6476,6 +6476,57 @@ class LightLinkTest(unittest.TestCase):
         self.assertIn("FRIDAY_LIGHT_GAME=客厅灯", env.read_text())
 
 
+import friday_weekly  # noqa: E402
+
+
+class WeeklyGameTest(TempDirTest):
+    def test_game_section(self):
+        week = (datetime.date(2026, 11, 9), datetime.date(2026, 11, 15))
+        screentime = SimpleNamespace(totals=lambda first, last: ({}, {"Apex": 5 * 3600, "NTE": 2 * 3600})
+                                     if first == week[0] else ({}, {"Apex": 4 * 3600}))
+        report = friday_gamereport.GameReport(sampler=FakeSampler(), history=os.path.join(self.tmp, "g.json"))
+        day = datetime.datetime(2026, 11, 10, 21, 0).timestamp()
+        for i, (game, minutes, cpu, busy) in enumerate([("Apex", 90, 80.0, ["audiodg"]), ("Apex", 40, 84.0, ["audiodg"]),
+                                                        ("NTE", 120, 77.0, [])]):
+            state = {"game": game, "start": day + i * 86400, "samples": 1, "usage": {b: 8.0 for b in busy},
+                     "own_cpu": 0.5, "own_mem": 260, "cpu_temp": cpu, "gpu_temp": 70.0}
+            report._remember(state, minutes * 60)
+        old = {"game": "Dota 2", "start": day - 30 * 86400, "samples": 1, "usage": {}, "own_cpu": 0, "own_mem": 0,
+               "cpu_temp": 99.0, "gpu_temp": None}
+        report._remember(old, 3600)  # 上个月的不算
+        dota = SimpleNamespace(recent=lambda: [
+            {"start_time": day, "player_slot": 1, "radiant_win": True},
+            {"start_time": day + 3600, "player_slot": 130, "radiant_win": True},
+            {"start_time": day - 20 * 86400, "player_slot": 1, "radiant_win": True}])
+        text = friday_weekly.game_section(week, screentime, report, dota, apex_line=lambda: "钻石 2(9,200 分)。")
+        self.assertTrue(text.startswith("【游戏和电脑】游戏:Apex 5 小时、NTE 2 小时,比上周多 3 小时。"))
+        self.assertIn("打了 3 局(5 分钟以上的),最长的一局是 NTE 2 小时", text)
+        self.assertIn("打游戏时最热:CPU 84°C、显卡 70°C", text)
+        self.assertNotIn("99", text)
+        self.assertIn("Windows 音频处理", text)
+        self.assertIn("Dota 2 这周 2 局,赢 1 输 1。", text)
+        self.assertIn("Apex:钻石 2", text)
+
+    def test_empty_and_failures(self):
+        week = (datetime.date(2026, 11, 9), datetime.date(2026, 11, 15))
+        self.assertEqual(friday_weekly.game_section(week), "")
+        broken = SimpleNamespace(recent=lambda: (_ for _ in ()).throw(ValueError("连不上")))
+        self.assertEqual(friday_weekly.game_section(week, dota=broken, apex_line=lambda: (_ for _ in ()).throw(ValueError())), "")
+
+    def test_weekly_report_includes_games(self):
+        import friday_alerts
+
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        state = friday_alerts.AlertState(os.path.join(self.tmp, "a.json"))
+        toolbox = SimpleNamespace(ledger=None, screentime=None, habits=None, gamereport=None, dota=None, apex=None)
+        said = []
+        with mock.patch.object(app, "announce", lambda s, text, icon, short: said.append((text, short))), \
+                mock.patch.object(friday_weekly, "game_section", lambda *a, **k: "【游戏和电脑】游戏:Apex 1 小时。"):
+            text = app.weekly_report(session, toolbox, state, now=datetime.datetime(2026, 11, 15, 21, 30))
+        self.assertIn("【游戏和电脑】游戏:Apex 1 小时。", text)
+        self.assertEqual(said[0][1], "这周的总结(花费、游戏、电脑)在窗口里")
+
+
 class LedgerTest(TempDirTest):
     def make(self, when=datetime.datetime(2026, 11, 10, 13, 0)):
         self.now = [when]

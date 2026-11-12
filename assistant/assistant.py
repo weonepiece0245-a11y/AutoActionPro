@@ -2761,7 +2761,8 @@ def start_care(session, ctx, hub, toolbox: Toolbox, voice_module, data_dir: str 
     import friday_gamereport
 
     report = friday_gamereport.GameReport(
-        temps=lambda: session.temps.read() if getattr(session, "temps", None) is not None else {})
+        temps=lambda: session.temps.read() if getattr(session, "temps", None) is not None else {},
+        history=os.path.join(data_dir, "friday_gamereport.json"))
     session.gamereport = toolbox.gamereport = report
 
     def report_game(game: str) -> None:
@@ -2909,8 +2910,15 @@ def weekly_report(session, toolbox: Toolbox, state, now: datetime.datetime | Non
     habits = getattr(toolbox, "habits", None)
     if habits is not None and habits.items:
         text += habits.week_line(week[1])
+    import friday_weekly
+
+    apex = getattr(toolbox, "apex", None)
+    games = friday_weekly.game_section(week, screentime=screentime, report=getattr(toolbox, "gamereport", None),
+                                       dota=getattr(toolbox, "dota", None), apex_line=apex.player if apex is not None else None)
+    if games:
+        text += "\n" + games
     state.set("weekly", week[0].isoformat())
-    announce(session, text, "📊", "这周的花费报告在窗口里")
+    announce(session, text, "📊", "这周的总结(花费、游戏、电脑)在窗口里")
     return text
 
 
