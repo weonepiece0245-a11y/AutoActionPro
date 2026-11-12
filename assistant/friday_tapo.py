@@ -89,14 +89,23 @@ class KasaBackend:
 
     def _info(self, key: str, dev) -> dict:
         light = self._light(dev)
-        brightness = None
+        brightness = hsv = color_temp = None
         if light is not None:
             try:
                 brightness = light.brightness
             except Exception:
                 brightness = None
+            try:  # 记下颜色,游戏联动打完时改得回来
+                if getattr(light, "is_color", False):
+                    h, s, v = light.hsv
+                    hsv = [int(h), int(s), int(v)]
+                if getattr(light, "is_variable_color_temp", False) and light.color_temp:
+                    color_temp = int(light.color_temp)
+            except Exception:
+                pass
         return {"id": key, "name": str(getattr(dev, "alias", "") or key), "on": bool(getattr(dev, "is_on", False)),
-                "kind": "light" if light is not None else "plug", "brightness": brightness}
+                "kind": "light" if light is not None else "plug", "brightness": brightness, "hsv": hsv,
+                "color_temp": color_temp}
 
     def set_on(self, key: str, on: bool) -> None:
         dev = self.handles[key]

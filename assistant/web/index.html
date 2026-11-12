@@ -240,6 +240,16 @@
       <div class="set-note">说“游戏体检”可以检查 Windows 的游戏设定。全屏运行的程序(看视频的浏览器、播放器除外)和 Apex、Dota 2 等都算游戏。程序是正常关闭的,有没保存的内容会先问你;Discord 这类关窗口只会缩到右下角。msedge 也是星期五的窗口,关掉后星期五仍在后台。</div>
     </div>
 
+    <div class="set-group" data-cat="game" id="lightGroup" hidden>
+      <h3>家里的灯联动(Tapo)</h3>
+      <div class="set-row"><label for="lightGameMode">开游戏时,下面选的灯</label><select class="mini-select" id="lightGameMode"></select></div>
+      <div class="picks" id="lightGameList"></div>
+      <div class="set-row"><label for="lightAwayMin">离开电脑多久,关掉下面选的灯和插座</label><select class="mini-select" id="lightAwayMin"></select></div>
+      <div class="picks" id="lightAwayList"></div>
+      <div class="set-row"><label for="lightBack">回到电脑前时开回来</label><input type="checkbox" class="switch" id="lightBack"></div>
+      <div class="set-note">打完游戏会改回原来的亮度和颜色;只开回星期五自己关掉的。电脑睡眠后星期五就不能动了,离开时间要比 Windows 的睡眠时间短。</div>
+    </div>
+
     <div class="set-group" id="cloudGroup" hidden data-cat="apps">
       <h3>云端星期五(电脑关机也能用)</h3>
       <div class="set-row"><label for="setCloud">配对码</label>

@@ -969,6 +969,7 @@ function fillSettings() {
     if (document.activeElement !== $("setGameClose")) $("setGameClose").value = (care.game_close || []).join(", ");
   }
   $("setAutoUpdate").checked = s.auto_update !== false;
+  fillLightLink(s.lightlink);
   $("pttRow").hidden = !s.ptt;
   if (s.ptt) {
     const sel = $("setPtt");
@@ -1378,6 +1379,40 @@ $("setGameBoost").onchange = (e) => saveSetting({ game_boost: e.target.checked }
 $("setGameReport").onchange = (e) => saveSetting({ game_report: e.target.checked });
 $("setPtt").onchange = (e) => saveSetting({ ptt_key: e.target.value });
 $("setAutoUpdate").onchange = (e) => saveSetting({ auto_update: e.target.checked });
+
+// 家里的灯联动:开游戏时调灯、离开时关灯
+function picks(box, devices, chosen, onlyLights) {
+  if (box.contains(document.activeElement)) return;
+  box.replaceChildren(...devices.filter((d) => !onlyLights || d.kind === "light").map((d) => {
+    const label = document.createElement("label");
+    label.className = "pick";
+    const input = document.createElement("input");
+    input.type = "checkbox"; input.value = d.name; input.checked = chosen.includes(d.name);
+    input.onchange = saveLightLink;
+    label.append(input, document.createTextNode((d.kind === "light" ? "💡 " : "🔌 ") + d.name));
+    return label;
+  }));
+  if (!box.children.length) box.textContent = "还没找到设备";
+}
+function fillLightLink(link) {
+  $("lightGroup").hidden = !link;
+  if (!link) return;
+  const mode = $("lightGameMode");
+  if (!mode.options.length) for (const [k, v] of link.modes) mode.append(new Option(v, k));
+  const minutes = $("lightAwayMin");
+  if (!minutes.options.length) for (const m of link.minutes) minutes.append(new Option(m ? `${m} 分钟` : "不关", String(m)));
+  mode.value = link.game_mode; minutes.value = String(link.away_minutes); $("lightBack").checked = link.back;
+  picks($("lightGameList"), link.devices, link.game, link.game_mode !== "off");
+  picks($("lightAwayList"), link.devices, link.away, false);
+}
+function checked(box) { return [...box.querySelectorAll("input:checked")].map((i) => i.value); }
+function saveLightLink() {
+  saveSetting({ lightlink: { game_mode: $("lightGameMode").value, game: checked($("lightGameList")),
+    away_minutes: Number($("lightAwayMin").value), away: checked($("lightAwayList")), back: $("lightBack").checked } });
+}
+$("lightGameMode").onchange = saveLightLink;
+$("lightAwayMin").onchange = saveLightLink;
+$("lightBack").onchange = saveLightLink;
 $("saveGameClose").onclick = () => saveSetting({ game_close: $("setGameClose").value });
 $("setGameClose").addEventListener("keydown", (e) => { if (e.key === "Enter") $("saveGameClose").click(); });
 $("gameCandidates").onclick = async () => {

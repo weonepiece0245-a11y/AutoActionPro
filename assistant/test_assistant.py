@@ -6394,6 +6394,88 @@ class AutoUpdateTest(TempDirTest):
         self.assertIsNone(later.morning_note(5))
 
 
+import friday_lightlink  # noqa: E402
+
+
+class LightLinkTest(unittest.TestCase):
+    def make(self, cfg):
+        self.calls = []
+        devices = [{"id": "a", "name": "客厅灯", "on": True, "kind": "light", "brightness": 80, "hsv": [30, 20, 80], "color_temp": 2700},
+                   {"id": "b", "name": "灯带", "on": True, "kind": "light", "brightness": 50, "hsv": [200, 100, 50], "color_temp": 0},
+                   {"id": "c", "name": "卧室灯", "on": False, "kind": "light", "brightness": 40, "hsv": None, "color_temp": None},
+                   {"id": "d", "name": "PS5", "on": True, "kind": "plug", "brightness": None}]
+        calls = self.calls
+
+        class Backend:
+            def set_on(self, i, on): calls.append(("on", i, on))
+            def set_brightness(self, i, v): calls.append(("bright", i, v))
+            def set_hsv(self, i, h, s, v): calls.append(("hsv", i, h, s, v))
+            def set_color_temp(self, i, k): calls.append(("temp", i, k))
+        home = SimpleNamespace(devices=devices, backend=Backend())
+        home.refresh = lambda force=False: home.devices
+        self.cfg = {"game_mode": "none", "game": [], "away_minutes": 0, "away": [], "back": True, **cfg}
+        return friday_lightlink.LightLink(lambda: home, config=lambda: self.cfg), home
+
+    def test_game_color_and_restore(self):
+        link, home = self.make({"game_mode": "紫", "game": ["客厅灯", "灯带", "卧室灯"]})
+        text = link.game_start()
+        self.assertEqual(text, "开游戏了,客厅灯、灯带换成紫色了。")  # 本来关着的卧室灯不帮你开
+        self.assertIn(("hsv", "a", 275, 100, 60), self.calls)
+        self.assertEqual(link.game_start(), "")  # 已经在联动:不重复
+        self.calls.clear()
+        self.assertIn("改回原来的样子", link.game_end())
+        self.assertIn(("temp", "a", 2700), self.calls)  # 原来是暖白光:改回色温
+        self.assertIn(("hsv", "b", 200, 100, 50), self.calls)  # 原来是彩色:改回那个颜色
+        self.assertIn(("bright", "a", 80), self.calls)
+        self.assertEqual(link.game_end(), "")
+
+    def test_game_dim_and_off(self):
+        link, _ = self.make({"game_mode": "dim", "game": ["客厅灯", "PS5"]})
+        self.assertEqual(link.game_start(), "开游戏了,客厅灯调暗了。")  # 插座不能调暗:不动
+        self.assertIn(("bright", "a", 20), self.calls)
+        link, _ = self.make({"game_mode": "off", "game": ["客厅灯"]})
+        link.game_start()
+        self.assertEqual(self.calls, [("on", "a", False)])
+        link.game_end()
+        self.assertIn(("on", "a", True), self.calls)
+        link, _ = self.make({"game_mode": "none", "game": ["客厅灯"]})
+        self.assertEqual(link.game_start(), "")
+
+    def test_away_and_back(self):
+        link, home = self.make({"away_minutes": 20, "away": ["客厅灯", "卧室灯", "PS5"]})
+        self.assertEqual(link.away_tick(600), "")
+        text = link.away_tick(1300)
+        self.assertEqual(text, "你离开电脑 20 分钟了,帮你关掉了 客厅灯、PS5。")
+        self.assertEqual(link.away_tick(1500), "")  # 只关一次
+        text = link.away_tick(5)
+        self.assertEqual(text, "欢迎回来,客厅灯、PS5开回来了。")
+        self.assertNotIn(("on", "c", True), self.calls)  # 本来关着的不开
+        link, _ = self.make({"away_minutes": 20, "away": ["客厅灯"], "back": False})
+        link.away_tick(1300)
+        self.assertEqual(link.away_tick(5), "")
+        self.assertEqual(self.calls, [("on", "a", False)])
+
+    def test_no_home(self):
+        link = friday_lightlink.LightLink(lambda: None, config=lambda: {"game_mode": "dim", "game": ["x"], "away_minutes": 10,
+                                                                         "away": ["x"], "back": True})
+        self.assertEqual((link.game_start(), link.game_end(), link.away_tick(9999)), ("", "", ""))
+
+    def test_settings_payload(self):
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        env = Path(tempfile.mkdtemp(), ".env")
+        env.write_text("")
+        with mock.patch.dict(os.environ, {}):
+            self.assertIn("error", app.apply_settings({"lightlink": {"game_mode": "rm", "away_minutes": 0}}, session,
+                                                      SimpleNamespace(), env))
+            self.assertIn("error", app.apply_settings({"lightlink": {"game_mode": "dim", "away_minutes": 7}}, session,
+                                                      SimpleNamespace(), env))
+            app.apply_settings({"lightlink": {"game_mode": "紫", "game": ["客厅灯", "a|b", "客厅灯"], "away_minutes": 20,
+                                              "away": ["PS5"], "back": False}}, session, SimpleNamespace(), env)
+            cfg = friday_lightlink.settings()
+        self.assertEqual(cfg, {"game_mode": "紫", "game": ["客厅灯"], "away_minutes": 20, "away": ["PS5"], "back": False})
+        self.assertIn("FRIDAY_LIGHT_GAME=客厅灯", env.read_text())
+
+
 class LedgerTest(TempDirTest):
     def make(self, when=datetime.datetime(2026, 11, 10, 13, 0)):
         self.now = [when]

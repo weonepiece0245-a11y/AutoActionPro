@@ -1903,6 +1903,18 @@ def hotkey_state(session) -> dict | None:
             "ask_options": [[key, label] for key, (label, _, _) in friday_desktop.ASK_HOTKEYS.items()]}
 
 
+def lightlink_state(session) -> dict | None:
+    """游戏和家里灯联动的设定;连了 Tapo 才有。"""
+    home = getattr(getattr(session, "quick", None), "home", None)
+    if home is None or getattr(session, "lightlink", None) is None:
+        return None
+    import friday_lightlink
+
+    devices = [{"name": d["name"], "kind": d["kind"]} for d in (home.devices or [])]
+    return {**friday_lightlink.settings(), "devices": devices,
+            "modes": [[k, v] for k, v in friday_lightlink.GAME_MODES.items()], "minutes": list(friday_lightlink.AWAY_MINUTES)}
+
+
 def ptt_state(session) -> dict | None:
     """打游戏时按住说话(只有 Windows)。"""
     if getattr(session, "ptt", None) is None:
@@ -1981,6 +1993,7 @@ def settings_state(session, meter=None) -> dict:
         "care": care_state(session),
         "ptt": ptt_state(session),
         "auto_update": os.environ.get("FRIDAY_AUTO_UPDATE", "on") != "off",
+        "lightlink": lightlink_state(session),
         "push": push_mode() if getattr(session, "discord", None) is not None else None,
         "remind_calendar": remind_calendar_state(session),
         "security": security_state(session),
@@ -2435,6 +2448,25 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         save_env_value(env, "FRIDAY_GAME_QUIET", "on" if on else "off")
         os.environ["FRIDAY_GAME_QUIET"] = "on" if on else "off"
         done.append("打游戏时提醒改成右下角小通知,打完再说" if on else "打游戏时提醒照常读出来")
+    if "lightlink" in payload and isinstance(payload["lightlink"], dict):
+        import friday_lightlink
+
+        link = payload["lightlink"]
+        mode = str(link.get("game_mode", "none"))
+        try:
+            minutes = int(link.get("away_minutes", 0) or 0)
+        except (TypeError, ValueError):
+            minutes = -1
+        if mode not in friday_lightlink.GAME_MODES or minutes not in friday_lightlink.AWAY_MINUTES:
+            return {"error": "选项不对"}
+        values = {"FRIDAY_LIGHT_GAME_MODE": mode, "FRIDAY_LIGHT_AWAY_MIN": str(minutes),
+                  "FRIDAY_LIGHT_GAME": friday_lightlink.SEP.join(friday_lightlink.clean_names(link.get("game"))),
+                  "FRIDAY_LIGHT_AWAY": friday_lightlink.SEP.join(friday_lightlink.clean_names(link.get("away"))),
+                  "FRIDAY_LIGHT_BACK": "on" if link.get("back", True) else "off"}
+        for key, value in values.items():
+            save_env_value(env, key, value)
+            os.environ[key] = value
+        done.append("家里的灯联动设好了")
     if "auto_update" in payload:
         on = bool(payload["auto_update"])
         save_env_value(env, "FRIDAY_AUTO_UPDATE", "on" if on else "off")
@@ -2742,6 +2774,8 @@ def start_care(session, ctx, hub, toolbox: Toolbox, voice_module, data_dir: str 
             report.sample()
 
     def game_ended(game: str) -> None:
+        threading.Thread(target=lambda: _quietly(lambda: lights_say(lights.game_end())), daemon=True,
+                         name="friday-light-game-end").start()
         text = ""
         try:
             text = report.stop()
@@ -2757,8 +2791,19 @@ def start_care(session, ctx, hub, toolbox: Toolbox, voice_module, data_dir: str 
         if text:
             hub.broadcast({"type": "status", "text": f"🎮 {text}"})
 
+    import friday_lightlink
+
+    lights = friday_lightlink.LightLink(lambda: getattr(toolbox, "home", None))
+    session.lightlink = lights
+
+    def lights_say(text: str) -> None:
+        if text:
+            hub.broadcast({"type": "status", "text": "💡 " + text})
+
     def game_started(game: str) -> None:
-        """开游戏了:游戏优化,再自动关掉事先选好的程序(游戏模式)。"""
+        """开游戏了:游戏优化、灯联动,再自动关掉事先选好的程序(游戏模式)。"""
+        threading.Thread(target=lambda: _quietly(lambda: lights_say(lights.game_start())), daemon=True,
+                         name="friday-light-game").start()
         threading.Thread(target=lambda: boost_game(game), daemon=True, name="friday-game-boost").start()
         threading.Thread(target=lambda: _quietly(lambda: report_game(game)), daemon=True,
                          name="friday-game-report").start()
@@ -2779,6 +2824,14 @@ def start_care(session, ctx, hub, toolbox: Toolbox, voice_module, data_dir: str 
                 hub.broadcast({"type": "status", "text": f"🎮 {game} " + text})
 
         threading.Thread(target=run, daemon=True, name="friday-game-mode").start()
+
+    def lights_away_loop() -> None:
+        while True:
+            time.sleep(60)
+            if os.name == "nt":
+                _quietly(lambda: lights_say(lights.away_tick(friday_care.presence_idle())))
+
+    threading.Thread(target=lights_away_loop, daemon=True, name="friday-light-away").start()
 
     care = friday_care.Care(
         say, name=lambda: os.environ.get("FRIDAY_CALL_ME") or session.call_me or DEFAULT_CALL_ME,

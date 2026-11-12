@@ -530,3 +530,8 @@ button:focus-visible, .switch:focus-visible, select:focus-visible, input:focus-v
 body.focus .orb-tools { right: 18px; }
 @media (max-width: 1000px) { .orb-tools { right: 14px; top: 34%; } }
 body.locked .orb-tools { display: none; }
+
+.picks { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; font-size: 12px; color: var(--muted); }
+.pick { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--cyan-line); border-radius: 999px; cursor: pointer; color: var(--text); background: rgba(var(--c-rgb), .04); transition: background .15s, border-color .15s; }
+.pick:has(input:checked) { border-color: var(--accent); background: rgba(var(--c-rgb), .16); }
+.pick input { accent-color: var(--accent); margin: 0; }
