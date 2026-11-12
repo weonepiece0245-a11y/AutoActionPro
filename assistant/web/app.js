@@ -576,7 +576,7 @@ function applyPanels() {
   $("panelsBtn").title = panelsOn ? "隐藏两边的面板" : "显示两边的面板";
   $("setPanels").checked = panelsOn;
 }
-function setPanels(on) { panelsOn = on; savePrefs("friday-panels", panelsOn); applyPanels(); }
+function setPanels(on) { panelsOn = on; savePrefs("friday-panels", panelsOn); applyPanels(); if (on) loadDash(); }
 $("panelsBtn").onclick = () => setPanels(!panelsOn);
 $("setPanels").onchange = (e) => setPanels(e.target.checked);
 applyPanels();
@@ -1623,6 +1623,137 @@ $("lockBtn").onclick = async () => {
   if (r.error) toast(r.error, 4000); else showLock();
 };
 
+// ---------- 仪表板:天气、电脑、今天、正在播放、家里 ----------
+const WEATHER_ICON = (code) => {
+  const c = Number(code);
+  if (c === 0) return "☀️";
+  if (c <= 2) return "🌤️";
+  if (c === 3) return "☁️";
+  if (c <= 48) return "🌫️";
+  if (c <= 57 || (c >= 80 && c <= 82)) return "🌦️";
+  if (c <= 67) return "🌧️";
+  if (c <= 86) return "🌨️";
+  return "⛈️";
+};
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+let dashMusic = null;
+let dashMusicAt = 0;
+function renderWeather(w) {
+  $("dashWeather").hidden = !w;
+  if (!w) return;
+  $("weatherPlace").textContent = w.place || "";
+  const box = $("weatherBox");
+  const now = el("div", "wx-now");
+  now.append(el("span", "wx-icon", WEATHER_ICON(w.code)), el("span", "wx-temp", `${Math.round(w.temp)}°`));
+  const info = el("div", "wx-info");
+  info.append(el("div", "wx-text", w.text || ""),
+    el("div", "wx-meta", `体感 ${Math.round(w.feels)}° · ${Math.round(w.low)}°~${Math.round(w.high)}° · 降雨 ${w.rain ?? 0}%`));
+  now.append(info);
+  const hours = el("div", "wx-hours");
+  for (const h of w.hours || []) {
+    const cell = el("div", "wx-hour" + (h.rain >= 50 ? " wet" : ""));
+    cell.title = `${h.time} 降雨机会 ${h.rain}%`;
+    cell.append(el("span", "", h.time), el("span", "wx-hicon", WEATHER_ICON(h.code)), el("b", "", `${Math.round(h.temp)}°`),
+      el("small", "", `${h.rain}%`));
+    hours.append(cell);
+  }
+  box.replaceChildren(now, hours);
+}
+function meter(label, value, text, warn, hot) {
+  const row = el("div", "meter" + (value >= hot ? " hot" : value >= warn ? " warm" : ""));
+  const bar = el("div", "meter-bar");
+  const fill = el("i");
+  fill.style.width = `${Math.max(2, Math.min(100, value || 0))}%`;
+  bar.append(fill);
+  row.append(el("span", "meter-label", label), bar, el("span", "meter-value", text));
+  return row;
+}
+function renderPc(p) {
+  $("dashPc").hidden = !p;
+  if (!p) return;
+  const rows = [];
+  if (p.cpu !== null && p.cpu !== undefined) rows.push(meter("CPU", p.cpu, `${p.cpu}%`, 70, 90));
+  if (p.mem !== undefined) rows.push(meter("内存", p.mem, `${p.mem_used}/${p.mem_total} GB`, 80, 92));
+  if (p.cpu_temp) rows.push(meter("CPU 温度", p.cpu_temp, `${Math.round(p.cpu_temp)}°C`, 82, 92));
+  if (p.gpu_temp) rows.push(meter("显卡温度", p.gpu_temp, `${Math.round(p.gpu_temp)}°C`, 75, 85));
+  $("pcBox").replaceChildren(...rows);
+}
+function renderToday(items) {
+  $("dashToday").hidden = !items;
+  if (!items) return;
+  $("todayCount").textContent = items.length ? `(${items.length})` : "";
+  const list = $("todayList");
+  if (!items.length) { list.replaceChildren(el("li", "empty", "今天没有别的安排了")); return; }
+  list.replaceChildren(...items.map((i) => {
+    const li = el("li", "today-item " + i.kind);
+    li.append(el("span", "today-time", i.time), el("span", "today-title", (i.kind === "event" ? "📅 " : "⏰ ") + i.title));
+    return li;
+  }));
+}
+function renderMusic(m) {
+  $("dashMusic").hidden = !m;
+  if (!m) return;
+  dashMusic = m; dashMusicAt = Date.now();
+  const idle = !!m.idle;
+  $("musicBox").classList.toggle("idle", idle);
+  $("musicTitle").textContent = idle ? "没在播放" : m.title;
+  $("musicArtist").textContent = idle ? "说“放一首歌”就会开始" : m.artist + (m.device ? ` · ${m.device}` : "");
+  $("musicArt").hidden = idle || !m.art;
+  if (!idle && m.art && $("musicArt").src !== m.art) $("musicArt").src = m.art;
+  $("musicPlayIcon").setAttribute("d", m.playing ? "M7 5h4v14H7zM13 5h4v14h-4z" : "M8 5v14l11-7z");
+  $("musicPlay").title = m.playing ? "暂停" : "播放";
+  renderMusicProgress();
+}
+function renderMusicProgress() {
+  const m = dashMusic;
+  if (!m || m.idle || !m.duration) { $("musicProgress").style.width = "0"; return; }
+  const now = m.progress + (m.playing ? Date.now() - dashMusicAt : 0);
+  $("musicProgress").style.width = `${Math.min(100, now / m.duration * 100)}%`;
+}
+setInterval(renderMusicProgress, 1000);
+function renderHome(devices) {
+  $("dashHome").hidden = !devices || !devices.length;
+  if (!devices || !devices.length) return;
+  $("homeCount").textContent = `(${devices.filter((d) => d.on).length}/${devices.length} 开着)`;
+  $("homeBox").replaceChildren(...devices.map((d) => {
+    const b = el("button", "home-tile" + (d.on ? " on" : ""));
+    b.type = "button";
+    b.title = `${d.name}:点一下${d.on ? "关掉" : "打开"}`;
+    b.setAttribute("aria-pressed", String(!!d.on));
+    b.append(el("span", "home-icon", d.kind === "light" ? "💡" : "🔌"), el("span", "home-name", d.name),
+      el("small", "", d.on ? (d.brightness ? `开 · ${d.brightness}%` : "开") : "关"));
+    b.onclick = () => dashAct({ action: "light", id: d.id, on: !d.on }, b);
+    return b;
+  }));
+}
+function renderDash(d) {
+  if (!d || d.error || d.locked) return;
+  renderWeather(d.weather); renderPc(d.pc); renderToday(d.today); renderMusic(d.music); renderHome(d.home);
+}
+async function loadDash() {
+  const hud = document.querySelector(".hud-left");
+  if (isLocked || document.visibilityState !== "visible" || !hud || getComputedStyle(hud).display === "none") return;
+  try { renderDash(await api("/api/dashboard")); } catch {}
+}
+async function dashAct(payload, button) {
+  if (button) button.disabled = true;
+  try {
+    const r = await api("/api/dashboard", payload);
+    if (r.error) toast(r.error);
+    else renderDash(r.data);
+    if (payload.action === "music") setTimeout(loadDash, 1500);  // Spotify 要一下子才更新
+  } finally { if (button) button.disabled = false; }
+}
+$("musicPrev").onclick = (e) => dashAct({ action: "music", op: "previous" }, e.currentTarget);
+$("musicNext").onclick = (e) => dashAct({ action: "music", op: "next" }, e.currentTarget);
+$("musicPlay").onclick = (e) => dashAct({ action: "music", op: "play_pause" }, e.currentTarget);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") loadDash(); });
+
 // ---------- 启动 ----------
 (async () => {
   setMode("idle");
@@ -1630,5 +1761,7 @@ $("lockBtn").onclick = async () => {
   greeting = (s && s.greeting) || "";
   if (!isLocked) connect();
   setInterval(loadState, 30000);
+  loadDash();
+  setInterval(loadDash, 10000);
   $("input").focus();
 })();

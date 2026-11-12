@@ -64,6 +64,14 @@
 </header>
 
 <aside class="hud hud-left">
+  <section class="panel dash" data-panel="weather" id="dashWeather" hidden>
+    <h2><span>WEATHER</span>天气<small class="dash-sub" id="weatherPlace"></small></h2>
+    <div id="weatherBox"></div>
+  </section>
+  <section class="panel dash" data-panel="pc" id="dashPc" hidden>
+    <h2><span>PC</span>电脑</h2>
+    <div class="meters" id="pcBox"></div>
+  </section>
   <section class="panel" data-panel="system">
     <h2><span>SYSTEM</span>系统</h2>
     <ul class="sys" id="sysList"></ul>
@@ -75,6 +83,27 @@
 </aside>
 
 <aside class="hud hud-right">
+  <section class="panel dash" data-panel="today" id="dashToday" hidden>
+    <h2><span>TODAY</span>今天<span class="count" id="todayCount"></span></h2>
+    <ul class="list today-list" id="todayList"></ul>
+  </section>
+  <section class="panel dash" data-panel="music" id="dashMusic" hidden>
+    <h2><span>MUSIC</span>正在播放</h2>
+    <div class="music" id="musicBox">
+      <img class="music-art" id="musicArt" alt="" hidden>
+      <div class="music-text"><div class="music-title" id="musicTitle">—</div><div class="music-artist" id="musicArtist"></div></div>
+      <div class="music-bar"><i id="musicProgress"></i></div>
+      <div class="music-ctl">
+        <button type="button" class="mbtn" id="musicPrev" title="上一首" aria-label="上一首"><svg viewBox="0 0 24 24"><path d="M6 5v14M18 6l-9 6 9 6z"/></svg></button>
+        <button type="button" class="mbtn big" id="musicPlay" title="播放/暂停" aria-label="播放或暂停"><svg viewBox="0 0 24 24"><path id="musicPlayIcon" d="M8 5v14l11-7z"/></svg></button>
+        <button type="button" class="mbtn" id="musicNext" title="下一首" aria-label="下一首"><svg viewBox="0 0 24 24"><path d="M18 5v14M6 6l9 6-9 6z"/></svg></button>
+      </div>
+    </div>
+  </section>
+  <section class="panel dash" data-panel="home" id="dashHome" hidden>
+    <h2><span>HOME</span>家里<span class="count" id="homeCount"></span></h2>
+    <div class="home-grid" id="homeBox"></div>
+  </section>
   <section class="panel" data-panel="reminders">
     <h2><span>REMINDERS</span>提醒</h2>
     <ul class="list" id="reminderList"><li class="empty">没有提醒</li></ul>

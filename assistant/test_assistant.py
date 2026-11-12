@@ -4230,6 +4230,20 @@ class WebServerTest(TempDirTest):
     def auth(self, extra=None):
         return {"X-Friday-Token": "secret", **(extra or {})}
 
+    def test_dashboard_routes(self):
+        self.assertEqual(self.request("GET", "/api/dashboard", headers=self.auth()), (200, b"{}"))
+        self.assertEqual(self.request("POST", "/api/dashboard", body="{}", headers=self.auth())[0], 404)
+        board = friday_dashboard.Dashboard({"pc": lambda: {"cpu": 10}})
+        board.actions["music"] = lambda p: "Spotify 已切到下一首。"
+        self.ctx.dashboard = board
+        status, body = self.request("GET", "/api/dashboard", headers=self.auth())
+        self.assertEqual((status, json.loads(body)), (200, {"pc": {"cpu": 10}}))
+        status, body = self.request("POST", "/api/dashboard", body=json.dumps({"action": "music", "op": "next"}),
+                                    headers=self.auth({"Content-Type": "application/json"}))
+        self.assertEqual((status, json.loads(body)["text"]), (200, "Spotify 已切到下一首。"))
+        self.assertEqual(self.request("POST", "/api/dashboard", body="[1]", headers=self.auth())[0], 400)
+        self.assertEqual(self.request("GET", "/api/dashboard")[0], 403)  # 要口令
+
     def test_ping_and_orb_routes(self):
         self.assertEqual(self.request("GET", "/api/ping")[0], 403)  # 也要口令
         self.assertEqual(self.request("GET", "/api/ping", headers=self.auth())[0], 200)
@@ -6105,6 +6119,89 @@ class WishlistTest(TempDirTest):
         self.assertFalse(failed)
         self.assertIn("艾尔登法环", text)
         self.assertTrue(toolbox._gaming({"action": "temps"}, None)[1])  # 没有温度:说清楚
+
+
+import friday_dashboard  # noqa: E402
+
+
+class DashboardTest(unittest.TestCase):
+    def test_cache_and_fallback(self):
+        now, calls = [0.0], {"weather": 0}
+
+        def weather():
+            calls["weather"] += 1
+            if calls["weather"] == 2:
+                raise OSError("断网")
+            return {"temp": 30}
+        board = friday_dashboard.Dashboard({"weather": weather, "home": lambda: None}, clock=lambda: now[0])
+        self.assertEqual(board.data(), {"weather": {"temp": 30}, "home": None})
+        now[0] += 60
+        board.data()
+        self.assertEqual(calls["weather"], 1)  # 15 分钟内用记着的
+        now[0] += friday_dashboard.TTL["weather"]
+        self.assertEqual(board.data()["weather"], {"temp": 30})  # 出错了:用上一次的
+        self.assertEqual(board.act({"action": "rm"}), {"error": "不认识的操作"})
+        board.actions["light"] = lambda p: "已打开客厅灯"
+        result = board.act({"action": "light", "id": "a", "on": True})
+        self.assertEqual(result["text"], "已打开客厅灯")
+        board.actions["light"] = lambda p: (_ for _ in ()).throw(ValueError("找不到这个设备"))
+        self.assertEqual(board.act({"action": "light"}), {"error": "找不到这个设备"})
+
+    def test_today_card(self):
+        now = datetime.datetime(2026, 11, 12, 14, 0).astimezone()
+        tz = now.strftime("%z")
+        tz = tz[:3] + ":" + tz[3:]
+        events = [{"summary": "早会", "start": {"dateTime": f"2026-11-12T09:00:00{tz}"}, "end": {"dateTime": f"2026-11-12T10:00:00{tz}"}},
+                  {"summary": "开会", "start": {"dateTime": f"2026-11-12T15:30:00{tz}"}, "end": {"dateTime": f"2026-11-12T16:30:00{tz}"}},
+                  {"summary": "妈妈生日", "start": {"date": "2026-11-12"}}]
+        reminders = [{"time": "2026-11-12 18:00", "message": "倒垃圾"}, {"time": "2026-11-12 08:00", "message": "过了的"},
+                     {"time": "2026-11-13 09:00", "message": "明天的"}]
+        items = friday_dashboard.today_card(lambda a, b: events, reminders, now)
+        self.assertEqual([(i["time"], i["title"]) for i in items],
+                         [("全天", "妈妈生日"), ("15:30", "开会"), ("18:00", "倒垃圾")])
+        self.assertEqual(friday_dashboard.today_card(None, [], now), [])
+
+    def test_start_dashboard_actions(self):
+        controls = []
+        spotify = SimpleNamespace(connected=True, control=lambda a: controls.append(a) or f"Spotify {a}",
+                                  api=lambda m, p: (200, {"is_playing": True, "item": {"name": "晴天", "artists": []}}))
+        backend = SimpleNamespace(set_on=lambda i, on: controls.append((i, on)))
+        home = SimpleNamespace(devices=[{"id": "a", "name": "客厅灯", "on": False, "kind": "light", "brightness": 50}],
+                               backend=backend)
+        home.refresh = lambda: home.devices
+        toolbox = SimpleNamespace(spotify=spotify, home=home, google=None, reminders=None)
+        session = SimpleNamespace()
+        ctx = SimpleNamespace()
+        with mock.patch.object(friday_dashboard, "weather_card", lambda place: {"temp": 30}):
+            app.start_dashboard(session, toolbox, ctx)
+            data = ctx.dashboard.data()
+        self.assertEqual(data["music"]["title"], "晴天")
+        self.assertEqual(data["home"][0]["name"], "客厅灯")
+        self.assertEqual(data["today"], [])
+        self.assertEqual(ctx.dashboard.act({"action": "music", "op": "play_pause"})["text"], "Spotify pause")  # 在放:暂停
+        self.assertEqual(ctx.dashboard.act({"action": "light", "id": "a", "on": True})["text"], "已打开客厅灯")
+        self.assertEqual(controls, ["pause", ("a", True)])
+        self.assertIn("error", ctx.dashboard.act({"action": "light", "id": "zz", "on": True}))
+        toolbox.spotify = None
+        self.assertIn("error", ctx.dashboard.act({"action": "music", "op": "next"}))
+
+    def test_music_and_weather_cards(self):
+        spotify = SimpleNamespace(api=lambda m, p: (200, {"is_playing": True, "progress_ms": 1000, "device": {"name": "PC"},
+                                                          "item": {"name": "晴天", "duration_ms": 9000, "artists": [{"name": "周杰伦"}],
+                                                                   "album": {"images": [{"url": "https://i.scdn.co/a", "width": 640},
+                                                                                        {"url": "https://i.scdn.co/b", "width": 64}]}}}))
+        card = friday_dashboard.music_card(spotify)
+        self.assertEqual((card["title"], card["artist"], card["art"], card["playing"]), ("晴天", "周杰伦", "https://i.scdn.co/b", True))
+        self.assertIsNone(friday_dashboard.music_card(SimpleNamespace(api=lambda m, p: (204, {}))))
+        evil = SimpleNamespace(api=lambda m, p: (200, {"item": {"name": "x", "album": {"images": [{"url": "https://evil/x.png"}]}}}))
+        self.assertEqual(friday_dashboard.music_card(evil)["art"], "")  # 只用 Spotify 的图片网址
+        data = {"current": {"time": "2026-11-12T14:00", "temperature_2m": 31.4, "apparent_temperature": 36, "weather_code": 2},
+                "hourly": {"time": [f"2026-11-12T{h:02d}:00" for h in range(24)], "temperature_2m": list(range(24)),
+                           "precipitation_probability": [50] * 24, "weather_code": [3] * 24},
+                "daily": {"temperature_2m_max": [33], "temperature_2m_min": [25], "precipitation_probability_max": [70]}}
+        w = friday_dashboard.weather_card("吉隆坡", fetch=lambda url: data)
+        self.assertEqual((w["place"], w["text"], w["rain"], len(w["hours"]), w["hours"][0]["time"]),
+                         ("吉隆坡", "局部多云", 70, 6, "15:00"))
 
 
 class LedgerTest(TempDirTest):

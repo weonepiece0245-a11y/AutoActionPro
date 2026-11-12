@@ -3258,6 +3258,73 @@ def start_wishlist(session, toolbox, data_dir: str) -> None:
     threading.Thread(target=loop, daemon=True, name="friday-wishlist").start()
 
 
+def start_dashboard(session, toolbox, ctx) -> None:
+    """主画面的仪表板:天气、今天的行程、Spotify、电脑状态、家里的灯。"""
+    import friday_alerts
+    import friday_dashboard
+
+    usage = friday_dashboard.Usage()
+
+    def today():
+        google = getattr(toolbox, "google", None)
+        reminders = toolbox.reminders.upcoming() if toolbox.reminders is not None else []
+        return friday_dashboard.today_card(google.raw_events if google is not None else None, reminders,
+                                           datetime.datetime.now().astimezone())
+
+    def music():
+        spotify = getattr(toolbox, "spotify", None)
+        if spotify is None or not spotify.connected:
+            return None
+        return friday_dashboard.music_card(spotify) or {"idle": True}
+
+    def pc():
+        stats = usage.read()
+        if stats is None:
+            return None
+        temps = getattr(session, "temps", None)
+        if temps is not None:
+            t = temps.read()
+            stats.update({"cpu_temp": t.get("cpu"), "gpu_temp": t.get("gpu")})
+        return stats
+
+    def home():
+        tapo = getattr(toolbox, "home", None)
+        if tapo is None:
+            return None
+        return [{k: d.get(k) for k in ("id", "name", "on", "kind", "brightness")} for d in tapo.refresh()]
+
+    board = friday_dashboard.Dashboard({
+        "weather": lambda: friday_dashboard.weather_card(friday_alerts.rain_place()),
+        "today": today, "music": music, "pc": pc, "home": home})
+
+    def music_action(payload: dict) -> str:
+        spotify = getattr(toolbox, "spotify", None)
+        if spotify is None or not spotify.connected:
+            raise ValueError("Spotify 还没连")
+        op = payload.get("op")
+        if op == "play_pause":
+            playing = (board.cache.get("music") or (0, {}))[1] or {}
+            return spotify.control("pause" if playing.get("playing") else "resume")
+        if op in ("next", "previous"):
+            return spotify.control(op)
+        raise ValueError("不认识的操作")
+
+    def light_action(payload: dict) -> str:
+        tapo = getattr(toolbox, "home", None)
+        if tapo is None:
+            raise ValueError("还没连 Tapo")
+        device = next((d for d in tapo.devices if d["id"] == payload.get("id")), None)
+        if device is None:
+            raise ValueError("找不到这个设备")
+        on = bool(payload.get("on"))
+        tapo.backend.set_on(device["id"], on)
+        device["on"] = on
+        return f"已{'打开' if on else '关掉'}{device['name']}"
+
+    board.actions = {"music": music_action, "light": light_action}
+    ctx.dashboard = session.dashboard = board
+
+
 def start_connected_apps(session, toolbox, ctx, data_dir: str, port: int) -> None:
     """连接的应用:新闻、Steam、NVIDIA、Spotify。"""
     import friday_news
@@ -4118,6 +4185,7 @@ def run_web(args) -> None:
     start_reader(session, ctx)
     start_folder_backup(session, toolbox, data_dir)
     start_connected_apps(session, toolbox, ctx, data_dir, ctx.port)
+    _startup_step(session, "仪表板", lambda: start_dashboard(session, toolbox, ctx))
     session.env_file = args.env_file
     start_floatorb(session, ctx, data_dir)
     if getattr(toolbox, "screen", None) is not None:

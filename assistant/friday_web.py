@@ -315,6 +315,7 @@ class WebContext:
         self.reader = None  # 读给我听(friday_reader.Reader)
         self.orb_state: Callable[[], dict] | None = None  # 桌面小光球要的状态(在听/在说/颜色/声音大小)
         self.orb_action: Callable[[str], None] | None = None  # 小光球被点了:click / open / hide
+        self.dashboard = None  # 主画面仪表板(friday_dashboard.Dashboard)
         self.spotify_callback: Callable[[dict], str] | None = None  # Spotify 登录跳回来
 
     def locked(self) -> bool:
@@ -412,6 +413,8 @@ def make_handler(ctx: WebContext):
                 if url.path == "/api/state":
                     return self._json(200, {"locked": True})
                 return self._json(423, {"error": "locked"})
+            if url.path == "/api/dashboard":
+                return self._json(200, ctx.dashboard.data() if ctx.dashboard is not None else {})
             if url.path == "/events":
                 return self._events()
             if url.path == "/api/state":
@@ -521,6 +524,17 @@ def make_handler(ctx: WebContext):
                 return self._json(200, {"ok": True})
             if ctx.locked():
                 return self._json(423, {"error": "星期五已上锁,先输入 PIN 解锁"})
+            if url.path == "/api/dashboard":
+                if ctx.dashboard is None:
+                    return self._json(404, {"error": "没有仪表板"})
+                try:
+                    payload = json.loads(body or b"{}")
+                except ValueError:
+                    return self._json(400, {"error": "格式不对"})
+                if not isinstance(payload, dict):
+                    return self._json(400, {"error": "格式不对"})
+                result = ctx.dashboard.act(payload)
+                return self._json(400 if "error" in result else 200, result)
             try:
                 if url.path == "/api/voice":
                     return self._voice(body)

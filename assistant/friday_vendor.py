@@ -141,6 +141,6 @@ def page(web_dir: Path) -> tuple[bytes, str]:
            f"script-src {scripts}; "
            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
            "font-src 'self' https://fonts.gstatic.com data:; "
-           "img-src 'self' data: blob:; media-src 'self' blob: data:; connect-src 'self'; "
+           "img-src 'self' data: blob: https://i.scdn.co; media-src 'self' blob: data:; connect-src 'self'; "
            "worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
     return html.encode("utf-8"), csp
