@@ -11964,13 +11964,61 @@ class SubscriptionsTest(TempDirTest):
         mails = [{"from": "YouTube <no-reply@youtube.com>", "subject": "Your YouTube Premium receipt", "date": "2 Nov 2026",
                   "snippet": "RM23.90"}]
         text = subs.scan(mails, classify)
-        self.assertIn("从邮箱找到 1 个订阅", text)
-        self.assertIn("YouTube <no-reply@youtube.com> | Your YouTube Premium receipt | 2 Nov 2026 | RM23.90", seen[0])
+        self.assertIn("从邮箱找到 1 个新的订阅", text)
+        self.assertIn("1. YouTube <no-reply@youtube.com> | Your YouTube Premium receipt | 2 Nov 2026 | RM23.90", seen[0])
         self.assertEqual(subs._find("youtube")["next"], "2026-12-02")
         self.assertEqual(subs._find("netflix")["amount"], 60)
         self.assertEqual(subs.last_scan, "2026-11-13")
         self.assertFalse(subs.scan_due())
         self.assertIn("没找到收据", subs.scan([], classify))
+
+    def test_reads_receipt_body_when_amount_unknown(self):
+        subs, _ = self.make()
+        subs.add("Netflix", 0, cycle="monthly")  # 上次只认出名字
+        subs.items[0]["source"] = "email"
+        mails = [{"id": "m1", "from": "Netflix", "subject": "Your bill", "date": "5 Nov", "snippet": "Thanks"},
+                 {"id": "m2", "from": "Google", "subject": "Google One", "date": "2 Nov", "snippet": "renews"},
+                 {"id": "m3", "from": "YouTube", "subject": "Receipt", "date": "2 Nov", "snippet": "RM20.90"}]
+
+        def classify(listing):
+            return [{"name": "Netflix", "amount": 0, "currency": "MYR", "cycle": "monthly", "last_charge": "", "next_charge": "",
+                     "cancel_hint": "", "mail": 1},
+                    {"name": "Google AI Plus", "amount": 0, "currency": "MYR", "cycle": "monthly", "last_charge": "",
+                     "next_charge": "2026-12-02", "cancel_hint": "", "mail": 2},
+                    {"name": "YouTube Premium", "amount": 20.9, "currency": "MYR", "cycle": "monthly", "last_charge": "2026-11-02",
+                     "next_charge": "", "cancel_hint": "", "mail": 3}]
+        read = []
+
+        def read_body(msg_id):
+            read.append(msg_id)
+            return {"m1": "Netflix Standard RM55.00 charged on 5 Nov 2026", "m2": "Google AI Plus RM42.99/month"}[msg_id]
+
+        def detail(name, body):
+            return {"Netflix": {"amount": 55, "currency": "MYR", "cycle": "monthly", "last_charge": "2026-11-05", "next_charge": ""},
+                    "Google AI Plus": {"amount": 42.99, "currency": "MYR", "cycle": "monthly", "last_charge": "", "next_charge": ""}}[name]
+        text = subs.scan(mails, classify, read_body, detail)
+        self.assertEqual(read, ["m1", "m2"])  # YouTube 预览里就有金额和日期:不读正文
+        self.assertIn("读了 2 封收据的正文", text)
+        netflix = subs._find("netflix")
+        self.assertEqual((netflix["amount"], netflix["next"]), (55, "2026-12-05"))
+        self.assertEqual(subs._find("google ai plus")["amount"], 42.99)
+        self.assertEqual(subs._find("google ai plus")["next"], "2026-12-02")
+        read.clear()
+        subs.scan(mails, classify, read_body, detail)
+        self.assertEqual(read, [])  # 金额已经有了:下次不再读正文
+        self.assertEqual(subs._find("netflix")["amount"], 55)  # 预览看不出金额也不会被盖成 0
+
+    def test_mail_body(self):
+        import friday_google
+
+        msg = {"payload": {"mimeType": "text/plain", "body": {"data": base64.urlsafe_b64encode("RM55.00".encode()).decode()},
+                           "headers": [{"name": "Subject", "value": "Your bill"}]}}
+        tools_obj = friday_google.GoogleTools.__new__(friday_google.GoogleTools)
+        tools_obj._gmail = lambda: SimpleNamespace(users=lambda: SimpleNamespace(messages=lambda: SimpleNamespace(
+            get=lambda **kw: SimpleNamespace(execute=lambda: msg))))
+        text = tools_obj.mail_body("m1")
+        self.assertIn("主题:Your bill", text)
+        self.assertIn("RM55.00", text)
 
     def test_commands_and_tool(self):
         subs, _ = self.make()
@@ -12023,7 +12071,7 @@ class SubscriptionsTest(TempDirTest):
         tools_obj = friday_google.GoogleTools.__new__(friday_google.GoogleTools)
         tools_obj._gmail = lambda: SimpleNamespace(users=lambda: SimpleNamespace(messages=lambda: Api()))
         found = tools_obj.mail_headers("q", limit=5)
-        self.assertEqual(found[0], {"from": "Netflix", "subject": "Receipt", "date": "1 Nov", "snippet": "RM55 & more"})
+        self.assertEqual(found[0], {"id": "a", "from": "Netflix", "subject": "Receipt", "date": "1 Nov", "snippet": "RM55 & more"})
 
     def test_mail_headers_retries_ssl_errors(self):
         import ssl

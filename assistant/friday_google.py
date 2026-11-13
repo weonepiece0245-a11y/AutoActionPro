@@ -748,9 +748,23 @@ class GoogleTools(_MoreGoogleTools):
         found = []
         for item in ids[:limit]:
             msg = retry(lambda api: api.get(userId="me", id=item["id"], format="metadata", metadataHeaders=["From", "Subject", "Date"]))
-            found.append({"from": _header(msg, "From"), "subject": _header(msg, "Subject"), "date": _header(msg, "Date"),
-                          "snippet": html.unescape(msg.get("snippet", ""))})
+            found.append({"id": item["id"], "from": _header(msg, "From"), "subject": _header(msg, "Subject"),
+                          "date": _header(msg, "Date"), "snippet": html.unescape(msg.get("snippet", ""))})
         return found
+
+    def mail_body(self, msg_id: str, limit: int = 6000) -> str:
+        """一封邮件的主题和正文(纯文字,订阅管家找金额用);断线换新连线再试一次。"""
+        for attempt in range(2):
+            try:
+                msg = self._gmail().users().messages().get(userId="me", id=msg_id, format="full").execute()
+                break
+            except OSError:
+                if attempt:
+                    raise
+                self.account.reset_connection("gmail")
+                time.sleep(1)
+        body = message_text(msg.get("payload", {}))
+        return f"主题:{_header(msg, 'Subject')}\n来自:{_header(msg, 'From')}\n时间:{_header(msg, 'Date')}\n\n{body}"[:limit]
 
     def _list_mail(self, args: dict, confirm: Approver) -> str:
         query = (args.get("query") or "in:inbox newer_than:3d").strip()

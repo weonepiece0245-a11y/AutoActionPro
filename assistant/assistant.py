@@ -3533,8 +3533,9 @@ def start_subscriptions(session, toolbox: Toolbox, data_dir: str, interval: floa
                 budget.before_ask()
             mails = toolbox.google.mail_headers(friday_subscriptions.MAIL_QUERY)
             classify = friday_subscriptions.classifier(session.assistant.client, getattr(session.assistant, "on_usage", None))
+            detail = friday_subscriptions.detailer(session.assistant.client, getattr(session.assistant, "on_usage", None))
             before = len(subs.items)
-            text = subs.scan(mails, classify)
+            text = subs.scan(mails, classify, toolbox.google.mail_body, detail)
             if not quiet or len(subs.items) > before:
                 announce(session, text, "💳", "订阅整理好了,在窗口里")
         except Exception as e:  # noqa: BLE001
