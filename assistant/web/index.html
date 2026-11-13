@@ -313,6 +313,17 @@
       <div class="set-row"><span></span><button type="button" class="mini-btn" id="sceneAdd">+ 新场景</button></div>
     </div>
 
+    <div class="set-group" id="planGroup" hidden data-cat="life">
+      <h3>待办排进日历</h3>
+      <div class="set-row"><label for="planHours">只排在这个时段(一天最多 3 件)</label>
+        <span class="set-ctl"><input class="mini-input" id="planHours" maxlength="11" placeholder="09:00-22:00"><button type="button" class="mini-btn" id="planHoursSave">保存</button></span></div>
+      <div class="set-row"><span class="set-note" id="planNote">说“帮我安排这周的待办”,或按这里;先给你看安排,同意才放进 Google 日历。</span>
+        <span class="set-ctl"><button type="button" class="mini-btn" id="planWeek">安排这周</button><button type="button" class="mini-btn" id="planTomorrow">安排明天</button></span></div>
+      <div id="planList"></div>
+      <div class="set-row" id="planActions" hidden><span></span><span class="set-ctl"><button type="button" class="mini-btn" id="planApply">就这样安排</button><button type="button" class="mini-btn" id="planCancel">取消</button></span></div>
+      <div class="set-note">到时间没做完(待办没打勾)的,会自动挪到下一个空档并告诉你。日历里标题前面有 📝 的是星期五排的,你自己拖到别的时间也可以。</div>
+    </div>
+
     <div class="set-group" id="parcelGroup" hidden data-cat="life">
       <h3>包裹追踪</h3>
       <div class="set-row"><span class="set-note" id="parcelNote"></span><button type="button" class="mini-btn" id="parcelScan">现在看邮件</button></div>

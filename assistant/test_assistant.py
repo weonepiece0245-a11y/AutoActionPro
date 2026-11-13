@@ -11324,6 +11324,19 @@ class LocalAskTest(TempDirTest):
         self.assertIn("吉隆坡现在局部多云", quick.handle("今天天气怎么样"))
         self.assertIn("可能下雨", quick.handle("要不要带伞"))
 
+    def test_todos_go_to_google_tasks_when_connected(self):
+        quick, toolbox = self.make()
+        calls = []
+        tasks = [{"text": "交保险单", "due": "2026-11-20"}]
+        toolbox.google = SimpleNamespace(task_items=lambda: tasks,
+                                         tasks=lambda args: calls.append(args) or "ok")
+        self.assertIn("□ 交保险单(截止 2026-11-20)", quick.handle("待办清单"))
+        self.assertIn("Google Tasks", quick.handle("加个待办:买猫粮"))
+        self.assertEqual(calls[-1], {"action": "add", "title": "买猫粮"})
+        self.assertEqual(quick.handle("保险单搞定了"), "好,“交保险单”打勾了。")
+        self.assertEqual(calls[-1], {"action": "done", "key": "交保险单"})
+        self.assertEqual(toolbox.todos.items, [])  # 没写进电脑上的清单
+
     def test_past_time_tells_why(self):
         quick, _ = self.make()
         self.assertIn("已经过去了", quick.handle("今天早上八点提醒我开会"))
@@ -12379,6 +12392,127 @@ class ParcelsTest(TempDirTest):
         self.assertIsNone(commands.handle("工资到了"))  # 不是包裹:交给 Claude
         self.assertIn("猫粮 收起来了", commands.handle("猫粮收到了"))
         self.assertEqual(parcels.state()["items"], [])
+
+
+import friday_planner  # noqa: E402
+
+
+class PlannerTest(TempDirTest):
+    TZ = datetime.timezone(datetime.timedelta(hours=8))
+
+    def at(self, day, hour, minute=0):
+        return datetime.datetime(2026, 11, day, hour, minute, tzinfo=self.TZ)
+
+    def make(self, now=None):
+        clock = [now or self.at(13, 14, 5)]  # 星期五下午
+        return friday_planner.Planner(os.path.join(self.tmp, "plan.json"), clock=lambda: clock[0]), clock
+
+    def test_written_minutes_and_span(self):
+        self.assertEqual(friday_planner.written_minutes("写报告 2小时"), 120)
+        self.assertEqual(friday_planner.written_minutes("打电话给银行 15分钟"), 15)
+        self.assertEqual(friday_planner.written_minutes("复习 一个半小时"), 90)
+        self.assertEqual(friday_planner.written_minutes("运动 半小时"), 30)
+        self.assertEqual(friday_planner.written_minutes("Project 1.5h"), 90)
+        self.assertIsNone(friday_planner.written_minutes("买 2 个面包"))
+        self.assertIsNone(friday_planner.written_minutes("买菜"))
+        now = self.at(13, 14, 5)
+        self.assertEqual(friday_planner.span("明天", now), (self.at(14, 0), self.at(15, 0)))
+        self.assertEqual(friday_planner.span("这周", now)[1], self.at(16, 0))  # 到星期天晚上
+        self.assertEqual(friday_planner.span("下周", now)[0], self.at(16, 0))
+
+    def test_free_slots_and_schedule(self):
+        busy = [(self.at(14, 10), self.at(14, 12)), (self.at(14, 13), self.at(14, 13, 20))]
+        with mock.patch.dict(os.environ, {"FRIDAY_PLAN_HOURS": "09:00-18:00"}):
+            slots = friday_planner.free_slots(busy, self.at(14, 0), self.at(15, 0))
+        self.assertEqual(slots, [[self.at(14, 9), self.at(14, 10)], [self.at(14, 12), self.at(14, 13)], [self.at(14, 13, 20), self.at(14, 18)]])
+        tasks = [{"key": "a", "source": "google", "title": "买菜", "due": None, "minutes": 45},
+                 {"key": "b", "source": "google", "title": "写报告", "due": datetime.date(2026, 11, 14), "minutes": 120},
+                 {"key": "c", "source": "google", "title": "整理照片", "due": None, "minutes": 600}]
+        placed, left = friday_planner.schedule(tasks, slots)
+        self.assertEqual([(p["title"], p["start"].hour, p["start"].minute) for p in placed], [("买菜", 9, 0), ("写报告", 13, 30)])
+        self.assertEqual([t["title"] for t in left], ["整理照片"])  # 太久:放不下
+        many = [{"key": str(i), "source": "local", "title": f"事{i}", "due": None, "minutes": 30} for i in range(5)]
+        placed, left = friday_planner.schedule(many, [[self.at(14, 9), self.at(14, 18)]])
+        self.assertEqual((len(placed), len(left)), (3, 2))  # 一天最多 3 件
+
+    def test_propose_apply_and_follow_up(self):
+        planner, clock = self.make()
+        tasks = [{"key": "t1", "source": "google", "title": "写报告", "due": datetime.date(2026, 11, 14), "minutes": 90},
+                 {"key": "t2", "source": "local", "title": "打电话给银行", "due": None, "minutes": 15}]
+        with mock.patch.dict(os.environ, {"FRIDAY_PLAN_HOURS": "09:00-22:00"}):
+            text = planner.propose(tasks, [(self.at(13, 14), self.at(13, 18))], "明天")
+        self.assertIn("这样安排好吗?\n- 明天 09:00~10:30 写报告\n- 明天 10:45~11:00 打电话给银行", text)
+        made, moved = [], []
+        commands = friday_planner.Commands(planner, lambda when: "", lambda: planner.apply(
+            lambda title, start, end: made.append((title, start)) or f"ev{len(made)}"))
+        self.assertIn("放进日历了(2 件)", commands.handle("好,就这样安排"))
+        self.assertEqual(made[0], ("写报告", self.at(14, 9)))
+        self.assertIsNone(commands.handle("就这样安排"))  # 没有待定的:当作聊天
+        self.assertIn("明天 09:00 写报告", commands.handle("我安排了什么"))
+        again = friday_planner.Planner(os.path.join(self.tmp, "plan.json"), clock=lambda: clock[0])
+        self.assertEqual(len(again.entries), 2)  # 存起来了
+        self.assertIn("都已经排进日历", planner.propose(tasks, [], "明天"))
+        clock[0] = self.at(14, 12)  # 写报告时间过了还没做;电话已经做了
+        done = {"t1": False, "t2": True}
+        with mock.patch.dict(os.environ, {"FRIDAY_PLAN_HOURS": "09:00-22:00"}):
+            notes = planner.follow_up(lambda source, key: done[key], lambda a, b: [(self.at(14, 12), self.at(14, 15))],
+                                      lambda event_id, start, end: moved.append((event_id, start)))
+        self.assertEqual(notes, ["“写报告”还没做完,挪到 今天 15:00。"])
+        self.assertEqual(moved, [("ev1", self.at(14, 15))])
+        self.assertEqual([e["key"] for e in planner.entries], ["t1"])
+        self.assertEqual(planner.entries[0]["moves"], 1)
+
+    def test_empty_and_no_room(self):
+        planner, _ = self.make()
+        self.assertIn("没有要排的", planner.propose([], [], ""))
+        full = [(self.at(13, 0), self.at(21, 0))]
+        tasks = [{"key": "x", "source": "google", "title": "大扫除", "due": None, "minutes": 120}]
+        self.assertIn("没有够长的空档", planner.propose(tasks, full, "今天"))
+        self.assertEqual(planner.cancel(), "现在没有待定的安排。")
+
+    def test_with_minutes(self):
+        tasks = [{"title": "写报告 2小时"}, {"title": "买菜"}, {"title": "洗车"}]
+        out = friday_planner.with_minutes(tasks, lambda titles: [40, 999])
+        self.assertEqual([t["minutes"] for t in out], [120, 40, 360])
+        out = friday_planner.with_minutes(tasks, lambda titles: 1 / 0)
+        self.assertEqual([t["minutes"] for t in out], [120, 60, 60])
+
+    def test_google_helpers(self):
+        import friday_google
+
+        inserted, patched = [], []
+        events = SimpleNamespace(
+            list=lambda **kw: SimpleNamespace(execute=lambda: {"items": [
+                {"start": {"dateTime": "2026-11-14T10:00:00+08:00"}, "end": {"dateTime": "2026-11-14T11:00:00+08:00"}},
+                {"start": {"date": "2026-11-14"}, "end": {"date": "2026-11-15"}},
+                {"start": {"dateTime": "2026-11-14T12:00:00Z"}, "end": {"dateTime": "2026-11-14T13:00:00Z"}, "transparency": "transparent"}]}),
+            insert=lambda **kw: SimpleNamespace(execute=lambda: inserted.append(kw["body"]) or {"id": "e1"}),
+            patch=lambda **kw: SimpleNamespace(execute=lambda: patched.append(kw)))
+        tools_obj = friday_google.GoogleTools.__new__(friday_google.GoogleTools)
+        tools_obj._calendar = lambda: SimpleNamespace(events=lambda: events)
+        busy = tools_obj.busy_times(self.at(14, 0), self.at(15, 0))
+        self.assertEqual(busy, [(self.at(14, 10), self.at(14, 11))])  # 全天、标成“有空”的不算
+        self.assertEqual(tools_obj.add_plan_event("写报告", self.at(14, 9), self.at(14, 10)), "e1")
+        self.assertEqual(inserted[0]["summary"], "📝 写报告")
+        self.assertEqual(inserted[0]["extendedProperties"]["private"]["friday_plan"], "1")
+        tools_obj.move_event("e1", self.at(14, 15), self.at(14, 16))
+        self.assertEqual(patched[0]["eventId"], "e1")
+
+    def test_settings(self):
+        planner, _ = self.make()
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.planner = planner
+        session.plan_propose = lambda when: f"安排{when}"
+        session.plan_apply = lambda: "放进日历了"
+        env = os.path.join(self.tmp, ".env7")
+        Path(env).write_text("", encoding="utf-8")
+        with mock.patch.dict(os.environ, {}):
+            self.assertIn("error", app.apply_settings({"plan_hours": "22:00-09:00"}, session, None, env))
+            self.assertIn("error", app.apply_settings({"plan_hours": "9-5"}, session, None, env))
+            app.apply_settings({"plan_hours": "10:00-20:00"}, session, None, env)
+            self.assertEqual(planner.state()["hours"], "10:00-20:00")
+        self.assertIn("安排这周", app.apply_settings({"plan_propose": "这周"}, session, None, env)["message"])
+        self.assertIn("放进日历了", app.apply_settings({"plan_apply": True}, session, None, env)["message"])
 
 if __name__ == "__main__":
     unittest.main()

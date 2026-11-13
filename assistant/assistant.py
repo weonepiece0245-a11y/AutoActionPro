@@ -2330,6 +2330,7 @@ def settings_state(session, meter=None) -> dict:
                       "last_scan": session.receipts.last_scan, "scanning": session.receipts.scanning}
                      if getattr(session, "receipts", None) is not None else None),
         "parcels": session.parcels.state() if getattr(session, "parcels", None) is not None else None,
+        "planner": session.planner.state() if getattr(session, "planner", None) is not None else None,
         "scenes": scenes_state(session),
         "cleanup": getattr(session, "cleanup_items", None) if os.name == "nt" or getattr(session, "cleanup_items", None) else None,
         "weekly_report": __import__("friday_alerts").weekly_enabled(),
@@ -2681,6 +2682,24 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
             save_env_value(env, key, "on" if on else "off")
             os.environ[key] = "on" if on else "off"
             done.append(on_text if on else off_text)
+    planner = getattr(session, "planner", None)
+    if any(k in payload for k in ("plan_propose", "plan_apply", "plan_cancel", "plan_hours")):
+        if planner is None:
+            return {"error": "待办排进日历现在用不了"}
+        if "plan_hours" in payload:
+            value = str(payload["plan_hours"])
+            found = re.fullmatch(r"(\d{2}):(\d{2})-(\d{2}):(\d{2})", value)
+            if not found or not (0 <= int(found.group(1)) < 24 and 0 <= int(found.group(3)) <= 23) or value[:5] >= value[6:]:
+                return {"error": "时段要像 09:00-22:00"}
+            save_env_value(env, "FRIDAY_PLAN_HOURS", value)
+            os.environ["FRIDAY_PLAN_HOURS"] = value
+            done.append(f"以后只排在 {value}")
+        if "plan_propose" in payload:
+            done.append(session.plan_propose(str(payload["plan_propose"] or "")))
+        if payload.get("plan_apply"):
+            done.append(session.plan_apply())
+        if payload.get("plan_cancel"):
+            done.append(planner.cancel())
     inbox = getattr(session, "receipts", None)
     if any(k in payload for k in ("receipts_on", "receipt_confirm", "receipt_dismiss", "receipt_scan", "parcel_scan",
                                   "parcel_received")):
@@ -3608,6 +3627,75 @@ def start_subscriptions(session, toolbox: Toolbox, data_dir: str, interval: floa
         quick.extra.append(friday_subscriptions.Commands(subs, scan_soon))
     threading.Thread(target=loop, daemon=True, name="friday-subscriptions").start()
     return subs
+
+
+def start_planner(session, toolbox: Toolbox, data_dir: str, interval: float = 3600, first_wait: float = 600):
+    """待办自动排进日历:看空档提安排,同意才放进日历;没做完自动挪。"""
+    import friday_planner
+
+    planner = friday_planner.Planner(os.path.join(data_dir, "friday_plan.json"))
+    session.planner = planner
+
+    def google():
+        return getattr(toolbox, "google", None)
+
+    def all_tasks() -> list[dict]:
+        tasks = google().open_tasks()
+        todos = getattr(toolbox, "todos", None)
+        for item in (todos.pending() if todos is not None else []):
+            try:
+                due = datetime.date.fromisoformat(str(item.get("due") or "")[:10])
+            except ValueError:
+                due = None
+            tasks.append({"key": str(item["id"]), "source": "local", "title": item["text"], "due": due})
+        return tasks
+
+    def propose(when: str) -> str:
+        if google() is None:
+            return "要先在齿轮设定里连上 Google,我才能看你的日历空档、把待办排进去。"
+        try:
+            client = getattr(getattr(session, "assistant", None), "client", None)
+            estimate = friday_planner.estimator(client, getattr(session.assistant, "on_usage", None)) if client else None
+            tasks = friday_planner.with_minutes(all_tasks(), estimate)
+            start, end = friday_planner.span(when, planner.clock())
+            text = planner.propose(tasks, google().busy_times(start, end), when)
+        except Exception as e:  # noqa: BLE001
+            return f"看日历或待办时出错了:{str(e)[:120] or type(e).__name__}"
+        session.hub.broadcast({"type": "mailscan"})
+        return text
+
+    def apply() -> str:
+        if google() is None:
+            return "要先连上 Google。"
+        text = planner.apply(google().add_plan_event)
+        session.hub.broadcast({"type": "mailscan"})
+        return text
+
+    def is_done(source: str, key: str) -> bool | None:
+        if source == "google":
+            return google().task_done(key) if google() is not None else None
+        todos = getattr(toolbox, "todos", None)
+        item = next((i for i in (todos.items if todos is not None else []) if str(i.get("id")) == key), None)
+        return True if item is None or item.get("done") else False
+
+    session.plan_propose, session.plan_apply = propose, apply
+    quick = getattr(session, "quick", None)
+    if quick is not None:
+        quick.extra.append(friday_planner.Commands(planner, propose, apply))
+
+    def loop() -> None:
+        time.sleep(first_wait)
+        while True:
+            def check() -> None:
+                if google() is None or not planner.entries:
+                    return
+                for note in planner.follow_up(is_done, google().busy_times, google().move_event):
+                    announce(session, note, "📝", note)
+            _quietly(check)
+            time.sleep(interval)
+
+    threading.Thread(target=loop, daemon=True, name="friday-planner").start()
+    return planner
 
 
 def start_mail_scanners(session, toolbox: Toolbox, data_dir: str, first_wait: float = 240):
@@ -5413,6 +5501,7 @@ def run_web(args) -> None:
     _startup_step(session, "订阅管家", lambda: start_subscriptions(session, toolbox, data_dir))
     _startup_step(session, "开机变慢优化", lambda: start_startup_doctor(session, toolbox, data_dir))
     _startup_step(session, "邮件收据和包裹", lambda: start_mail_scanners(session, toolbox, data_dir))
+    _startup_step(session, "待办排进日历", lambda: start_planner(session, toolbox, data_dir))
     toolbox.meter, toolbox.budget = session.meter, getattr(session, "budget", None)
     import friday_scenes
 

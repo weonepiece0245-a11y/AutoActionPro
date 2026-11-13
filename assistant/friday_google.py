@@ -394,6 +394,29 @@ class _MoreGoogleTools:
         items = api.list(tasklist="@default", showCompleted=False, maxResults=50).execute().get("items", [])
         return [{"text": t.get("title", ""), "due": (t.get("due") or "")[:10]} for t in items if t.get("title")]
 
+    def open_tasks(self) -> list[dict]:
+        """没做完的待办(排进日历用):[{key, source, title, due}]。"""
+        api = self.account.service("tasks").tasks()
+        items = api.list(tasklist="@default", showCompleted=False, maxResults=100).execute().get("items", [])
+        found = []
+        for t in items:
+            if not t.get("title"):
+                continue
+            try:
+                due = datetime.date.fromisoformat((t.get("due") or "")[:10])
+            except ValueError:
+                due = None
+            found.append({"key": t["id"], "source": "google", "title": t["title"], "due": due})
+        return found
+
+    def task_done(self, task_id: str) -> bool | None:
+        """做完了(或删掉了)True;还没做 False;查不到(断线)None。"""
+        try:
+            task = self.account.service("tasks").tasks().get(tasklist="@default", task=task_id).execute()
+        except Exception as e:  # noqa: BLE001
+            return True if getattr(getattr(e, "resp", None), "status", None) in (404, 410) else None
+        return task.get("status") == "completed" or bool(task.get("deleted"))
+
     @staticmethod
     def _find_task(api, tasklist: str, key: str) -> dict:
         key = key.strip()
@@ -675,6 +698,35 @@ class GoogleTools(_MoreGoogleTools):
             singleEvents=True, orderBy="startTime", maxResults=50,
         ).execute()
         return result.get("items", [])
+
+    def busy_times(self, start: datetime.datetime, end: datetime.datetime) -> list[tuple]:
+        """这段时间日历上有安排的时段(全天的活动不算占用)。"""
+        result = self._calendar().events().list(
+            calendarId="primary", timeMin=start.isoformat(), timeMax=end.isoformat(),
+            singleEvents=True, orderBy="startTime", maxResults=250,
+        ).execute()
+        busy = []
+        for event in result.get("items", []):
+            s, e = (event.get("start") or {}).get("dateTime"), (event.get("end") or {}).get("dateTime")
+            if not s or not e or event.get("transparency") == "transparent":
+                continue
+            try:
+                busy.append((datetime.datetime.fromisoformat(s.replace("Z", "+00:00")),
+                             datetime.datetime.fromisoformat(e.replace("Z", "+00:00"))))
+            except ValueError:
+                continue
+        return busy
+
+    def add_plan_event(self, title: str, start: datetime.datetime, end: datetime.datetime) -> str:
+        """星期五排的待办时间(标题前面有 📝)。"""
+        body = {"summary": f"📝 {title}"[:200], "start": {"dateTime": start.isoformat()}, "end": {"dateTime": end.isoformat()},
+                "description": "星期五帮你排的待办时间。做完了在待办清单打勾;没做完我会挪到下一个空档。",
+                "extendedProperties": {"private": {"friday_plan": "1"}}}
+        return self._calendar().events().insert(calendarId="primary", body=body).execute()["id"]
+
+    def move_event(self, event_id: str, start: datetime.datetime, end: datetime.datetime) -> None:
+        self._calendar().events().patch(calendarId="primary", eventId=event_id,
+                                        body={"start": {"dateTime": start.isoformat()}, "end": {"dateTime": end.isoformat()}}).execute()
 
     def _add_event(self, args: dict, confirm: Approver) -> str:
         title = (args.get("title") or "").strip()

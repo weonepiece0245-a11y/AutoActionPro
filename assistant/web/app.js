@@ -1085,6 +1085,30 @@ function fillSettings() {
       list.append(row);
     }
   }
+  const pl = s.planner;
+  $("planGroup").hidden = !pl;
+  if (pl) {
+    if (document.activeElement !== $("planHours")) $("planHours").value = pl.hours;
+    const fmt = (iso) => { const d = new Date(iso); return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
+    const showing = pl.proposal.length ? pl.proposal : pl.entries;
+    $("planNote").textContent = pl.proposal.length ? "这样安排好吗?(还没放进日历)"
+      : pl.entries.length ? `已经排进日历 ${pl.entries.length} 件:` : "说“帮我安排这周的待办”,或按这里;先给你看安排,同意才放进 Google 日历。";
+    $("planActions").hidden = !pl.proposal.length;
+    const list = $("planList");
+    list.replaceChildren();
+    for (const p of showing) {
+      const row = document.createElement("div");
+      row.className = "set-row sub";
+      row.textContent = `${fmt(p.start)}~${fmt(p.end).slice(-5)} ${p.title}` + (p.moves ? `(挪过 ${p.moves} 次)` : "");
+      list.append(row);
+    }
+    if (pl.proposal.length && pl.left.length) {
+      const row = document.createElement("div");
+      row.className = "set-note";
+      row.textContent = "排不下:" + pl.left.join("、");
+      list.append(row);
+    }
+  }
   const pc = s.parcels;
   $("parcelGroup").hidden = !pc;
   if (pc) {
@@ -1802,6 +1826,11 @@ $("setReceipts").onchange = (e) => saveSetting({ receipts_on: e.target.checked }
 $("rcptScan").onclick = () => saveSetting({ receipt_scan: true });
 $("rcptAll").onclick = () => saveSetting({ receipt_confirm: "all" });
 $("rcptNone").onclick = () => { if (confirm("全部忽略?(不会记账)")) saveSetting({ receipt_dismiss: "all" }); };
+$("planHoursSave").onclick = () => saveSetting({ plan_hours: $("planHours").value.trim() });
+$("planWeek").onclick = () => saveSetting({ plan_propose: "这周" }, 6000);
+$("planTomorrow").onclick = () => saveSetting({ plan_propose: "明天" }, 6000);
+$("planApply").onclick = () => saveSetting({ plan_apply: true });
+$("planCancel").onclick = () => saveSetting({ plan_cancel: true });
 $("parcelScan").onclick = () => saveSetting({ parcel_scan: true });
 $("subScan").onclick = () => saveSetting({ sub_scan: true }, 5000);
 $("subAdd").onclick = async () => {

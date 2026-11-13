@@ -270,7 +270,28 @@ class QuickCommands:
                 if key and key not in ("所有", "全部", "这个", "那个"):
                     reply, failed = toolbox._reminder({"action": "cancel", "key": key}, lambda status: None)
                     return None if failed else reply
-        if todos is not None:
+        google = getattr(toolbox, "google", None)
+        if google is not None:  # 连了 Google:待办在 Google Tasks(手机上也看得到)
+            if local.TODO_LIST.match(sentence):
+                items = google.task_items()
+                if not items:
+                    return "待办清单是空的,都做完了。"
+                return f"还有 {len(items)} 件待办:\n" + "\n".join(
+                    f"□ {i['text']}" + (f"(截止 {i['due']})" if i.get("due") else "") for i in items[:20])
+            found = local.TODO_ADD.match(sentence)
+            if found:
+                title = found.group("t") or found.group("t2") or found.group("t3")
+                google.tasks({"action": "add", "title": title})
+                return f"加到待办了:{title}(手机上的 Google Tasks 也看得到)。"
+            found = local.TODO_DONE.match(sentence)
+            if found:
+                key = (found.group("t") or found.group("t2") or "").strip().removeprefix("待办")
+                matches = [i for i in google.task_items() if key and (key in i["text"] or i["text"] in key)]
+                if len(matches) == 1:
+                    google.tasks({"action": "done", "key": matches[0]["text"]})
+                    return f"好,“{matches[0]['text']}”打勾了。"
+                return None
+        elif todos is not None:
             if local.TODO_LIST.match(sentence):
                 import friday_daily
 
