@@ -1052,6 +1052,21 @@ UNATTENDED_REFUSAL = (
 SERVER_TOOL_LABELS = {"web_search": ("搜索", "query"), "web_fetch": ("读取网页", "url")}
 
 
+PC_STARTUP_TOOL = {
+    "name": "pc_startup",
+    "description": (
+        "开机变慢优化(Windows):report 列出开机自动启动的程序(哪些拖慢开机、哪些建议关)、Windows 更新是不是等着重启或很久没更新、"
+        "硬盘健康、临时文件多大;disable / enable:让某个程序开机不自动启动 / 恢复(和任务管理器的停用一样,不删除,随时能改回来,会先问老板);"
+        "clean_temp:清掉超过 7 天没用的临时文件(会先问)。老板说开机慢、电脑变慢时先用 report。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"action": {"type": "string", "enum": ["report", "disable", "enable", "clean_temp"]},
+                       "name": {"type": "string", "description": "disable / enable 用:程序名字(report 里的)"}},
+        "required": ["action"],
+    },
+}
+
 SUBSCRIPTIONS_TOOL = {
     "name": "subscriptions",
     "description": (
@@ -1191,6 +1206,7 @@ class Toolbox:
         self.library = None  # 我的资料库(friday_library.Library)
         self.subscriptions = None  # 订阅管家(friday_subscriptions.Subscriptions)
         self.subscription_scan = None  # () -> 话:去邮箱找订阅(在后台)
+        self.startup_doctor = None  # 开机变慢优化(friday_startup.StartupDoctor)
         self.weather_fetch = None  # 测试时换成假的天气服务
         self._handlers = {
             "remember": self._remember,
@@ -1251,6 +1267,7 @@ class Toolbox:
             "background_task": self._background_task,
             "library": self._library,
             "subscriptions": self._subscriptions,
+            "pc_startup": self._pc_startup,
         }
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
 
@@ -1348,6 +1365,8 @@ class Toolbox:
             tools = tools + [LIBRARY_TOOL]
         if self.subscriptions is not None:
             tools = tools + [SUBSCRIPTIONS_TOOL]
+        if self.startup_doctor is not None and self.local_tools:
+            tools = tools + [PC_STARTUP_TOOL]
         return tools
 
     def begin_turn(self) -> None:
@@ -2057,6 +2076,29 @@ class Toolbox:
             return str(e), True
         except Exception as e:
             return f"网站暂时打不开:{type(e).__name__}: {e}", True
+        return f"不支持的 action:{action}", True
+
+    def _pc_startup(self, args, on_status):
+        doctor = self.startup_doctor
+        if doctor is None:
+            return "这台电脑用不了(只有 Windows 有)", True
+        action = args.get("action")
+        if action == "report":
+            on_status("检查开机启动、Windows 更新、硬盘健康")
+            return doctor.describe(), False
+        if action in ("disable", "enable"):
+            name = str(args.get("name") or "")
+            enabled = action == "enable"
+            if not self._confirmed(f"{'让' if enabled else '不让'} {name} 开机自动启动(随时可以改回来)"):
+                return "用户没有同意,没改", False
+            try:
+                return doctor.set_enabled(name, enabled), False
+            except (LookupError, ValueError, OSError) as e:
+                return str(e), True
+        if action == "clean_temp":
+            if not self._confirmed("清理临时文件夹里超过 7 天没用的临时文件"):
+                return "用户没有同意,没清", False
+            return doctor.clean(), False
         return f"不支持的 action:{action}", True
 
     def _subscriptions(self, args, on_status):

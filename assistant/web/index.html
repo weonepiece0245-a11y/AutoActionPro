@@ -351,6 +351,15 @@
       <div class="set-note" id="vocabNote">也可以直接说“以后听到米谷就是 Mid Valley”。被你纠正“你听错了,我说的是……”时,我也会自己加进来。</div>
     </div>
 
+    <div class="set-group" id="startGroup" hidden data-cat="pc">
+      <h3>开机变慢优化</h3>
+      <div class="set-row"><span class="set-note" id="startSummary">按“检查一下”看看开机启动了哪些程序、哪些可以关。</span><button type="button" class="mini-btn" id="startCheck">检查一下</button></div>
+      <div id="startList"></div>
+      <div class="set-note" id="startExtra" hidden></div>
+      <div class="set-row" id="startCleanRow" hidden><span class="set-note" id="startCleanText"></span><button type="button" class="mini-btn" id="startClean">清理临时文件</button></div>
+      <div class="set-note">关掉的方法和任务管理器“停用”一样:不删除、不卸载,要用时照常打开,随时可以在这里打开回来。灰色的是装给所有用户的,要在任务管理器里改。每 30 天自动检查一次,有该处理的才告诉你。</div>
+    </div>
+
     <div class="set-group" id="healthGroup" hidden data-cat="pc">
       <h3>电脑健康(不花钱)</h3>
       <div class="set-row"><label for="setHealth">硬盘快满、内存太紧、很久没重启、下载文件夹太乱时提醒我</label><input type="checkbox" class="switch" id="setHealth"></div>

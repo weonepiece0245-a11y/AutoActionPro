@@ -12025,5 +12025,136 @@ class SubscriptionsTest(TempDirTest):
         found = tools_obj.mail_headers("q", limit=5)
         self.assertEqual(found[0], {"from": "Netflix", "subject": "Receipt", "date": "1 Nov", "snippet": "RM55 & more"})
 
+
+import friday_startup  # noqa: E402
+
+
+class FakeRegistry:
+    def __init__(self, data):
+        self.data = data  # {(hive, path): {name: value}}
+        self.writes = []
+
+    def values(self, hive, path):
+        return list(self.data.get((hive, path), {}).items())
+
+    def set_binary(self, hive, path, name, value):
+        self.writes.append((hive, path, name, value))
+        self.data.setdefault((hive, path), {})[name] = value
+
+
+class StartupDoctorTest(TempDirTest):
+    def make(self, boot=None, checks=None):
+        approved = friday_startup.APPROVED
+        user_startup = Path(self.tmp, "Startup")
+        user_startup.mkdir(exist_ok=True)
+        (user_startup / "Spotify.lnk").write_text("x")
+        (user_startup / "desktop.ini").write_text("x")
+        registry = FakeRegistry({
+            ("HKCU", friday_startup.RUN): {"Steam": '"C:\\Program Files (x86)\\Steam\\steam.exe" -silent',
+                                           "Discord": "C:\\Users\\a\\AppData\\Local\\Discord\\Update.exe --processStart Discord.exe",
+                                           "RazerSynapse": "C:\\Razer\\synapse.exe", "OldThing": "C:\\x\\old.exe"},
+            ("HKCU", approved + "\\Run"): {"OldThing": friday_startup.approval_bytes(False, 0)},
+            ("HKLM", friday_startup.RUN): {"SecurityHealth": "%windir%\\system32\\SecurityHealthSystray.exe",
+                                           "EpicGamesLauncher": "C:\\Epic\\EpicGamesLauncher.exe -silent"},
+        })
+        temp = Path(self.tmp, "Temp")
+        (temp / "sub").mkdir(parents=True, exist_ok=True)
+        old = temp / "sub" / "old.tmp"
+        with old.open("wb") as f:
+            f.truncate(400 * 1024 ** 2)  # 稀疏文件:看起来 400MB,不真的占空间
+        os.utime(old, (time.time() - 30 * 86400, time.time() - 30 * 86400))
+        (temp / "new.tmp").write_bytes(b"y" * 1000)
+        doctor = friday_startup.StartupDoctor(
+            os.path.join(self.tmp, "startup.json"), registry, folders=lambda: [("HKCU", user_startup)],
+            boot=boot or (lambda: {"boot_seconds": 48, "slow": [{"name": "Steam Client", "file": "steam.exe", "ms": 6200}]}),
+            checks=checks or (lambda: {"reboot": True, "last_update": "2026-08-01", "disks": [{"name": "Samsung SSD", "health": "Healthy"}]}),
+            temp=lambda: temp, today=lambda: datetime.date(2026, 11, 13))
+        return doctor, registry, temp
+
+    def test_items_and_suggestions(self):
+        doctor, _, _ = self.make()
+        items = {i["name"]: i for i in doctor.items()}
+        self.assertEqual(set(items), {"Steam", "Discord", "RazerSynapse", "OldThing", "SecurityHealth", "EpicGamesLauncher", "Spotify"})
+        self.assertEqual(items["Steam"]["suggest"], "off")
+        self.assertEqual(items["RazerSynapse"]["suggest"], "keep")  # 键鼠灯光设定要留
+        self.assertEqual(items["SecurityHealth"]["suggest"], "keep")
+        self.assertFalse(items["OldThing"]["enabled"])  # 已经在任务管理器关掉了
+        self.assertFalse(items["EpicGamesLauncher"]["can_toggle"])  # 所有用户的:要管理员
+        self.assertTrue(items["Spotify"]["can_toggle"])
+
+    def test_report_text(self):
+        doctor, _, _ = self.make()
+        text = doctor.describe()
+        self.assertIn("上次开机花了大约 48 秒", text)
+        self.assertIn("开机会自动启动 6 个程序(另外 1 个已经关了)", text)
+        self.assertTrue(text.index("- Steam:游戏平台,拖慢开机约 6.2 秒") < text.index("- Discord"))
+        self.assertIn("EpicGamesLauncher:游戏平台,比较吃资源(要在任务管理器关)", text)
+        self.assertNotIn("- RazerSynapse", text)
+        self.assertIn("等着重启", text)
+        self.assertIn("上次装 Windows 更新是 2026-08-01(104 天前)", text)
+        self.assertIn("硬盘健康正常", text)
+        self.assertIn("说“清理临时文件”", text)
+        self.assertFalse(doctor.monthly_due())  # 刚检查过
+        sick, _, _ = self.make(checks=lambda: {"reboot": False, "last_update": "", "disks": [{"name": "WD", "health": "Warning"}]})
+        self.assertIn("⚠ 硬盘健康有问题:WD(Warning)", sick.monthly())
+
+    def test_disable_enable_like_task_manager(self):
+        doctor, registry, _ = self.make()
+        commands = friday_startup.Commands(doctor)
+        self.assertIn("以后开机不会自动启动了", commands.handle("关掉开机启动的 Steam"))
+        hive, path, name, value = registry.writes[-1]
+        self.assertEqual((hive, path, name), ("HKCU", friday_startup.APPROVED + "\\Run", "Steam"))
+        self.assertTrue(friday_startup.disabled_flag(value))
+        self.assertIn("本来就不会", commands.handle("开机不要自动开 Steam"))
+        self.assertIn("以后开机会自动启动", commands.handle("恢复开机启动 Steam"))
+        self.assertFalse(friday_startup.disabled_flag(registry.writes[-1][3]))
+        self.assertIn("以后开机不会自动启动", commands.handle("开机不要自动开 Spotify"))
+        self.assertEqual(registry.writes[-1][1:3], (friday_startup.APPROVED + "\\StartupFolder", "Spotify.lnk"))
+        self.assertIn("任务管理器", commands.handle("关掉开机启动的 EpicGamesLauncher"))
+        self.assertEqual(len(registry.writes), 3)  # 所有用户的没有改
+        self.assertIsNone(commands.handle("关掉开机启动的 微信"))  # 没有这个:交给 Claude
+        self.assertIsNone(commands.handle("关掉 Steam"))  # 不是在说开机启动
+        self.assertIn("开机会自动启动", commands.handle("开机好慢"))
+
+    def test_clean_temp(self):
+        doctor, _, temp = self.make()
+        self.assertIn("清掉了 1 个临时文件", friday_startup.Commands(doctor).handle("清理临时文件"))
+        self.assertTrue((temp / "new.tmp").exists())  # 新的不动
+        self.assertFalse((temp / "sub").exists())  # 空的子文件夹拿掉
+        self.assertIn("不用清", doctor.clean())
+
+    def test_tool_needs_confirmation(self):
+        doctor, registry, _ = self.make()
+        answers = [False, True]
+        toolbox = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m.json")), lambda a: True, workdir=self.tmp,
+                                confirm=lambda action: answers.pop(0))
+        toolbox.startup_doctor = doctor
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+        run = lambda args: toolbox.run(SimpleNamespace(id="p", name="pc_startup", input=args), lambda s: None)  # noqa: E731
+        self.assertIn("没有同意", run({"action": "disable", "name": "Discord"})["content"])
+        self.assertEqual(registry.writes, [])
+        self.assertIn("不会自动启动", run({"action": "disable", "name": "Discord"})["content"])
+        self.assertIn("上次开机", run({"action": "report"})["content"])
+
+    def test_settings_state(self):
+        doctor, registry, _ = self.make()
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.startup_doctor = doctor
+        checks = []
+        session.startup_check = lambda: checks.append(1)
+        env = os.path.join(self.tmp, ".env5")
+        Path(env).write_text("", encoding="utf-8")
+        app.apply_settings({"startup_check": True}, session, None, env)
+        self.assertEqual(checks, [1])
+        out = app.apply_settings({"startup_toggle": {"name": "Discord", "enabled": False}}, session, None, env)
+        self.assertIn("Discord 以后开机不会自动启动", out["message"])
+        self.assertIn("error", app.apply_settings({"startup_toggle": {"name": "没有", "enabled": False}}, session, None, env))
+        doctor.report()
+        state = app.startup_state(session)
+        steam = next(i for i in state["items"] if i["name"] == "Steam")
+        self.assertEqual(steam["slow_seconds"], 6.2)
+        self.assertNotIn("command", steam)
+        self.assertFalse(next(i for i in state["items"] if i["name"] == "Discord")["enabled"])
+
 if __name__ == "__main__":
     unittest.main()

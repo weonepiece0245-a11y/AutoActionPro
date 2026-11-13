@@ -2325,6 +2325,7 @@ def settings_state(session, meter=None) -> dict:
         "library": library_state(session),
         "meeting": meeting_state(session),
         "subscriptions": session.subscriptions.state() if getattr(session, "subscriptions", None) is not None else None,
+        "startup": startup_state(session),
         "scenes": scenes_state(session),
         "cleanup": getattr(session, "cleanup_items", None) if os.name == "nt" or getattr(session, "cleanup_items", None) else None,
         "weekly_report": __import__("friday_alerts").weekly_enabled(),
@@ -2676,6 +2677,21 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
             save_env_value(env, key, "on" if on else "off")
             os.environ[key] = "on" if on else "off"
             done.append(on_text if on else off_text)
+    doctor = getattr(session, "startup_doctor", None)
+    if any(k in payload for k in ("startup_check", "startup_toggle", "startup_clean")):
+        if doctor is None or doctor.registry is None:
+            return {"error": "开机优化只能在 Windows 上用"}
+        if payload.get("startup_check"):
+            session.startup_check()
+            done.append("开始检查(大约半分钟),好了会显示在窗口里")
+        if isinstance(payload.get("startup_toggle"), dict):
+            try:
+                done.append(doctor.set_enabled(str(payload["startup_toggle"].get("name") or ""),
+                                               bool(payload["startup_toggle"].get("enabled"))))
+            except (LookupError, ValueError, OSError) as e:
+                return {"error": str(e)}
+        if payload.get("startup_clean"):
+            done.append(doctor.clean())
     subs = getattr(session, "subscriptions", None)
     if any(k in payload for k in ("sub_add", "sub_remove", "sub_cancel", "sub_scan")):
         if subs is None:
@@ -3557,6 +3573,70 @@ def start_subscriptions(session, toolbox: Toolbox, data_dir: str, interval: floa
     return subs
 
 
+def start_startup_doctor(session, toolbox: Toolbox, data_dir: str, interval: float = 6 * 3600, first_wait: float = 900):
+    """开机变慢优化:开机启动的程序、Windows 更新、硬盘健康、临时文件;每 30 天自动检查一次。"""
+    import friday_startup
+
+    registry = friday_startup.WindowsRegistry() if os.name == "nt" else None
+    doctor = friday_startup.StartupDoctor(os.path.join(data_dir, "friday_startup.json"), registry)
+    session.startup_doctor = doctor
+    session.startup_checking = False
+    if registry is not None:
+        toolbox.startup_doctor = doctor
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+        quick = getattr(session, "quick", None)
+        if quick is not None:
+            quick.extra.append(friday_startup.Commands(doctor))
+
+    def check_now() -> None:
+        if session.startup_checking:
+            return
+        session.startup_checking = True
+        try:
+            text = doctor.describe()
+            session.hub.broadcast({"type": "reminder", "text": "🖥 " + text})
+        finally:
+            session.startup_checking = False
+            session.hub.broadcast({"type": "startup"})
+
+    session.startup_check = lambda: threading.Thread(target=lambda: _quietly(check_now), daemon=True,
+                                                     name="friday-startup-check").start()
+
+    def loop() -> None:
+        time.sleep(first_wait)
+        while True:
+            def monthly() -> None:
+                if doctor.monthly_due():
+                    text = doctor.monthly()
+                    if text:
+                        announce(session, text, "🖥", "每月电脑开机检查在窗口里")
+            if registry is not None:
+                _quietly(monthly)
+            time.sleep(interval)
+
+    threading.Thread(target=loop, daemon=True, name="friday-startup-doctor").start()
+    return doctor
+
+
+def startup_state(session) -> dict | None:
+    doctor = getattr(session, "startup_doctor", None)
+    if doctor is None:
+        return None
+    report = doctor.last_report() or {}
+    slow = {i["name"]: i.get("slow_seconds", 0) for i in report.get("items") or []}
+    try:
+        items = doctor.items()
+    except OSError:
+        items = []
+    for item in items:
+        item["slow_seconds"] = slow.get(item["name"], 0)
+        item.pop("command", None)
+    return {"windows": doctor.registry is not None, "checking": getattr(session, "startup_checking", False),
+            "time": report.get("time", ""), "boot_seconds": report.get("boot_seconds", 0), "reboot": report.get("reboot", False),
+            "last_update": report.get("last_update", ""), "disks": report.get("disks") or [],
+            "temp_bytes": report.get("temp_bytes", 0), "items": items}
+
+
 class MeetingCommands:
     """“开始记录”“停止记录”“把会议待办加进清单”……;做完通知窗口更新上面的计时。"""
 
@@ -3585,8 +3665,9 @@ def start_meeting(session, toolbox: Toolbox, data_dir: str, voice_module):
     folder = Path(data_dir) / "friday_meetings"
     session.meeting_folder = folder
     assistant = getattr(session, "assistant", None)
-    summarize = (friday_meeting.summarizer(assistant.client, friday_router.SONNET, getattr(assistant, "on_usage", None))
-                 if assistant is not None else None)
+    client = getattr(assistant, "client", None)
+    summarize = (friday_meeting.summarizer(client, friday_router.SONNET, getattr(assistant, "on_usage", None))
+                 if client is not None else None)
 
     def done(record: dict) -> None:
         todos = record.get("todos") or []
@@ -3603,8 +3684,22 @@ def start_meeting(session, toolbox: Toolbox, data_dir: str, voice_module):
         if refresh is not None:
             refresh()
 
+    def mic():
+        try:
+            return friday_meeting.Mic()
+        except ImportError:  # 第一次用:自动装录音组件(和按住说话一样)
+            import friday_wake
+
+            session.hub.broadcast({"type": "status", "text": "📝 第一次用会议记录:在安装录音组件(一两分钟)……"})
+            if not friday_wake.pip_install(["sounddevice"]):
+                raise RuntimeError("录音组件没装好,检查一下网络再试") from None
+            import importlib
+
+            importlib.invalidate_caches()
+            return friday_meeting.Mic()
+
     recorder = friday_meeting.MeetingRecorder(
-        folder, lambda wav: voice_module.transcribe_detail(wav)[0], summarize, on_done=done,
+        folder, lambda wav: voice_module.transcribe_detail(wav)[0], summarize, mic_factory=mic, on_done=done,
         on_status=lambda text: session.hub.broadcast({"type": "status", "text": "📝 " + text}))
     session.meeting = recorder
     quick = getattr(session, "quick", None)
@@ -5177,6 +5272,7 @@ def run_web(args) -> None:
     _startup_step(session, "会议记录", lambda: start_meeting(session, toolbox, data_dir, voice_module))
     _startup_step(session, "我的资料库", lambda: start_library(session, toolbox, data_dir))
     _startup_step(session, "订阅管家", lambda: start_subscriptions(session, toolbox, data_dir))
+    _startup_step(session, "开机变慢优化", lambda: start_startup_doctor(session, toolbox, data_dir))
     toolbox.meter, toolbox.budget = session.meter, getattr(session, "budget", None)
     import friday_scenes
 

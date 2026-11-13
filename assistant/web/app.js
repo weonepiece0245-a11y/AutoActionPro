@@ -408,6 +408,8 @@ function handle(ev) {
       showSleepTimer(ev); break;
     case "meeting":
       showMeeting(ev); break;
+    case "startup":
+      loadState().then(() => fillSettings()); break;
     case "orb_click":  // 点了桌面小光球:开始听(在听就停)
       ensureAudio();
       if (orbState.onOrbClick) orbState.onOrbClick();
@@ -1019,6 +1021,42 @@ function fillSettings() {
     for (const scene of sc.list) list.append(sceneCard(scene));
   }
   if (s.meeting) showMeeting(s.meeting);
+  const st = s.startup;
+  $("startGroup").hidden = !st || !st.windows;
+  if (st && st.windows) {
+    const on = st.items.filter((i) => i.enabled);
+    const offSuggest = on.filter((i) => i.suggest === "off");
+    $("startSummary").textContent = st.checking ? "正在检查……(大约半分钟)"
+      : `开机会自动启动 ${on.length} 个程序` + (offSuggest.length ? `,其中 ${offSuggest.length} 个建议关掉` : "")
+        + (st.boot_seconds ? `。上次开机花了约 ${st.boot_seconds} 秒` : "") + (st.time ? `(检查于 ${st.time})` : "");
+    $("startCheck").disabled = !!st.checking;
+    const order = { off: 0, maybe: 1, keep: 2 };
+    const list = $("startList");
+    list.replaceChildren();
+    for (const item of [...st.items].sort((a, b) => order[a.suggest] - order[b.suggest] || b.slow_seconds - a.slow_seconds)) {
+      const row = document.createElement("div");
+      row.className = "set-row sub" + (item.can_toggle ? "" : " locked-row");
+      const label = document.createElement("label");
+      const tag = { off: "建议关", maybe: "看情况", keep: "建议留" }[item.suggest];
+      label.textContent = `${item.name} · ${tag}` + (item.slow_seconds ? ` · 拖慢开机 ${item.slow_seconds} 秒` : "") + (item.can_toggle ? "" : " · 要在任务管理器改");
+      label.title = item.why;
+      const sw = document.createElement("input");
+      sw.type = "checkbox"; sw.className = "switch"; sw.checked = item.enabled; sw.disabled = !item.can_toggle;
+      sw.setAttribute("aria-label", `${item.name} 开机启动`);
+      sw.onchange = () => saveSetting({ startup_toggle: { name: item.name, enabled: sw.checked } });
+      row.append(label, sw);
+      list.append(row);
+    }
+    const extra = [];
+    if (st.reboot) extra.push("Windows 有更新等着重启才完成。");
+    if (st.last_update) extra.push(`上次装 Windows 更新:${st.last_update}。`);
+    const bad = st.disks.filter((d) => !["healthy", "", "0"].includes(String(d.health).toLowerCase()));
+    if (st.disks.length) extra.push(bad.length ? `⚠ 硬盘健康有问题:${bad.map((d) => d.name).join("、")},重要文件先备份!` : "硬盘健康正常。");
+    $("startExtra").hidden = !extra.length;
+    $("startExtra").textContent = extra.join(" ");
+    $("startCleanRow").hidden = !st.temp_bytes;
+    $("startCleanText").textContent = `临时文件夹里有 ${(st.temp_bytes / 1024 ** 2).toFixed(0)} MB 超过 7 天没用的临时文件`;
+  }
   const subs = s.subscriptions;
   $("subGroup").hidden = !subs;
   if (subs) {
@@ -1709,6 +1747,8 @@ $("subSize").onchange = (e) => saveSetting({ sub_size: e.target.value });
 $("subTime").onchange = (e) => saveSetting({ sub_time: e.target.value });
 $("duckTo").onchange = (e) => saveSetting({ duck_to: e.target.value });
 $("subPreview").onclick = () => saveSetting({ subtitle_preview: true });
+$("startCheck").onclick = () => saveSetting({ startup_check: true });
+$("startClean").onclick = () => { if (confirm("清掉临时文件夹里超过 7 天没用的临时文件?(正在用的不会动)")) saveSetting({ startup_clean: true }, 4500); };
 $("subScan").onclick = () => saveSetting({ sub_scan: true }, 5000);
 $("subAdd").onclick = async () => {
   const ok = await saveSetting({ sub_add: { name: $("subName").value.trim(), amount: Number($("subAmount").value) || 0,

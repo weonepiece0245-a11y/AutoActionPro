@@ -556,6 +556,7 @@ button:focus-visible, .switch:focus-visible, select:focus-visible, input:focus-v
 body.hide-right .orb-tools { right: 26px; }
 @media (max-width: 1000px) { .orb-tools { right: 14px; top: 34%; } }
 body.locked .orb-tools { display: none; }
+.set-row.locked-row > label { opacity: .55; }
 .set-row.muted > span:first-child { opacity: .5; text-decoration: line-through; }
 .rec-chip { font: inherit; cursor: pointer; color: #fecaca; border-color: rgba(239,68,68,.6); background: rgba(239,68,68,.12); animation: blink 2s ease-in-out infinite; }
 .rec-chip:disabled { cursor: default; animation: none; color: var(--text); border-color: var(--cyan-line); background: transparent; }
