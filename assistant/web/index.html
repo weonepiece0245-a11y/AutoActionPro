@@ -26,6 +26,7 @@
   <button type="button" class="orb-tool" id="orbZoomOut" title="缩小" aria-label="缩小">−</button>
   <button type="button" class="orb-tool" id="orbReset" title="转回正面、原来大小(也可以双击光球旁边的空白)" aria-label="复原">⟲</button>
   <span class="orb-tool-name" id="orbStyleName" aria-live="polite"></span>
+  <div class="orb-menu" id="orbMenu" hidden role="menu" aria-label="光球的样子"></div>
 </div>
 <div class="grid-floor" aria-hidden="true"></div>
 <div class="scanlines" aria-hidden="true"></div>
@@ -73,6 +74,8 @@
   </div>
 </header>
 
+<button type="button" class="edge-tab left" id="edgeLeft" aria-label="左边的面板"><span aria-hidden="true"></span></button>
+<button type="button" class="edge-tab right" id="edgeRight" aria-label="右边的面板"><span aria-hidden="true"></span></button>
 <aside class="hud hud-left">
   <section class="panel dash" data-panel="weather" id="dashWeather" hidden>
     <h2><span>WEATHER</span>天气<small class="dash-sub" id="weatherPlace"></small></h2>
@@ -405,12 +408,17 @@
       <div class="set-row"><label for="setTheme">颜色主题</label>
         <select class="mini-select" id="setTheme"><option value="cyan">青蓝(默认)</option><option value="ironman">钢铁红金</option><option value="violet">紫色</option><option value="matrix">绿色</option></select></div>
       <div class="set-row"><label for="setOrbStyle">光球样子</label>
-        <select class="mini-select" id="setOrbStyle"><option value="classic">经典(全息球)</option><option value="reactor">反应堆</option><option value="galaxy">星系</option><option value="wave">声波环</option><option value="atom">原子</option></select></div>
+        <select class="mini-select" id="setOrbStyle"><option value="classic">经典(全息球)</option><option value="reactor">反应堆</option><option value="galaxy">星系</option><option value="wave">声波环</option><option value="atom">原子</option><option value="dna">双螺旋</option><option value="planet">星球</option><option value="cube">超立方体</option><option value="plasma">等离子</option></select></div>
+      <div class="set-row"><label for="setOrbAuto">光球自动换样子</label>
+        <select class="mini-select" id="setOrbAuto"><option value="off">不换</option><option value="10m">每 10 分钟</option><option value="1h">每小时</option><option value="1d">每天</option></select></div>
       <div class="set-note">在光球上滚滚轮放大缩小,按住拖动可以上下左右转,双击旁边的空白转回正面。</div>
       <div class="set-row"><label for="brightness">光球亮度</label>
         <span class="set-ctl bright"><input type="range" id="brightness" min="20" max="120" step="5" value="70"><output id="brightOut">70%</output></span></div>
       <div class="set-row" id="orbRow" hidden><label for="setOrb">桌面小光球(只有一颗光球浮在所有程序最上面,点一下说话、右键收起)</label><input type="checkbox" class="switch" id="setOrb"></div>
-      <div class="set-row"><label for="setPanels">显示两边的面板</label><input type="checkbox" class="switch" id="setPanels"></div>
+      <div class="set-row"><label for="setPanelLeft">显示左边的面板(天气、电脑、系统、记忆)</label><input type="checkbox" class="switch" id="setPanelLeft"></div>
+      <div class="set-row"><label for="setPanelRight">显示右边的面板(今天、音乐、家里、提醒、待办)</label><input type="checkbox" class="switch" id="setPanelRight"></div>
+      <div class="set-row"><label for="setPanelPeek">收起时,鼠标移到屏幕边上的小把手,面板自动探出来</label><input type="checkbox" class="switch" id="setPanelPeek"></div>
+      <div class="set-note">快捷键:Ctrl+[ 左边、Ctrl+] 右边、Ctrl+\ 两边一起。窗口太窄时两边自动收起,点边上的小把手打开。</div>
     </div>
 
     <div class="set-group" data-cat="remind">

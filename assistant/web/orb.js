@@ -4,6 +4,11 @@
 //   galaxy  星系:旋臂粒子 + 发光核心
 //   wave    声波环:一圈会跟着声音跳的光条
 //   atom    原子:原子核 + 三条电子轨道
+//   dna     双螺旋:两条转动的光链和横档,光点顺着链往上流
+//   planet  星球:经纬线星球 + 星环 + 绕着转的小月亮
+//   cube    超立方体:里外两层方块,中间那层反着转,里面的方块会“呼吸”
+//   plasma  等离子:流动的能量球,里面有闪电,说话时闪得更多
+// 点光球、开始说话、说完时会有一圈冲击波(state.pulse())。
 // state.mode: idle | thinking | speaking | listening;state.level: 0~1 的音量。
 // 互动:滚轮放大缩小、拖着上下左右转(放手有惯性)、点光球开始说话;
 // state.zoomBy(倍数)、state.resetView()、state.style 给外面的按钮用。
@@ -19,7 +24,7 @@ const COLORS = {
   speaking: new THREE.Color("#2bc4e6"),
   listening: new THREE.Color("#d946ef"),
 };
-export const STYLES = ["classic", "reactor", "galaxy", "wave", "atom"];
+export const STYLES = ["classic", "reactor", "galaxy", "wave", "atom", "dna", "planet", "cube", "plasma"];
 const ZOOM_MIN = 0.55, ZOOM_MAX = 1.9, CAMERA_Z = 7.2;
 
 const coreVertex = /* glsl */ `
@@ -312,7 +317,274 @@ function buildAtom() {
   };
 }
 
-const BUILDERS = { classic: buildClassic, reactor: buildReactor, galaxy: buildGalaxy, wave: buildWave, atom: buildAtom };
+function buildDna() {
+  const group = new THREE.Group();
+  const N = 64, H = 4.6, R = 0.95, TURNS = 2.2;
+  const beads = new Float32Array(N * 2 * 3);
+  const rungs = new Float32Array(N * 2 * 3);
+  for (let i = 0; i < N; i++) {
+    const y = -H / 2 + (i / (N - 1)) * H;
+    const a = (i / N) * Math.PI * 2 * TURNS;
+    for (let s = 0; s < 2; s++) {
+      const x = Math.cos(a + s * Math.PI) * R, z = Math.sin(a + s * Math.PI) * R;
+      beads.set([x, y, z], (i * 2 + s) * 3);
+      rungs.set([x, y, z], (i * 2 + s) * 3);
+    }
+  }
+  const beadGeo = new THREE.BufferGeometry();
+  beadGeo.setAttribute("position", new THREE.BufferAttribute(beads, 3));
+  const beadMat = new THREE.PointsMaterial({ color: COLORS.idle.clone(), size: 0.09, transparent: true, opacity: 0.95,
+    blending: THREE.AdditiveBlending, depthWrite: false });
+  const rungGeo = new THREE.BufferGeometry();
+  rungGeo.setAttribute("position", new THREE.BufferAttribute(rungs, 3));
+  const rungMat = new THREE.LineBasicMaterial({ color: COLORS.idle.clone(), transparent: true, opacity: 0.35 });
+  const helix = new THREE.Group();
+  helix.add(new THREE.Points(beadGeo, beadMat), new THREE.LineSegments(rungGeo, rungMat));
+  const strandMat = new THREE.LineBasicMaterial({ color: COLORS.idle.clone(), transparent: true, opacity: 0.7 });
+  for (let s = 0; s < 2; s++) {
+    const pts = [];
+    for (let i = 0; i <= 240; i++) {
+      const y = -H / 2 + (i / 240) * H, a = (i / 240) * Math.PI * 2 * TURNS * (N / (N - 1)) + s * Math.PI;
+      pts.push(new THREE.Vector3(Math.cos(a) * R, y, Math.sin(a) * R));
+    }
+    helix.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), strandMat));
+  }
+  const SPARKS = 36;  // 顺着链往上流的光点
+  const sparkPos = new Float32Array(SPARKS * 3);
+  const sparkGeo = new THREE.BufferGeometry();
+  sparkGeo.setAttribute("position", new THREE.BufferAttribute(sparkPos, 3));
+  const sparkMat = new THREE.PointsMaterial({ color: 0xffffff, size: 0.12, transparent: true, opacity: 0.9,
+    blending: THREE.AdditiveBlending, depthWrite: false });
+  helix.add(new THREE.Points(sparkGeo, sparkMat));
+  const sparkPhase = Array.from({ length: SPARKS }, () => Math.random());
+  helix.rotation.z = 0.32;
+  group.add(helix);
+  return {
+    group,
+    update({ t, dt, level, color, speed }) {
+      helix.rotation.y += dt * (0.45 + level * 1.2) * speed;
+      const breathe = 1 + level * 0.35 + Math.sin(t * 1.6) * 0.03;
+      helix.scale.set(breathe, 1, breathe);
+      beadMat.color.copy(color); strandMat.color.copy(color); rungMat.color.copy(color);
+      rungMat.opacity = 0.25 + 0.2 * (0.5 + 0.5 * Math.sin(t * 3 * speed)) + level * 0.3;
+      beadMat.size = 0.08 + level * 0.05;
+      for (let k = 0; k < SPARKS; k++) {
+        sparkPhase[k] = (sparkPhase[k] + dt * (0.08 + level * 0.4) * speed) % 1;
+        const f = sparkPhase[k], a = f * Math.PI * 2 * TURNS + (k % 2) * Math.PI;
+        sparkPos.set([Math.cos(a) * R, -H / 2 + f * H, Math.sin(a) * R], k * 3);
+      }
+      sparkGeo.attributes.position.needsUpdate = true;
+    },
+  };
+}
+
+function circlePoints(radius, segments, plane = "xz", y = 0) {
+  const pts = [];
+  for (let i = 0; i <= segments; i++) {
+    const a = (i / segments) * Math.PI * 2;
+    pts.push(plane === "xz" ? new THREE.Vector3(Math.cos(a) * radius, y, Math.sin(a) * radius)
+      : new THREE.Vector3(Math.cos(a) * radius, Math.sin(a) * radius, 0));
+  }
+  return pts;
+}
+
+function buildPlanet() {
+  const group = new THREE.Group();
+  const planet = new THREE.Group();
+  const gridMat = new THREE.LineBasicMaterial({ color: COLORS.idle.clone(), transparent: true, opacity: 0.45 });
+  const R = 1.3;
+  for (const lat of [-60, -30, 0, 30, 60]) {
+    const y = Math.sin(lat * Math.PI / 180) * R, r = Math.cos(lat * Math.PI / 180) * R;
+    planet.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(circlePoints(r, 96, "xz", y)), gridMat));
+  }
+  for (let i = 0; i < 12; i++) {
+    const meridian = new THREE.Line(new THREE.BufferGeometry().setFromPoints(circlePoints(R, 96, "xy")), gridMat);
+    meridian.rotation.y = (i / 12) * Math.PI;
+    planet.add(meridian);
+  }
+  const body = new THREE.Mesh(new THREE.SphereGeometry(R * 0.97, 48, 48), glow(0.12));
+  planet.add(body);
+  const ringPlane = new THREE.Group();
+  ringPlane.rotation.set(1.22, 0, 0.32);
+  const band = new THREE.Mesh(new THREE.RingGeometry(1.85, 2.65, 160, 1), glow(0.22));
+  band.material.side = THREE.DoubleSide;
+  const COUNT = 2600;
+  const dust = new Float32Array(COUNT * 3);
+  for (let i = 0; i < COUNT; i++) {
+    const a = Math.random() * Math.PI * 2, r = 1.85 + Math.pow(Math.random(), 0.7) * 0.85;
+    dust.set([Math.cos(a) * r, Math.sin(a) * r, (Math.random() - 0.5) * 0.05], i * 3);
+  }
+  const dustGeo = new THREE.BufferGeometry();
+  dustGeo.setAttribute("position", new THREE.BufferAttribute(dust, 3));
+  const dustMat = new THREE.PointsMaterial({ color: COLORS.idle.clone(), size: 0.022, transparent: true, opacity: 0.9,
+    blending: THREE.AdditiveBlending, depthWrite: false });
+  const ringDust = new THREE.Points(dustGeo, dustMat);
+  ringPlane.add(band, ringDust);
+  const moonOrbit = new THREE.Group();
+  moonOrbit.rotation.set(0.45, 0, -0.2);
+  const orbitPath = new THREE.Line(new THREE.BufferGeometry().setFromPoints(circlePoints(3.25, 160, "xz")),
+    new THREE.LineBasicMaterial({ color: COLORS.idle.clone(), transparent: true, opacity: 0.18 }));
+  const moon = new THREE.Mesh(new THREE.SphereGeometry(0.16, 24, 24), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+  const moonGlow = new THREE.Mesh(new THREE.SphereGeometry(0.32, 20, 20), glow(0.35));
+  moonOrbit.add(orbitPath, moon, moonGlow);
+  group.add(planet, ringPlane, moonOrbit);
+  let moonPhase = 0;
+  return {
+    group,
+    update({ t, dt, level, color, speed }) {
+      planet.rotation.y += dt * 0.25 * speed;
+      planet.scale.setScalar(1 + level * 0.12 + Math.sin(t * 1.3) * 0.015);
+      gridMat.color.copy(color); body.material.color.copy(color); band.material.color.copy(color);
+      dustMat.color.copy(color); orbitPath.material.color.copy(color); moonGlow.material.color.copy(color);
+      gridMat.opacity = 0.35 + level * 0.3;
+      band.material.opacity = 0.16 + level * 0.25;
+      ringDust.rotation.z += dt * (0.08 + level * 0.5) * speed;
+      ringPlane.scale.setScalar(1 + level * 0.1);
+      moonPhase += dt * (0.5 + level) * speed;
+      const x = Math.cos(moonPhase) * 3.25, z = Math.sin(moonPhase) * 3.25;
+      moon.position.set(x, 0, z); moonGlow.position.set(x, 0, z);
+    },
+  };
+}
+
+const CUBE_CORNERS = [];
+for (const x of [-1, 1]) for (const y of [-1, 1]) for (const z of [-1, 1]) CUBE_CORNERS.push([x, y, z]);
+
+function buildCube() {
+  const group = new THREE.Group();
+  const mat = (opacity) => new THREE.LineBasicMaterial({ color: COLORS.idle.clone(), transparent: true, opacity });
+  const edges = new THREE.EdgesGeometry(new THREE.BoxGeometry(2, 2, 2));
+  const tesseract = new THREE.Group();
+  const outer = new THREE.LineSegments(edges, mat(0.85));
+  outer.scale.setScalar(1.35);
+  const inner = new THREE.LineSegments(edges, mat(0.95));
+  const links = new Float32Array(8 * 2 * 3);
+  const linkGeo = new THREE.BufferGeometry();
+  linkGeo.setAttribute("position", new THREE.BufferAttribute(links, 3));
+  const linkMat = mat(0.45);
+  tesseract.add(outer, inner, new THREE.LineSegments(linkGeo, linkMat));
+  const middle = new THREE.LineSegments(edges, mat(0.3));
+  middle.scale.setScalar(1.9);
+  const cornerPos = new Float32Array(8 * 3);
+  const cornerGeo = new THREE.BufferGeometry();
+  cornerGeo.setAttribute("position", new THREE.BufferAttribute(cornerPos, 3));
+  const cornerMat = new THREE.PointsMaterial({ color: 0xffffff, size: 0.13, transparent: true, opacity: 0.95,
+    blending: THREE.AdditiveBlending, depthWrite: false });
+  tesseract.add(new THREE.Points(cornerGeo, cornerMat));
+  const heart = new THREE.Mesh(new THREE.SphereGeometry(0.2, 24, 24), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+  const halo = new THREE.Mesh(new THREE.SphereGeometry(0.45, 24, 24), glow(0.3));
+  group.add(tesseract, middle, heart, halo);
+  const all = [outer.material, inner.material, linkMat, middle.material];
+  return {
+    group,
+    update({ t, dt, level, color, speed }) {
+      for (const m of all) m.color.copy(color);
+      halo.material.color.copy(color);
+      const s = 0.45 + 0.3 * (0.5 + 0.5 * Math.sin(t * 0.9 * speed)) + level * 0.25;  // 里面的方块一大一小,像在第四维里转
+      inner.scale.setScalar(s);
+      CUBE_CORNERS.forEach(([x, y, z], i) => {
+        links.set([x * s, y * s, z * s, x * 1.35, y * 1.35, z * 1.35], i * 6);
+        cornerPos.set([x * 1.35, y * 1.35, z * 1.35], i * 3);
+      });
+      linkGeo.attributes.position.needsUpdate = true;
+      cornerGeo.attributes.position.needsUpdate = true;
+      tesseract.rotation.y += dt * 0.35 * speed; tesseract.rotation.x += dt * 0.18 * speed;
+      middle.rotation.y -= dt * 0.22 * speed; middle.rotation.z += dt * 0.12 * speed;
+      middle.material.opacity = 0.2 + level * 0.3;
+      heart.scale.setScalar(1 + level * 0.8 + Math.sin(t * 2.2) * 0.05);
+      halo.scale.setScalar(1 + level * 0.9);
+    },
+  };
+}
+
+const plasmaFragment = /* glsl */ `
+  uniform vec3 uColor;
+  uniform float uLevel;
+  uniform float uTime;
+  varying vec3 vNormal;
+  varying vec3 vView;
+  varying vec3 vPos;
+  float flow(vec3 p, float t) {
+    float n = sin(p.x * 3.1 + t) * sin(p.y * 3.7 - t * 1.3) * sin(p.z * 2.9 + t * 0.7);
+    n += 0.5 * sin(p.x * 7.3 - t * 2.1 + p.z * 4.0) * sin(p.y * 6.1 + t * 1.7);
+    n += 0.25 * sin((p.x + p.y + p.z) * 11.0 + t * 3.0);
+    return n;
+  }
+  void main() {
+    float fres = pow(1.0 - max(dot(vNormal, vView), 0.0), 1.8);
+    float n = flow(vPos * 1.2, uTime * (0.8 + uLevel * 2.0));
+    float veins = smoothstep(0.55, 1.1, abs(n)) * (0.6 + uLevel * 0.8);
+    vec3 col = uColor * (0.25 + fres * 1.2 + veins * 1.4) + vec3(1.0) * veins * 0.45;
+    gl_FragColor = vec4(col, 0.35 + fres * 0.55 + veins * 0.3);
+  }
+`;
+
+function buildPlasma() {
+  const group = new THREE.Group();
+  const uniforms = { uTime: { value: 0 }, uLevel: { value: 0 }, uColor: { value: COLORS.idle.clone() } };
+  const sphere = new THREE.Mesh(new THREE.SphereGeometry(1.3, 128, 128), new THREE.ShaderMaterial({
+    uniforms,
+    vertexShader: `
+      uniform float uTime; uniform float uLevel;
+      varying vec3 vNormal; varying vec3 vView; varying vec3 vPos;
+      void main() {
+        vec3 p = position;
+        p += normal * sin(p.y * 4.0 + uTime * 2.0) * sin(p.x * 3.0 - uTime) * (0.03 + uLevel * 0.12);
+        vPos = p;
+        vec4 mv = modelViewMatrix * vec4(p, 1.0);
+        vNormal = normalize(normalMatrix * normal);
+        vView = normalize(-mv.xyz);
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: plasmaFragment, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  }));
+  const heart = new THREE.Mesh(new THREE.SphereGeometry(0.28, 32, 32), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85 }));
+  const aura = new THREE.Mesh(new THREE.SphereGeometry(1.75, 48, 48), glow(0.08));
+  group.add(sphere, heart, aura);
+  const ARCS = 9, SEG = 9;
+  const arcs = [];
+  for (let i = 0; i < ARCS; i++) {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(SEG * 3), 3));
+    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0 }));
+    group.add(line);
+    arcs.push({ line, next: 0 });
+  }
+  const dir = new THREE.Vector3();
+  function zap(arc, level) {  // 从中心到球面画一道歪歪扭扭的闪电
+    dir.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+    const pos = arc.line.geometry.attributes.position.array;
+    for (let k = 0; k < SEG; k++) {
+      const f = k / (SEG - 1), r = 0.25 + f * 1.05, jitter = k === 0 || k === SEG - 1 ? 0 : 0.16;
+      pos[k * 3] = dir.x * r + (Math.random() - 0.5) * jitter;
+      pos[k * 3 + 1] = dir.y * r + (Math.random() - 0.5) * jitter;
+      pos[k * 3 + 2] = dir.z * r + (Math.random() - 0.5) * jitter;
+    }
+    arc.line.geometry.attributes.position.needsUpdate = true;
+    arc.line.material.opacity = 0.5 + level * 0.5;
+  }
+  return {
+    group,
+    update({ t, dt, level, color, speed, spin }) {
+      uniforms.uTime.value = t; uniforms.uLevel.value = level; uniforms.uColor.value.copy(color);
+      sphere.rotation.y = spin * 0.2;
+      heart.scale.setScalar(1 + level * 0.6 + Math.sin(t * 3) * 0.05);
+      aura.material.color.copy(color);
+      aura.scale.setScalar(1 + level * 0.25 + Math.sin(t * 1.2) * 0.03);
+      const active = Math.round(2 + level * 7 + (speed > 2 ? 3 : 0));
+      arcs.forEach((arc, i) => {
+        arc.line.material.color.copy(color).lerp(new THREE.Color(0xffffff), 0.6);
+        if (i >= active) { arc.line.material.opacity *= 0.8; return; }
+        arc.next -= dt;
+        if (arc.next <= 0) { zap(arc, level); arc.next = 0.06 + Math.random() * (0.35 - level * 0.25); }
+        else arc.line.material.opacity *= 0.88;
+      });
+    },
+  };
+}
+
+const BUILDERS = { classic: buildClassic, reactor: buildReactor, galaxy: buildGalaxy, wave: buildWave, atom: buildAtom,
+  dna: buildDna, planet: buildPlanet, cube: buildCube, plasma: buildPlasma };
 
 // ======================== 画面 ========================
 
@@ -433,6 +705,31 @@ export function start(canvas, state) {
   }, { passive: false });
   canvas.addEventListener("dblclick", (e) => { if (!overOrb(e.clientX, e.clientY)) state.resetView(); });
 
+  // ---------- 冲击波:点光球、开始说话、说完时扩散一圈光 ----------
+  const waves = [];
+  for (let i = 0; i < 4; i++) {
+    const ring = new THREE.Mesh(new THREE.RingGeometry(0.96, 1, 128), glow(0));
+    ring.visible = false;
+    scene.add(ring);
+    waves.push({ ring, age: 1 });
+  }
+  state.pulse = (strength = 1) => {
+    const wave = waves.reduce((a, b) => (a.age > b.age ? a : b));
+    wave.age = 0; wave.strength = strength; wave.ring.visible = true;
+  };
+  function updateWaves(dt) {
+    for (const w of waves) {
+      if (w.age >= 1) { w.ring.visible = false; continue; }
+      w.age = Math.min(1, w.age + dt / 1.1);
+      const e = 1 - Math.pow(1 - w.age, 3);
+      w.ring.position.copy(group.position);
+      w.ring.quaternion.copy(camera.quaternion);
+      w.ring.scale.setScalar(1.6 + e * 2.8 * w.strength);
+      w.ring.material.color.copy(color);
+      w.ring.material.opacity = (1 - w.age) * 0.85;
+    }
+  }
+
   let appliedPalette = null;
   function frame() {
     const dt = Math.min(clock.getDelta(), 0.05);
@@ -470,6 +767,7 @@ export function start(canvas, state) {
     hover += ((canvas.style.cursor === "pointer" ? 1 : 0) - hover) * 0.1;
 
     look.update({ t, dt, level, color, spin, speed });
+    updateWaves(dt);
     group.position.y = Math.sin(t * 0.8) * 0.06;
     bloom.strength = 0.65 + level * 0.12 + hover * 0.12;
 

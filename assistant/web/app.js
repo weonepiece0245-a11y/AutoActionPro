@@ -26,7 +26,8 @@ $("brightness").addEventListener("input", (e) => {
 });
 
 // 光球的样子、大小(齿轮设定 → 外观 / 光球旁边的按钮,记在本机)
-const ORB_STYLES = [["classic", "经典"], ["reactor", "反应堆"], ["galaxy", "星系"], ["wave", "声波环"], ["atom", "原子"]];
+const ORB_STYLES = [["classic", "经典"], ["reactor", "反应堆"], ["galaxy", "星系"], ["wave", "声波环"], ["atom", "原子"],
+  ["dna", "双螺旋"], ["planet", "星球"], ["cube", "超立方体"], ["plasma", "等离子"]];
 function setOrbStyle(name, announce = false) {
   if (!ORB_STYLES.some(([k]) => k === name)) name = "classic";
   orbState.style = name;
@@ -46,10 +47,39 @@ try { orbState.zoom = Number(localStorage.getItem("friday-orb-zoom")) || 1; } ca
 orbState.onView = (zoom) => { try { localStorage.setItem("friday-orb-zoom", zoom.toFixed(2)); } catch {} };
 $("setOrbStyle").value = orbState.style;
 $("setOrbStyle").addEventListener("change", (e) => setOrbStyle(e.target.value));
-$("orbStyleBtn").onclick = () => {
-  const i = ORB_STYLES.findIndex(([k]) => k === orbState.style);
-  setOrbStyle(ORB_STYLES[(i + 1) % ORB_STYLES.length][0], true);
+// 🎨:打开样子列表,点一个就换(Esc 或点外面关掉)
+function buildOrbMenu() {
+  const menu = $("orbMenu");
+  menu.replaceChildren(...ORB_STYLES.map(([key, name]) => {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "orb-pick" + (key === orbState.style ? " on" : "");
+    b.textContent = name; b.setAttribute("aria-pressed", String(key === orbState.style));
+    b.onclick = (e) => { e.stopPropagation(); setOrbStyle(key, true); orbState.pulse && orbState.pulse(0.8); buildOrbMenu(); };
+    return b;
+  }));
+}
+$("orbStyleBtn").onclick = (e) => {
+  e.stopPropagation();
+  const menu = $("orbMenu");
+  menu.hidden = !menu.hidden;
+  if (!menu.hidden) buildOrbMenu();
 };
+document.addEventListener("click", (e) => { if (!$("orbMenu").hidden && !$("orbMenu").contains(e.target)) $("orbMenu").hidden = true; });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("orbMenu").hidden = true; });
+
+// 自动换样子:每 10 分钟 / 每小时 / 每天换一个(齿轮设定 → 外观)
+let orbAuto = loadPrefs("friday-orb-auto", "off");
+function orbAutoTick() {
+  const every = { "10m": 10 * 60e3, "1h": 3600e3, "1d": 86400e3 }[orbAuto];
+  if (!every) return;
+  const slot = Math.floor((Date.now() - new Date().getTimezoneOffset() * 60e3) / every);
+  const name = ORB_STYLES[slot % ORB_STYLES.length][0];
+  if (name !== orbState.style) setOrbStyle(name, true);
+}
+$("setOrbAuto").value = orbAuto;
+$("setOrbAuto").onchange = (e) => { orbAuto = e.target.value; savePrefs("friday-orb-auto", orbAuto); orbAutoTick(); };
+setInterval(orbAutoTick, 30e3);
+setTimeout(orbAutoTick, 1500);
 $("orbZoomIn").onclick = () => orbState.zoomBy && orbState.zoomBy(1.15);
 $("orbZoomOut").onclick = () => orbState.zoomBy && orbState.zoomBy(1 / 1.15);
 $("orbReset").onclick = () => orbState.resetView && orbState.resetView();
@@ -80,6 +110,8 @@ $("setTheme").addEventListener("change", (e) => {
 const MODE_TEXT = { idle: "待机 STANDBY", thinking: "思考中 PROCESSING", speaking: "说话中 SPEAKING", listening: "聆听中 LISTENING" };
 let busy = false;
 function setMode(mode) {
+  const before = orbState.mode;
+  if (orbState.pulse && before !== mode && (mode === "speaking" || (before === "speaking" && mode === "idle"))) orbState.pulse(mode === "speaking" ? 1 : 0.7);
   orbState.mode = mode;
   document.body.dataset.mode = mode;
   $("modeText").textContent = MODE_TEXT[mode] || mode;
@@ -657,16 +689,81 @@ function setCount(name, n) {
   const el = document.querySelector(`.panel[data-panel="${name}"] h2 .count`);
   if (el) el.textContent = n ? `(${n})` : "";
 }
-let panelsOn = loadPrefs("friday-panels", true);
+// 两边可以分开收起:收起时屏幕边上留一条小把手,鼠标移过去面板会“探出来”,移开自己缩回去;点把手就固定显示。
+// 快捷键 Ctrl+[ 左边、Ctrl+] 右边、Ctrl+\ 两边。窗口太窄时两边自动收起,用把手打开(像抽屉)。
+const oldPanels = loadPrefs("friday-panels", true);
+const sides = { left: loadPrefs("friday-panel-left", oldPanels), right: loadPrefs("friday-panel-right", oldPanels) };
+let panelPeekOn = loadPrefs("friday-panel-peek", true);
+let peeking = null;
+let peekTimer = null;
+const narrow = window.matchMedia("(max-width: 1000px)");
+const shown = (side) => sides[side] && !narrow.matches;
 function applyPanels() {
-  document.body.classList.toggle("focus", !panelsOn);
-  $("panelsBtn").setAttribute("aria-pressed", String(panelsOn));
-  $("panelsBtn").title = panelsOn ? "隐藏两边的面板" : "显示两边的面板";
-  $("setPanels").checked = panelsOn;
+  const body = document.body;
+  body.classList.toggle("hide-left", !shown("left"));
+  body.classList.toggle("hide-right", !shown("right"));
+  body.classList.toggle("focus", !shown("left") && !shown("right"));
+  for (const side of ["left", "right"]) {
+    const tab = $("edge" + (side === "left" ? "Left" : "Right"));
+    const on = shown(side);
+    tab.classList.toggle("open", on);
+    tab.setAttribute("aria-expanded", String(on || peeking === side));
+    tab.title = on ? `收起${side === "left" ? "左" : "右"}边的面板(Ctrl+${side === "left" ? "[" : "]"})`
+      : `显示${side === "left" ? "左" : "右"}边的面板(Ctrl+${side === "left" ? "[" : "]"})`;
+    body.classList.toggle("peek-" + side, peeking === side && !on);
+  }
+  const any = shown("left") || shown("right");
+  $("panelsBtn").setAttribute("aria-pressed", String(any));
+  $("panelsBtn").title = any ? "隐藏两边的面板(Ctrl+\\)" : "显示两边的面板(Ctrl+\\)";
+  $("setPanelLeft").checked = sides.left; $("setPanelRight").checked = sides.right; $("setPanelPeek").checked = panelPeekOn;
 }
-function setPanels(on) { panelsOn = on; savePrefs("friday-panels", panelsOn); applyPanels(); if (on) loadDash(); }
-$("panelsBtn").onclick = () => setPanels(!panelsOn);
-$("setPanels").onchange = (e) => setPanels(e.target.checked);
+function setSide(side, on) {
+  sides[side] = on;
+  savePrefs("friday-panel-" + side, on);
+  if (on && narrow.matches) { peek(side); return; }  // 窄窗口:当抽屉打开
+  peeking = null;
+  applyPanels();
+  if (on) loadDash();
+}
+function setPanels(on) { sides.left = sides.right = on; savePrefs("friday-panel-left", on); savePrefs("friday-panel-right", on); peeking = null; applyPanels(); if (on) loadDash(); }
+function peek(side) {
+  clearTimeout(peekTimer);
+  if (peeking === side) return;
+  peeking = side;
+  applyPanels();
+  loadDash();
+}
+function unpeek(delay = 350) {
+  clearTimeout(peekTimer);
+  peekTimer = setTimeout(() => { peeking = null; applyPanels(); }, delay);
+}
+for (const [side, id] of [["left", "edgeLeft"], ["right", "edgeRight"]]) {
+  const tab = $(id), hud = document.querySelector(".hud-" + side);
+  tab.onclick = () => {
+    if (narrow.matches) { peeking === side ? unpeek(0) : peek(side); return; }
+    setSide(side, !sides[side]);
+  };
+  tab.addEventListener("mouseenter", () => { if (panelPeekOn && !narrow.matches && !shown(side)) peek(side); });
+  tab.addEventListener("mouseleave", () => { if (peeking === side && !narrow.matches) unpeek(); });
+  hud.addEventListener("mouseenter", () => { if (peeking === side) clearTimeout(peekTimer); });
+  hud.addEventListener("mouseleave", () => { if (peeking === side && !narrow.matches) unpeek(); });
+}
+document.addEventListener("pointerdown", (e) => {  // 点面板外面:探出来的面板缩回去
+  if (peeking && !e.target.closest(".hud, .edge-tab")) unpeek(0);
+});
+document.addEventListener("keydown", (e) => {
+  if (!e.ctrlKey || e.altKey || e.metaKey) return;
+  if (e.key === "[") { e.preventDefault(); narrow.matches ? (peeking === "left" ? unpeek(0) : peek("left")) : setSide("left", !sides.left); }
+  else if (e.key === "]") { e.preventDefault(); narrow.matches ? (peeking === "right" ? unpeek(0) : peek("right")) : setSide("right", !sides.right); }
+  else if (e.key === "\\") { e.preventDefault(); setPanels(!(shown("left") || shown("right"))); }
+  else return;
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && peeking) unpeek(0); });
+narrow.addEventListener("change", () => { peeking = null; applyPanels(); });
+$("panelsBtn").onclick = () => setPanels(!(shown("left") || shown("right")));
+$("setPanelLeft").onchange = (e) => setSide("left", e.target.checked);
+$("setPanelRight").onchange = (e) => setSide("right", e.target.checked);
+$("setPanelPeek").onchange = (e) => { panelPeekOn = e.target.checked; savePrefs("friday-panel-peek", panelPeekOn); };
 applyPanels();
 
 // ---------- 模型:自动 / 只用 Opus / 只用 Sonnet ----------
@@ -1914,7 +2011,7 @@ function stopBargeWatch() {
 }
 
 // ---------- 点光球:开始说话(再点一下结束) ----------
-orbState.onOrbClick = () => (recorder ? recorder.stop() : listen());
+orbState.onOrbClick = () => { orbState.pulse && orbState.pulse(1.2); return recorder ? recorder.stop() : listen(); };
 $("cssOrb").addEventListener("click", () => orbState.onOrbClick());
 
 // ---------- 连续对话:用语音问的,她说完后自动再听几秒,你可以直接接着说 ----------
