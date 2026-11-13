@@ -1052,6 +1052,27 @@ UNATTENDED_REFUSAL = (
 SERVER_TOOL_LABELS = {"web_search": ("搜索", "query"), "web_fetch": ("读取网页", "url")}
 
 
+LIBRARY_TOOL = {
+    "name": "library",
+    "description": (
+        "老板自己的资料库:他选的文件夹里的 PDF、Word、Excel、PPT、文字文件的内容(合同、保单、租约、账单、说明书、课堂笔记、工作文件……)。"
+        "问到他自己文件里的事(例如“车险什么时候到期”“租约押金多少”“上次报价单写多少”)先用 search 找。"
+        "words 给 3~8 个关键词:要找的事的说法 + 同义词 + 英文 / 马来文写法(例如 车险、汽车保险、保单、insurance、takaful、policy、expiry、到期),"
+        "每个 2~20 个字。找到的段落不够清楚就用 read 读那一页。回答时说出是哪个文件、第几页。找不到就照实说,不要编。"
+        "status:资料库有多少文件、什么时候整理的。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["search", "read", "status"]},
+            "words": {"type": "array", "items": {"type": "string"}, "description": "search 用:关键词"},
+            "file": {"type": "string", "description": "read 用:文件名(search 结果里的)"},
+            "page": {"type": "integer", "description": "read 用:第几页 / 第几张 / 第几个工作表"},
+        },
+        "required": ["action"],
+    },
+}
+
 BACKGROUND_TOOL = {
     "name": "background_task",
     "description": (
@@ -1148,6 +1169,7 @@ class Toolbox:
         self.unattended = False  # 定时任务执行期间为 True:需要确认的操作一律不做
         self.archive: ConversationArchive | None = None  # 聊天记录档案,attach_archive() 设置
         self.background = None  # 后台长任务:(目标) -> 话
+        self.library = None  # 我的资料库(friday_library.Library)
         self.weather_fetch = None  # 测试时换成假的天气服务
         self._handlers = {
             "remember": self._remember,
@@ -1206,6 +1228,7 @@ class Toolbox:
             "notes": self._notes,
             "dates": self._dates,
             "background_task": self._background_task,
+            "library": self._library,
         }
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
 
@@ -1299,6 +1322,8 @@ class Toolbox:
             tools = tools + [CALENDAR_TOOL, GMAIL_TOOL] + GOOGLE_EXTRA_TOOLS
         if self.background is not None:
             tools = tools + [BACKGROUND_TOOL]
+        if self.library is not None:
+            tools = tools + [LIBRARY_TOOL]
         return tools
 
     def begin_turn(self) -> None:
@@ -2008,6 +2033,33 @@ class Toolbox:
             return str(e), True
         except Exception as e:
             return f"网站暂时打不开:{type(e).__name__}: {e}", True
+        return f"不支持的 action:{action}", True
+
+    def _library(self, args, on_status):
+        import friday_library
+
+        library = self.library
+        if library is None:
+            return "资料库没有开", True
+        action = args.get("action")
+        if action == "search":
+            words = [str(w) for w in args.get("words") or [] if str(w).strip()]
+            if not words:
+                return "要给关键词", True
+            on_status("在你的资料库里找:" + "、".join(words[:4]))
+            text = friday_library.describe_results(library.search(words))
+            if library.busy:
+                text += "\n(资料库还在整理中,有些文件可能还没收进来)"
+            return friday_security.mark_external(text), False
+        if action == "read":
+            try:
+                text = library.read(str(args.get("file") or ""), int(args.get("page") or 1))
+            except (ValueError, TypeError) as e:
+                return str(e), True
+            on_status(f"翻了 {args.get('file')} 第 {args.get('page') or 1} 页")
+            return friday_security.mark_external(text), False
+        if action == "status":
+            return library.describe(), False
         return f"不支持的 action:{action}", True
 
     def _background_task(self, args, on_status):

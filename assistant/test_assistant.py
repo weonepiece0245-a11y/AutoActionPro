@@ -11611,5 +11611,291 @@ class BackgroundJobsTest(TempDirTest):
         toolbox.unattended = True
         self.assertTrue(toolbox.run(SimpleNamespace(id="b", name="background_task", input={"goal": "x"}), lambda s: None)["is_error"])
 
+
+import friday_library  # noqa: E402
+
+
+def make_zip(path, files):
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, text in files.items():
+            archive.writestr(name, text)
+
+
+class LibraryTest(TempDirTest):
+    def folder(self):
+        root = Path(self.tmp, "docs")
+        (root / "保险").mkdir(parents=True)
+        (root / "保险" / "车险.txt").write_text("汽车保险 Takaful 保单号 AB123。\n保险到期日:2027年3月15日。\n保费 RM1,850。", encoding="utf-8")
+        make_zip(root / "租约.docx", {"word/document.xml":
+                 "<w:document><w:body><w:p><w:r><w:t>房东:陈先生</w:t></w:r></w:p>"
+                 "<w:p><w:r><w:t>押金 RM3,600(两个月租金)</w:t></w:r></w:p></w:body></w:document>"})
+        make_zip(root / "预算.xlsx", {
+            "xl/sharedStrings.xml": "<sst><si><t>项目</t></si><si><t>网费 Unifi</t></si></sst>",
+            "xl/worksheets/sheet1.xml": '<worksheet><sheetData><row><c t="s"><v>0</v></c><c><v>2026</v></c></row>'
+                                        '<row><c t="s"><v>1</v></c><c><v>129</v></c></row></sheetData></worksheet>'})
+        make_zip(root / "课程.pptx", {"ppt/slides/slide1.xml": "<p:sld><a:p><a:t>第一课</a:t></a:p></p:sld>",
+                                      "ppt/slides/slide2.xml": "<p:sld><a:p><a:t>期末考试在 12 月 5 日</a:t></a:p></p:sld>"})
+        (root / ".env").write_text("SECRET=1", encoding="utf-8")
+        (root / "密码.txt").write_text("网银密码 123456", encoding="utf-8")
+        (root / "~$临时.docx").write_text("x", encoding="utf-8")
+        return root
+
+    def make(self, root):
+        import friday_security
+        return friday_library.Library(os.path.join(self.tmp, "lib.db"), folders=lambda: [str(root)],
+                                      skip=friday_security.is_secret_path)
+
+    def test_reads_office_files(self):
+        root = self.folder()
+        self.assertIn("押金 RM3,600", friday_library.read_pages(root / "租约.docx")[0][1])
+        sheet = friday_library.read_pages(root / "预算.xlsx")[0][1]
+        self.assertIn("网费 Unifi | 129", sheet)
+        slides = friday_library.read_pages(root / "课程.pptx")
+        self.assertEqual(slides[1][0], 2)
+        self.assertIn("期末考试", slides[1][1])
+        self.assertEqual(len(friday_library.chunks("一" * 2000, 900)), 3)
+
+    def test_index_search_and_incremental(self):
+        root = self.folder()
+        lib = self.make(root)
+        stats = lib.refresh()
+        self.assertEqual(stats["added"], 4)  # .env、密码文件、~$ 临时文件都不收
+        found = lib.search(["车险", "汽车保险", "到期"])
+        self.assertEqual(found[0]["file"], "车险.txt")
+        self.assertEqual(found[0]["hits"], 2)  # “汽车保险”和“到期”(文件名不算)
+        self.assertIn("2027年3月15日", found[0]["text"])
+        self.assertEqual(lib.search(["押金"])[0]["file"], "租约.docx")
+        self.assertEqual(lib.search(["期末考试"])[0]["page"], 2)
+        self.assertEqual(lib.search(["unifi"])[0]["file"], "预算.xlsx")  # 不分大小写
+        self.assertEqual(lib.search(["网银"]), [])  # “密码.txt”这种文件不收
+        (root / "笔记.txt").write_text("WiFi 名字 Home5G\nWiFi 密码: Abc12345\n", encoding="utf-8")
+        lib.refresh()
+        hit = lib.search(["WiFi"])[0]["text"]
+        self.assertIn("Home5G", hit)
+        self.assertNotIn("Abc12345", hit)
+        self.assertNotIn("Abc12345", lib.read("笔记.txt", 1))
+        (root / "笔记.txt").unlink()
+        self.assertEqual(lib.search(["x"]), [])  # 太短
+        self.assertIn("期末考试", lib.read("课程.pptx", 2))
+        with self.assertRaises(ValueError):
+            lib.read("没有.pdf", 1)
+        self.assertEqual(lib.refresh(), {"added": 0, "updated": 0, "removed": 1, "failed": 0})  # 笔记删了;其他没改过:不重读
+        self.assertEqual(lib.refresh(), {"added": 0, "updated": 0, "removed": 0, "failed": 0})
+        path = root / "保险" / "车险.txt"
+        path.write_text("保险到期日:2028年1月1日", encoding="utf-8")
+        os.utime(path, (time.time() + 5, time.time() + 5))
+        self.assertEqual(lib.refresh()["updated"], 1)
+        self.assertIn("2028", lib.search(["到期日"])[0]["text"])
+        (root / "租约.docx").unlink()
+        self.assertEqual(lib.refresh()["removed"], 1)
+        self.assertEqual(lib.search(["押金"]), [])
+        self.assertIn("3 个文件", lib.describe())
+
+    def test_unreadable_and_folder_removed(self):
+        root = self.folder()
+        (root / "坏的.pdf").write_bytes(b"not a pdf")
+        lib = self.make(root)
+        lib.refresh()
+        self.assertEqual(lib.stats()["failed"], 1)
+        self.assertEqual(lib.unreadable()[0][0], "坏的.pdf")
+        lib.folders = lambda: []
+        self.assertEqual(lib.refresh()["removed"], 5)  # 文件夹从设定拿掉:里面的也拿掉
+        self.assertEqual(lib.stats()["files"], 0)
+
+    def test_tool_and_commands(self):
+        root = self.folder()
+        lib = self.make(root)
+        lib.refresh()
+        toolbox = self.make_toolbox()
+        toolbox.library = lib
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+        result = toolbox.run(SimpleNamespace(id="l", name="library", input={"action": "search", "words": ["押金", "deposit"]}),
+                             lambda s: None)
+        self.assertIn("租约.docx", result["content"])
+        self.assertIn("外部内容", result["content"])  # 文件内容当资料,不是指示
+        result = toolbox.run(SimpleNamespace(id="l", name="library", input={"action": "search", "words": ["火星"]}), lambda s: None)
+        self.assertIn("没找到", result["content"])
+        refreshed = []
+        commands = friday_library.Commands(lib, lambda: refreshed.append(1))
+        self.assertIn("开始整理", commands.handle("更新资料库"))
+        self.assertEqual(refreshed, [1])
+        self.assertIn("4 个文件", commands.handle("资料库状态"))
+        self.assertIsNone(commands.handle("资料库是什么"))
+
+    def test_settings(self):
+        root = self.folder()
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.library = self.make(root)
+        refreshed = []
+        session.library_refresh = lambda: refreshed.append(1)
+        session.library_attach = lambda: None
+        env = os.path.join(self.tmp, ".env2")
+        Path(env).write_text("", encoding="utf-8")
+        with mock.patch.dict(os.environ, {}):
+            self.assertIn("error", app.apply_settings({"library_folders": [os.path.join(self.tmp, "没有")]}, session, None, env))
+            self.assertIn("error", app.apply_settings({"library_folders": ["相对路径"]}, session, None, env))
+            out = app.apply_settings({"library_folders": [str(root)]}, session, None, env)
+            self.assertIn("1 个", out["message"])
+            self.assertEqual(os.environ["FRIDAY_LIBRARY_FOLDERS"], str(root))
+            self.assertEqual(refreshed, [1])
+            app.apply_settings({"library_on": False}, session, None, env)
+            self.assertFalse(friday_library.library_enabled())
+            state = app.library_state(session)
+            self.assertFalse(state["on"])
+
+
+import friday_meeting  # noqa: E402
+
+
+class MeetingTest(TempDirTest):
+    def make(self, summarize=None, transcribe=None):
+        loud = array.array("h", [3000, -3000] * 4000).tobytes()  # 0.5 秒很大声
+
+        class FakeMic:
+            stopped = False
+
+            def start(self):
+                pass
+
+            def take(self):
+                return loud
+
+            def stop(self):
+                FakeMic.stopped = True
+        now = [1000.0]
+
+        def sleep(seconds):
+            now[0] += seconds
+            time.sleep(0.002)
+        heard = []
+
+        def default_transcribe(wav):
+            heard.append(len(wav))
+            return f"第 {len(heard)} 段说的话"
+        done = threading.Event()
+        records = []
+
+        def on_done(record):
+            records.append(record)
+            done.set()
+        recorder = friday_meeting.MeetingRecorder(
+            os.path.join(self.tmp, "meetings"), transcribe or default_transcribe, summarize, mic_factory=FakeMic,
+            on_done=on_done, clock=lambda: now[0], sleep=sleep,
+            now=lambda: datetime.datetime(2026, 11, 13, 14, 30))
+        return recorder, now, done, records, FakeMic
+
+    def summary(self):
+        return {"title": "周会", "summary": "讨论了新产品上线", "points": ["12 月 1 日上线", "预算 RM5,000"],
+                "decisions": ["先做网页版"], "todos": [{"text": "写上线公告", "who": "小明", "due": "11 月 20 日"},
+                                                    {"text": "订会议室", "who": "", "due": ""}], "questions": []}
+
+    def test_records_transcribes_and_summarizes(self):
+        calls = []
+        recorder, now, done, records, mic = self.make(lambda transcript, title: calls.append((transcript, title)) or self.summary())
+        with mock.patch.object(friday_meeting, "MIN_PIECE", 1), mock.patch.object(friday_meeting, "MAX_PIECE", 2):
+            self.assertIn("开始记录“周会”", recorder.handle("开始会议记录 周会"))
+            self.assertTrue(recorder.active)
+            self.assertIn("已经在记录了", recorder.handle("开始记录"))
+            for _ in range(200):
+                if len(recorder.lines) >= 3:
+                    break
+                time.sleep(0.01)
+            self.assertIn("正在记录", recorder.handle("记录了多久"))
+            self.assertIn("停止记录", recorder.handle("停止记录"))
+            self.assertTrue(done.wait(5))
+        self.assertTrue(mic.stopped)
+        transcript, title = calls[0]
+        self.assertTrue(transcript.startswith("[00:00:00] 第 1 段说的话\n[00:00:02] 第 2 段"))
+        self.assertEqual(title, "周会")
+        record = records[0]
+        self.assertEqual(record["title"], "周会")
+        self.assertEqual(len(record["todos"]), 2)
+        folder = Path(self.tmp, "meetings")
+        text = (folder / "2026-11-13 1430 周会.txt").read_text(encoding="utf-8")
+        self.assertIn("第 1 段说的话", text)
+        summary = (folder / "2026-11-13 1430 周会 总结.txt").read_text(encoding="utf-8")
+        self.assertIn("【待办】\n- 写上线公告(小明) —— 11 月 20 日", summary)
+        self.assertIn("【决定】", summary)
+        self.assertFalse(recorder.finishing)
+        self.assertEqual(recorder.recent()[0]["summary"], "2026-11-13 1430 周会 总结.txt")
+        todos = friday_daily.Todos(os.path.join(self.tmp, "t.json"))
+        self.assertIn("加进待办清单了(2 件)", recorder.handle("把会议待办加进清单", todos))
+        self.assertEqual(todos.pending()[0]["text"], "写上线公告(小明)")
+        self.assertIn("已经加进清单", recorder.handle("把会议的待办加进待办清单", todos))
+        self.assertIn("讨论了新产品上线", recorder.handle("上次会议说了什么"))
+        again = friday_meeting.MeetingRecorder(folder, lambda wav: None)  # 重开星期五:上次的还记得
+        self.assertTrue(again.last["todos_added"])
+
+    def test_summary_failure_keeps_transcript(self):
+        def broken(transcript, title):
+            raise RuntimeError("网络断了")
+        recorder, now, done, records, _ = self.make(broken)
+        with mock.patch.object(friday_meeting, "MIN_PIECE", 1), mock.patch.object(friday_meeting, "MAX_PIECE", 2):
+            recorder.start()
+            for _ in range(200):
+                if recorder.lines:
+                    break
+                time.sleep(0.01)
+            recorder.stop()
+            self.assertTrue(done.wait(5))
+        self.assertIn("文字记录存好了,但总结没写成:网络断了", records[0]["summary"])
+
+    def test_nothing_heard(self):
+        recorder, now, done, records, _ = self.make(lambda t, title: self.summary(), transcribe=lambda wav: None)
+        recorder.start()
+        recorder.stop()
+        self.assertTrue(done.wait(5))
+        self.assertIn("没有听到说话的内容", records[0]["summary"])
+
+    def test_phrases(self):
+        recorder, *_ = self.make()
+        for text in ("开始记录", "帮我记录这个会", "开始上课记录", "记录一下这堂课的内容"):
+            self.assertTrue(friday_meeting.START.match(text), text)
+        for text in ("帮我记录一下支出", "开始专注", "记录一下我喝了水"):
+            self.assertFalse(friday_meeting.START.match(text), text)
+        self.assertIsNone(recorder.handle("下课了"))  # 没在记录:当作聊天
+        self.assertEqual(recorder.handle("停止记录"), None)
+        self.assertEqual(recorder.handle("记录了多久"), "现在没有在记录。")
+
+    def test_wav_pieces_cut_on_pause(self):
+        quiet = bytes(16000)
+        loud = array.array("h", [3000, -3000] * 4000).tobytes()
+        script = [loud] * 4 + [quiet] + [loud] * 2
+
+        class Mic:
+            def start(self):
+                pass
+
+            def take(self):
+                return script.pop(0) if script else quiet
+
+            def stop(self):
+                pass
+        recorder = friday_meeting.MeetingRecorder(os.path.join(self.tmp, "m2"), lambda wav: "x", mic_factory=Mic,
+                                                  sleep=lambda s: time.sleep(0.001))
+        with mock.patch.object(friday_meeting, "MIN_PIECE", 2), mock.patch.object(friday_meeting, "MAX_PIECE", 30):
+            recorder.mic = Mic()
+            recorder.active = True
+            recorder.started = recorder.clock()
+            threading.Thread(target=recorder._listen, daemon=True).start()
+            first = recorder.pieces.get(timeout=3)
+            recorder.active = False
+        self.assertEqual(first[0], 0.0)
+        self.assertEqual(len(first[1]), 5 * 16000)  # 2 秒大声后遇到停顿就切
+
+    def test_settings_and_state(self):
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        recorder, now, done, records, _ = self.make(lambda t, title: self.summary())
+        session.meeting = recorder
+        env = os.path.join(self.tmp, ".env3")
+        Path(env).write_text("", encoding="utf-8")
+        out = app.apply_settings({"meeting_start": "上课"}, session, None, env)
+        self.assertIn("开始记录“上课”", out["message"])
+        self.assertTrue(app.meeting_state(session)["active"])
+        app.apply_settings({"meeting_stop": True}, session, None, env)
+        self.assertTrue(done.wait(5))
+        self.assertIn("error", app.apply_settings({"meeting_open": "../x.txt"}, session, None, env))
+        self.assertIn("error", app.apply_settings({"meeting_todos": True}, session, None, env))
+
 if __name__ == "__main__":
     unittest.main()

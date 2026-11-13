@@ -50,7 +50,7 @@
       <div class="brand-sub">星期五 · 私人 AI 助手</div>
     </div>
   </div>
-  <div class="status-pill" id="modePill"><span class="dot"></span><span id="modeText">待机 STANDBY</span><span class="model-chip" id="modelChip" hidden></span><span class="model-chip focus-chip" id="focusChip" hidden></span><span class="model-chip" id="sleepChip" hidden></span></div>
+  <div class="status-pill" id="modePill"><span class="dot"></span><span id="modeText">待机 STANDBY</span><span class="model-chip" id="modelChip" hidden></span><span class="model-chip focus-chip" id="focusChip" hidden></span><span class="model-chip" id="sleepChip" hidden></span><button type="button" class="model-chip rec-chip" id="meetingChip" hidden title="点一下停止记录"></button></div>
   <div class="top-right">
     <button type="button" class="icon-btn small" id="lockBtn" title="马上上锁" aria-label="马上上锁" hidden>
       <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
@@ -289,6 +289,26 @@
       <div class="set-note" id="sceneHelp"></div>
       <div id="sceneList"></div>
       <div class="set-row"><span></span><button type="button" class="mini-btn" id="sceneAdd">+ 新场景</button></div>
+    </div>
+
+    <div class="set-group" id="meetGroup" hidden data-cat="life">
+      <h3>会议 / 上课记录</h3>
+      <div class="set-row"><span class="set-note" id="meetNow">说“开始记录”或按这里;我一直听、边听边转成文字,说“停止记录”后整理出重点、决定和待办。</span>
+        <span class="set-ctl"><input class="mini-input" id="meetTitle" maxlength="20" placeholder="标题(可以不填)"><button type="button" class="mini-btn" id="meetStart">开始记录</button><button type="button" class="mini-btn" id="meetStop" hidden>停止记录</button></span></div>
+      <div class="set-note" id="meetLast" hidden></div>
+      <div class="set-row" id="meetTodosRow" hidden><span></span><button type="button" class="mini-btn" id="meetTodos">把上次的待办加进清单</button></div>
+      <div id="meetList"></div>
+      <div class="set-note">文字记录和总结存在 friday_meetings 文件夹,也会收进“我的资料库”,以后可以问“上周开会决定了什么”。记录中不会被唤醒词打断。</div>
+    </div>
+
+    <div class="set-group" id="libGroup" hidden data-cat="life">
+      <h3>我的资料库(问你自己文件里的事)</h3>
+      <div class="set-row"><label for="setLibOn">问合同、保单、账单、笔记这类事时,先在我的文件里找</label><input type="checkbox" class="switch" id="setLibOn"></div>
+      <label class="set-note" for="libFolders">要收进资料库的文件夹(一行一个):</label>
+      <textarea class="mini-input fb-sources" id="libFolders" rows="3" spellcheck="false" placeholder="例如 C:\Users\你的名字\Documents"></textarea>
+      <div class="set-row"><span class="set-note" id="libStatus"></span><span class="set-ctl"><button type="button" class="mini-btn" id="libSave">保存文件夹</button><button type="button" class="mini-btn" id="libRefresh">现在整理</button></span></div>
+      <div class="set-note" id="libBad" hidden></div>
+      <div class="set-note">收 PDF、Word(.docx)、Excel(.xlsx)、PPT(.pptx)、文字文件。索引只存在你的电脑上,问的时候才把找到的那几小段给 Claude 看。钥匙、密码这类文件不收;扫描的图片 PDF 读不到字。</div>
     </div>
 
     <div class="set-group" id="bgGroup" hidden data-cat="life">

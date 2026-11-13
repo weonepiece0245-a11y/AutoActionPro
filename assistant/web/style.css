@@ -556,6 +556,8 @@ button:focus-visible, .switch:focus-visible, select:focus-visible, input:focus-v
 body.hide-right .orb-tools { right: 26px; }
 @media (max-width: 1000px) { .orb-tools { right: 14px; top: 34%; } }
 body.locked .orb-tools { display: none; }
+.rec-chip { font: inherit; cursor: pointer; color: #fecaca; border-color: rgba(239,68,68,.6); background: rgba(239,68,68,.12); animation: blink 2s ease-in-out infinite; }
+.rec-chip:disabled { cursor: default; animation: none; color: var(--text); border-color: var(--cyan-line); background: transparent; }
 .orb-menu { position: absolute; right: 42px; top: -6px; display: grid; grid-template-columns: repeat(3, auto); gap: 6px; padding: 10px; border: 1px solid var(--cyan-line); border-radius: 12px; background: rgba(3,14,28,.92); backdrop-filter: blur(10px); box-shadow: 0 0 24px rgba(var(--c-rgb), .18); animation: popIn .15s ease-out; }
 .orb-pick { font: inherit; font-size: 12px; color: var(--text); background: rgba(var(--c-rgb), .05); border: 1px solid var(--cyan-line); border-radius: 999px; padding: 5px 12px; cursor: pointer; white-space: nowrap; transition: background .15s, border-color .15s; }
 .orb-pick:hover { border-color: var(--accent); }

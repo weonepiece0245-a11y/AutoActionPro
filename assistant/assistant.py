@@ -1860,6 +1860,16 @@ def scenes_state(session) -> dict | None:
     return {"list": scenes.scenes, "help": friday_scenes.STEP_HELP}
 
 
+def library_state(session) -> dict | None:
+    import friday_library
+
+    library = getattr(session, "library", None)
+    if library is None:
+        return None
+    return {**library.stats(), "on": friday_library.library_enabled(),
+            "unreadable": [f"{name}({why})" for name, why in library.unreadable(8)]}
+
+
 def vocab_state(session) -> dict | None:
     import friday_lessons
     import friday_voicefix
@@ -2312,6 +2322,8 @@ def settings_state(session, meter=None) -> dict:
         "memtidy": memtidy_state(session),
         "vocab": vocab_state(session),
         "background": session.background.state() if getattr(session, "background", None) is not None else None,
+        "library": library_state(session),
+        "meeting": meeting_state(session),
         "scenes": scenes_state(session),
         "cleanup": getattr(session, "cleanup_items", None) if os.name == "nt" or getattr(session, "cleanup_items", None) else None,
         "weekly_report": __import__("friday_alerts").weekly_enabled(),
@@ -2663,6 +2675,59 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
             save_env_value(env, key, "on" if on else "off")
             os.environ[key] = "on" if on else "off"
             done.append(on_text if on else off_text)
+    recorder = getattr(session, "meeting", None)
+    if any(k in payload for k in ("meeting_start", "meeting_stop", "meeting_todos", "meeting_open")):
+        if recorder is None:
+            return {"error": "会议记录现在用不了"}
+        if "meeting_start" in payload:
+            done.append(recorder.start(str(payload["meeting_start"] or "")[:20]))
+        if payload.get("meeting_stop"):
+            done.append(recorder.stop())
+        if payload.get("meeting_todos"):
+            if toolbox is None or getattr(toolbox, "todos", None) is None:
+                return {"error": "待办清单用不了"}
+            done.append(recorder.add_todos(toolbox.todos))
+        if payload.get("meeting_open"):
+            name = str(payload["meeting_open"])
+            path = recorder.folder / name
+            if "/" in name or "\\" in name or not name.endswith(".txt") or not path.is_file():
+                return {"error": "找不到这个记录"}
+            if os.name != "nt":
+                return {"error": "只能在 Windows 上打开"}
+            os.startfile(str(path))  # noqa: S606
+            done.append(f"打开了 {name}")
+        session.hub.broadcast({"type": "meeting", **meeting_state(session)})
+    library = getattr(session, "library", None)
+    if any(k in payload for k in ("library_on", "library_folders", "library_refresh")):
+        import friday_cleanup
+
+        if library is None:
+            return {"error": "资料库现在用不了"}
+        if "library_folders" in payload:
+            folders = [str(f).strip().strip('"') for f in payload["library_folders"] if str(f).strip()][:10] \
+                if isinstance(payload["library_folders"], list) else []
+            for folder in folders:
+                path = Path(folder)
+                if not path.is_absolute() or not path.is_dir():
+                    return {"error": f"找不到这个文件夹:{folder}"}
+                if friday_cleanup._skip(path) or len(path.parts) <= 1:
+                    return {"error": f"这个文件夹不能放进资料库:{folder}"}
+            value = "|".join(folders)
+            save_env_value(env, "FRIDAY_LIBRARY_FOLDERS", value)
+            os.environ["FRIDAY_LIBRARY_FOLDERS"] = value
+            done.append(f"资料库的文件夹存好了({len(folders)} 个),马上开始整理")
+            session.library_refresh()
+        if "library_on" in payload:
+            on = bool(payload["library_on"])
+            save_env_value(env, "FRIDAY_LIBRARY", "on" if on else "off")
+            os.environ["FRIDAY_LIBRARY"] = "on" if on else "off"
+            session.library_attach()
+            done.append("资料库打开了" if on else "资料库关掉了(索引留着,再打开不用重新整理)")
+            if on:
+                session.library_refresh()
+        if payload.get("library_refresh") and "library_folders" not in payload:
+            session.library_refresh()
+            done.append("开始整理资料库(只看新的和改过的文件)")
     jobs = getattr(session, "background", None)
     if payload.get("bg_cancel") or payload.get("bg_open"):
         if jobs is None:
@@ -3392,6 +3457,116 @@ def start_auto_lock(session, interval: float = 15) -> None:
             time.sleep(interval)
 
     threading.Thread(target=lambda: _quietly(loop), daemon=True, name="friday-auto-lock").start()
+
+
+class MeetingCommands:
+    """“开始记录”“停止记录”“把会议待办加进清单”……;做完通知窗口更新上面的计时。"""
+
+    def __init__(self, session, recorder, toolbox) -> None:
+        self.session, self.recorder, self.toolbox = session, recorder, toolbox
+
+    def handle(self, text: str) -> str | None:
+        reply = self.recorder.handle(text, getattr(self.toolbox, "todos", None))
+        if reply is not None:
+            self.session.hub.broadcast({"type": "meeting", **meeting_state(self.session)})
+        return reply
+
+
+def meeting_state(session) -> dict | None:
+    recorder = getattr(session, "meeting", None)
+    if recorder is None:
+        return None
+    return {**recorder.status(), "recent": recorder.recent()}
+
+
+def start_meeting(session, toolbox: Toolbox, data_dir: str, voice_module):
+    """会议 / 上课记录:一直听、边听边转文字,停止后写重点和待办。"""
+    import friday_meeting
+    import friday_router
+
+    folder = Path(data_dir) / "friday_meetings"
+    session.meeting_folder = folder
+    assistant = getattr(session, "assistant", None)
+    summarize = (friday_meeting.summarizer(assistant.client, friday_router.SONNET, getattr(assistant, "on_usage", None))
+                 if assistant is not None else None)
+
+    def done(record: dict) -> None:
+        todos = record.get("todos") or []
+        text = (f"📝 记录整理好了:{record.get('title') or '会议 / 上课记录'}({record.get('minutes')} 分钟)\n\n"
+                f"{record.get('summary', '')}")
+        if todos:
+            text += f"\n\n说“把会议待办加进清单”就把这 {len(todos)} 件加进待办。"
+        session.hub.broadcast({"type": "reminder", "text": text})
+        session.hub.broadcast({"type": "meeting", **meeting_state(session)})
+        push_to_phone(session, text[:1800])
+        if session.assistant is not None:
+            _quietly(lambda: session.assistant.remember_local("(会议 / 上课记录的总结)", record.get("summary", "")))
+        refresh = getattr(session, "library_refresh", None)
+        if refresh is not None:
+            refresh()
+
+    recorder = friday_meeting.MeetingRecorder(
+        folder, lambda wav: voice_module.transcribe_detail(wav)[0], summarize, on_done=done,
+        on_status=lambda text: session.hub.broadcast({"type": "status", "text": "📝 " + text}))
+    session.meeting = recorder
+    quick = getattr(session, "quick", None)
+    if quick is not None:
+        quick.extra.append(MeetingCommands(session, recorder, toolbox))
+    return recorder
+
+
+def start_library(session, toolbox: Toolbox, data_dir: str, first_wait: float = 90, interval: float = 600):
+    """我的资料库:把你选的文件夹里的文件内容整理成索引(只在你电脑上),问的时候在里面找。"""
+    import friday_cleanup
+    import friday_library
+
+    meetings = getattr(session, "meeting_folder", None)
+
+    def folders() -> list[str]:
+        chosen = friday_library.folders_setting()
+        return chosen + [str(meetings)] if meetings is not None and Path(meetings).is_dir() else chosen
+
+    def skip(path: Path) -> bool:  # 会议记录在星期五自己的文件夹里,也要收
+        if meetings is not None:
+            try:
+                path.relative_to(meetings)
+                return False
+            except ValueError:
+                pass
+        return friday_cleanup._skip(path)
+
+    library = friday_library.Library(os.path.join(data_dir, "friday_library.db"), folders=folders, skip=skip)
+    session.library = library
+    wake = threading.Event()
+
+    def attach() -> None:
+        toolbox.library = library if friday_library.library_enabled() else None
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+
+    def loop() -> None:
+        wake.wait(first_wait)
+        while True:
+            wake.clear()
+            if friday_library.library_enabled() and (library.due() or session.library_now):
+                session.library_now = False
+                stats = library.refresh()
+                if stats.get("added") or stats.get("updated"):
+                    print(f"资料库整理好了:新增 {stats['added']}、更新 {stats['updated']}、删掉 {stats['removed']}", flush=True)
+            wake.wait(interval)
+
+    def refresh_soon() -> None:
+        session.library_now = True
+        wake.set()
+
+    session.library_now = False
+    session.library_refresh = refresh_soon
+    session.library_attach = attach
+    attach()
+    quick = getattr(session, "quick", None)
+    if quick is not None:
+        quick.extra.append(friday_library.Commands(library, refresh_soon))
+    threading.Thread(target=lambda: _quietly(loop), daemon=True, name="friday-library").start()
+    return library
 
 
 def start_background(session, toolbox: Toolbox, data_dir: str):
@@ -4878,7 +5053,8 @@ def run_web(args) -> None:
     session.wake = friday_wake.WakeWord(
         summon_now,
         on_status=lambda text, failed: hub.broadcast({"type": "error" if failed else "status", "text": text}),
-        paused=lambda: ctx.activity.get("listening") or ctx.activity.get("speaking"),
+        paused=lambda: (ctx.activity.get("listening") or ctx.activity.get("speaking")
+                        or getattr(getattr(session, "meeting", None), "active", False)),  # 会议记录中:不被唤醒
     )
     if os.environ.get("FRIDAY_WAKE", "off") == "on":
         session.wake.start()
@@ -4900,6 +5076,8 @@ def run_web(args) -> None:
     session.quick.env_file = session.env_file
     _startup_step(session, "被纠正就记住", lambda: start_lessons(session, toolbox, data_dir))
     _startup_step(session, "后台长任务", lambda: start_background(session, toolbox, data_dir))
+    _startup_step(session, "会议记录", lambda: start_meeting(session, toolbox, data_dir, voice_module))
+    _startup_step(session, "我的资料库", lambda: start_library(session, toolbox, data_dir))
     toolbox.meter, toolbox.budget = session.meter, getattr(session, "budget", None)
     import friday_scenes
 

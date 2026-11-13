@@ -76,6 +76,7 @@ assistant/friday_photo_sort.json
 assistant/friday_vocab.json*
 assistant/friday_background.json*
 assistant/friday_reports/
+assistant/friday_library.db*
 
 # 更新前留的旧文件(自动退回上一版用)
 assistant/_update_backup/

@@ -86,6 +86,7 @@ class QuickCommands:
         self.lessons = None  # 被纠正就记住(friday_lessons.Lessons)
         self.vocab = None  # 听错改正词库(friday_voicefix.Vocab)
         self.background = None  # 后台长任务(friday_background.BackgroundJobs)
+        self.extra: list = []  # 其他功能自己认的说法:有 handle(句子) -> 话 或 None 的东西
         self.env_file = None  # 改设定时存到哪个 .env
         self.sleep_timer = None  # friday_sleeptimer.SleepTimer
         self.diary = None  # friday_diary.Diary
@@ -189,7 +190,7 @@ class QuickCommands:
                 reply = str(e)
             if reply:
                 return reply
-        for helper in (self.lessons, self.vocab, self.background):
+        for helper in (self.lessons, self.vocab, self.background, *self.extra):
             if helper is not None and len(text) <= (400 if helper is self.background else 80):
                 try:
                     reply = helper.handle(text)

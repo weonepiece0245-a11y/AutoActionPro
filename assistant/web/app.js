@@ -406,6 +406,8 @@ function handle(ev) {
       readerEvent(ev); break;
     case "sleeptimer":
       showSleepTimer(ev); break;
+    case "meeting":
+      showMeeting(ev); break;
     case "orb_click":  // 点了桌面小光球:开始听(在听就停)
       ensureAudio();
       if (orbState.onOrbClick) orbState.onOrbClick();
@@ -512,6 +514,7 @@ async function loadState() {
   if (s.settings) settingsState = s.settings;
   if (s.settings && "focus" in s.settings) showFocus(s.settings.focus);
   if (s.settings && "sleep_timer" in s.settings) showSleepTimer(s.settings.sleep_timer);
+  if (s.settings && s.settings.meeting) showMeeting(s.settings.meeting);
   if (s.model) showModel(s.model.model, s.model.mode);
   if (s.startup_error) { $("banner").hidden = false; $("banner").textContent = s.startup_error; }
   fillList("memoryList", s.memories, "还没有记忆,多跟我聊聊你自己", (m) => li(m.text, `${m.category || "其他"} · ${m.added}`));
@@ -656,6 +659,58 @@ function addChips(el) {
   }
   el.after(row);
 }
+// ---------- 会议 / 上课记录:上面的红点计时、设定里的列表 ----------
+let meetingTimer = null;
+function showMeeting(m) {
+  if (!m) return;
+  const chip = $("meetingChip");
+  clearInterval(meetingTimer);
+  const pad = (n) => String(n).padStart(2, "0");
+  if (m.active) {
+    const started = Date.now() - (m.seconds || 0) * 1000;
+    const tick = () => {
+      const sec = Math.floor((Date.now() - started) / 1000);
+      chip.textContent = `⏺ 记录中 ${pad(Math.floor(sec / 3600))}:${pad(Math.floor(sec / 60) % 60)}:${pad(sec % 60)}`;
+    };
+    tick();
+    meetingTimer = setInterval(tick, 1000);
+  } else if (m.finishing) {
+    chip.textContent = "📝 整理总结中……";
+  }
+  chip.hidden = !m.active && !m.finishing;
+  chip.disabled = !m.active;
+  $("meetGroup").hidden = false;
+  $("meetStart").hidden = !!(m.active || m.finishing);
+  $("meetTitle").hidden = !!(m.active || m.finishing);
+  $("meetStop").hidden = !m.active;
+  $("meetNow").textContent = m.active ? `正在记录${m.title ? "“" + m.title + "”" : ""},已经转好 ${m.lines} 段文字。`
+    : m.finishing ? "正在把最后一段转成文字、写总结……"
+    : "说“开始记录”或按这里;我一直听、边听边转成文字,说“停止记录”后整理出重点、决定和待办。";
+  const last = m.last;
+  $("meetLast").hidden = !last;
+  if (last) $("meetLast").textContent = `上次(${last.when},${last.minutes} 分钟)${last.title ? "“" + last.title + "”" : ""}:${(last.summary || "").split("\n")[0]}`;
+  $("meetTodosRow").hidden = !(last && last.todos && last.todos.length && !last.todos_added);
+  const list = $("meetList");
+  list.replaceChildren();
+  for (const r of m.recent || []) {
+    const row = document.createElement("div");
+    row.className = "set-row sub";
+    const name = document.createElement("span");
+    name.textContent = r.name;
+    const ctl = document.createElement("span");
+    ctl.className = "set-ctl";
+    for (const [label, file] of [["文字记录", r.file], ["总结", r.summary]]) {
+      if (!file) continue;
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "mini-btn"; b.textContent = label;
+      b.onclick = () => saveSetting({ meeting_open: file });
+      ctl.append(b);
+    }
+    row.append(name, ctl);
+    list.append(row);
+  }
+}
+
 // ---------- 面板:点标题折叠;右上角按钮隐藏两边(都记在本机) ----------
 function loadPrefs(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
@@ -962,6 +1017,17 @@ function fillSettings() {
     const list = $("sceneList");
     list.replaceChildren();
     for (const scene of sc.list) list.append(sceneCard(scene));
+  }
+  if (s.meeting) showMeeting(s.meeting);
+  const lib = s.library;
+  $("libGroup").hidden = !lib;
+  if (lib) {
+    $("setLibOn").checked = lib.on;
+    if (document.activeElement !== $("libFolders")) $("libFolders").value = lib.folders.join("\n");
+    $("libStatus").textContent = lib.busy ? `正在整理…… ${lib.progress || ""}`
+      : `有 ${lib.files} 个文件(共 ${lib.pages} 页/段)` + (lib.refreshed ? `,上次整理 ${lib.refreshed}` : ",还没整理过") + (lib.error ? `。出错:${lib.error}` : "");
+    $("libBad").hidden = !lib.unreadable.length;
+    $("libBad").textContent = `读不了的 ${lib.failed} 个:` + lib.unreadable.join("、") + (lib.failed > lib.unreadable.length ? "……" : "");
   }
   const bg = s.background;
   $("bgGroup").hidden = !bg;
@@ -1611,6 +1677,13 @@ $("subSize").onchange = (e) => saveSetting({ sub_size: e.target.value });
 $("subTime").onchange = (e) => saveSetting({ sub_time: e.target.value });
 $("duckTo").onchange = (e) => saveSetting({ duck_to: e.target.value });
 $("subPreview").onclick = () => saveSetting({ subtitle_preview: true });
+$("meetStart").onclick = () => saveSetting({ meeting_start: $("meetTitle").value.trim() });
+$("meetStop").onclick = () => saveSetting({ meeting_stop: true });
+$("meetTodos").onclick = () => saveSetting({ meeting_todos: true });
+$("meetingChip").onclick = () => { if (confirm("停止记录?停止后我会整理出重点和待办。")) saveSetting({ meeting_stop: true }); };
+$("setLibOn").onchange = (e) => saveSetting({ library_on: e.target.checked });
+$("libSave").onclick = () => saveSetting({ library_folders: $("libFolders").value.split("\n").map((x) => x.trim()).filter(Boolean) });
+$("libRefresh").onclick = () => saveSetting({ library_refresh: true });
 $("bgCancel").onclick = () => saveSetting({ bg_cancel: true });
 $("bgOpen").onclick = () => saveSetting({ bg_open: true });
 $("setLearn").onchange = (e) => saveSetting({ learn: e.target.checked });
