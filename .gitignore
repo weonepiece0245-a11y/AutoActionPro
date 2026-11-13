@@ -20,3 +20,70 @@ debug.keystore
 # Python
 __pycache__/
 .venv/
+
+# 星期五的记忆(个人信息,不要提交)
+assistant/friday_memory.json*
+assistant/friday_reminders.json*
+assistant/friday_todos.json*
+assistant/friday_ledger.json*
+assistant/friday_watch.json*
+assistant/friday_mailwatch.json*
+assistant/friday_memtidy.json
+assistant/friday_alerts.json
+# Google 授权文件(含密钥,绝对不能提交)
+assistant/credentials.json
+assistant/google_token.json
+assistant/friday_discord.json
+
+# 离线语音识别模型(首次使用时自动下载)
+assistant/models/
+# 图形界面运行时生成的文件
+assistant/browser-profile/
+assistant/friday_web.json
+assistant/friday.log
+assistant/friday_version.json
+assistant/friday_usage.json
+assistant/friday_router.json
+assistant/friday_chat.json
+assistant/friday_conversation.json
+assistant/friday_archive.jsonl
+assistant/friday.lock
+assistant/google_login.json
+assistant/friday_backup.json
+assistant/friday_restore_pending.zip
+assistant/friday_before_restore.zip
+assistant/cloud_cert.pem
+assistant/cloud_key.pem
+assistant/friday_cloud_state.json
+assistant/web/vendor/
+assistant/friday_security.log*
+assistant/friday_tidy.json
+assistant/friday_scenes.json
+assistant/friday_screentime.json
+assistant/friday_notes.json*
+assistant/friday_heartbeat.json*
+assistant/friday_gameboost.json*
+assistant/friday_games.json*
+assistant/friday_wishlist.json*
+assistant/friday_autoupdate.json*
+assistant/friday_gamereport.json*
+assistant/friday_lightlink.json*
+assistant/friday_selfcheck.json*
+assistant/friday_crash.json
+assistant/friday_guard.lock
+assistant/friday_dates.json*
+assistant/friday_photo_sort.json
+assistant/friday_vocab.json*
+assistant/friday_background.json*
+assistant/friday_reports/
+assistant/friday_library.db*
+assistant/friday_subscriptions.json*
+assistant/friday_startup.json*
+assistant/friday_meetings/
+assistant/friday_receipts.json*
+assistant/friday_parcels.json*
+assistant/friday_plan.json*
+assistant/friday_energy.json*
+
+# 更新前留的旧文件(自动退回上一版用)
+assistant/_update_backup/

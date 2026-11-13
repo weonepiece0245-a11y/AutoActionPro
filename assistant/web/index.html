@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>星期五 · FRIDAY</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3CradialGradient id='g' cx='35%25' cy='30%25'%3E%3Cstop offset='0' stop-color='%235eead4'/%3E%3Cstop offset='1' stop-color='%232563eb'/%3E%3C/radialGradient%3E%3C/defs%3E%3Ccircle cx='32' cy='32' r='30' fill='url(%23g)'/%3E%3Ctext x='32' y='43' font-size='32' text-anchor='middle' fill='white' font-family='Microsoft YaHei,sans-serif' font-weight='700'%3E%E4%BA%94%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+  <div class="takeover-bar" id="takeoverBar" hidden role="alert">🖱 星期五正在操控鼠标键盘:<span id="takeoverText"></span> —— 你动一下鼠标,它就会马上停下</div>
+<canvas id="orb" aria-hidden="true"></canvas>
+<div class="css-orb" id="cssOrb" aria-hidden="true"><i></i><i></i><i></i></div>
+<div class="orb-tools" id="orbTools" role="toolbar" aria-label="光球">
+  <button type="button" class="orb-tool" id="orbStyleBtn" title="换光球的样子" aria-label="换光球的样子">🎨</button>
+  <button type="button" class="orb-tool" id="orbZoomIn" title="放大(也可以在光球上滚滚轮)" aria-label="放大">＋</button>
+  <button type="button" class="orb-tool" id="orbZoomOut" title="缩小" aria-label="缩小">−</button>
+  <button type="button" class="orb-tool" id="orbReset" title="转回正面、原来大小(也可以双击光球旁边的空白)" aria-label="复原">⟲</button>
+  <span class="orb-tool-name" id="orbStyleName" aria-live="polite"></span>
+  <div class="orb-menu" id="orbMenu" hidden role="menu" aria-label="光球的样子"></div>
+</div>
+<div class="grid-floor" aria-hidden="true"></div>
+<div class="scanlines" aria-hidden="true"></div>
+
+<div id="lockScreen" hidden>
+  <div class="lock-card">
+    <div class="lock-icon">🔒</div>
+    <div class="lock-title">星期五已上锁</div>
+    <div class="lock-sub">输入 PIN 解锁</div>
+    <input id="lockPin" type="password" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="PIN">
+    <button type="button" class="mini-btn" id="unlockBtn">解锁</button>
+    <div class="lock-error" id="lockError"></div>
+  </div>
+</div>
+<div id="dropZone" hidden><div>放开就加进去 📎<small>图片、PDF、Word、文字文件</small></div></div>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">五</span>
+    <div>
+      <div class="brand-name">FRIDAY</div>
+      <div class="brand-sub">星期五 · 私人 AI 助手</div>
+    </div>
+  </div>
+  <div class="status-pill" id="modePill"><span class="dot"></span><span id="modeText">待机 STANDBY</span><span class="model-chip" id="modelChip" hidden></span><span class="model-chip focus-chip" id="focusChip" hidden></span><span class="model-chip" id="sleepChip" hidden></span><button type="button" class="model-chip rec-chip" id="meetingChip" hidden title="点一下停止记录"></button></div>
+  <div class="top-right">
+    <button type="button" class="icon-btn small" id="lockBtn" title="马上上锁" aria-label="马上上锁" hidden>
+      <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+    </button>
+    <button type="button" class="icon-btn small" id="miniBtn" title="桌面小光球(永远在最上面)" aria-label="桌面小光球">
+      <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="14" rx="2"/><rect x="12" y="11" width="7" height="5" rx="1"/></svg>
+    </button>
+    <button type="button" class="icon-btn small" id="historyBtn" title="聊天记录(搜索、按日期看)" aria-label="聊天记录">
+      <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>
+    </button>
+    <button type="button" class="icon-btn small" id="settingsBtn" title="设定" aria-label="设定">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+    </button>
+    <button type="button" class="icon-btn small toggle" id="panelsBtn" title="隐藏/显示两边的面板" aria-label="隐藏或显示两边的面板" aria-pressed="true">
+      <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path class="side" d="M8 4v16M16 4v16"/></svg>
+    </button>
+    <div class="clock">
+      <div id="clockTime">--:--:--</div>
+      <div id="clockDate" class="clock-date">----</div>
+    </div>
+  </div>
+</header>
+
+<button type="button" class="edge-tab left" id="edgeLeft" aria-label="左边的面板"><span aria-hidden="true"></span></button>
+<button type="button" class="edge-tab right" id="edgeRight" aria-label="右边的面板"><span aria-hidden="true"></span></button>
+<aside class="hud hud-left">
+  <section class="panel dash" data-panel="weather" id="dashWeather" hidden>
+    <h2><span>WEATHER</span>天气<small class="dash-sub" id="weatherPlace"></small></h2>
+    <div id="weatherBox"></div>
+  </section>
+  <section class="panel dash" data-panel="pc" id="dashPc" hidden>
+    <h2><span>PC</span>电脑</h2>
+    <div class="meters" id="pcBox"></div>
+  </section>
+  <section class="panel" data-panel="system">
+    <h2><span>SYSTEM</span>系统</h2>
+    <ul class="sys" id="sysList"></ul>
+  </section>
+  <section class="panel grow" data-panel="memory">
+    <h2><span>MEMORY</span>我记得的事</h2>
+    <ul class="list" id="memoryList"><li class="empty">还没有记忆</li></ul>
+  </section>
+</aside>
+
+<aside class="hud hud-right">
+  <section class="panel dash" data-panel="today" id="dashToday" hidden>
+    <h2><span>TODAY</span>今天<span class="count" id="todayCount"></span></h2>
+    <ul class="list today-list" id="todayList"></ul>
+  </section>
+  <section class="panel dash" data-panel="music" id="dashMusic" hidden>
+    <h2><span>MUSIC</span>正在播放</h2>
+    <div class="music" id="musicBox">
+      <img class="music-art" id="musicArt" alt="" hidden>
+      <div class="music-text"><div class="music-title" id="musicTitle">—</div><div class="music-artist" id="musicArtist"></div></div>
+      <div class="music-bar"><i id="musicProgress"></i></div>
+      <div class="music-ctl">
+        <button type="button" class="mbtn" id="musicPrev" title="上一首" aria-label="上一首"><svg viewBox="0 0 24 24"><path d="M6 5v14M18 6l-9 6 9 6z"/></svg></button>
+        <button type="button" class="mbtn big" id="musicPlay" title="播放/暂停" aria-label="播放或暂停"><svg viewBox="0 0 24 24"><path id="musicPlayIcon" d="M8 5v14l11-7z"/></svg></button>
+        <button type="button" class="mbtn" id="musicNext" title="下一首" aria-label="下一首"><svg viewBox="0 0 24 24"><path d="M18 5v14M6 6l9 6-9 6z"/></svg></button>
+      </div>
+    </div>
+  </section>
+  <section class="panel dash" data-panel="home" id="dashHome" hidden>
+    <h2><span>HOME</span>家里<span class="count" id="homeCount"></span></h2>
+    <div class="home-grid" id="homeBox"></div>
+  </section>
+  <section class="panel" data-panel="reminders">
+    <h2><span>REMINDERS</span>提醒</h2>
+    <ul class="list" id="reminderList"><li class="empty">没有提醒</li></ul>
+  </section>
+  <section class="panel grow" data-panel="tasks">
+    <h2><span>TASKS</span>待办</h2>
+    <ul class="list" id="todoList"><li class="empty">没有待办</li></ul>
+  </section>
+</aside>
+
+<main class="console">
+  <div class="banner" id="banner" hidden></div>
+  <div class="log" id="log" aria-live="polite"></div>
+  <div class="attach-list" id="attachList" hidden></div>
+  <form class="inputbar" id="form" autocomplete="off">
+    <button type="button" class="icon-btn mic" id="micBtn" title="语音输入(说完停顿 2 秒自动结束)" aria-label="语音输入">
+      <svg viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/><path d="M19 11a7 7 0 0 1-14 0M12 18v3"/></svg>
+    </button>
+    <button type="button" class="icon-btn" id="attachBtn" title="附加图片或文件(也可以直接贴上截图、把文件拖进窗口)" aria-label="附加文件">
+      <svg viewBox="0 0 24 24"><path d="M21 12.5l-8.5 8.5a5 5 0 0 1-7-7L14 5.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4L15.5 8.6"/></svg>
+    </button>
+    <input type="file" id="attachInput" multiple hidden accept="image/*,.pdf,.docx,.txt,.md,.csv,.json,.log">
+    <input id="input" type="text" placeholder="对星期五说点什么……(回车发送;可以贴截图、拖文件进来)" maxlength="4000">
+    <button type="submit" class="send" id="sendBtn">发送 <span>SEND</span></button>
+    <button type="button" class="icon-btn toggle" id="speakBtn" title="朗读回答" aria-label="朗读回答" aria-pressed="true">
+      <svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path class="wave" d="M16 8.5a4.5 4.5 0 0 1 0 7M18.5 6a8 8 0 0 1 0 12"/></svg>
+    </button>
+    <button type="button" class="icon-btn" id="clearBtn" title="开始新话题" aria-label="开始新话题">
+      <svg viewBox="0 0 24 24"><path d="M4 4v6h6"/><path d="M20 12a8 8 0 1 1-2.3-5.7L4 10"/></svg>
+    </button>
+    <button type="button" class="icon-btn power" id="powerBtn" title="关闭星期五(后台也会停止)" aria-label="关闭星期五">
+      <svg viewBox="0 0 24 24"><path d="M12 3v9"/><path d="M6.3 6.3a8 8 0 1 0 11.4 0"/></svg>
+    </button>
+  </form>
+  <div class="hint">关掉这个窗口后,星期五仍在后台运行(手机 Discord、提醒照常)。点右边的电源按钮才会完全退出。</div>
+</main>
+
+<div class="modal" id="approval" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="approvalTitle">
+    <div class="modal-head"><span class="glitch" id="approvalTitle" data-text="AUTHORIZATION">AUTHORIZATION</span>授权请求</div>
+    <pre class="modal-body" id="approvalText"></pre>
+    <div class="modal-actions">
+      <button class="btn ok" id="approveYes">允许</button>
+      <button class="btn" id="approveNo">拒绝</button>
+      <button class="btn ghost" id="approveAll">10 分钟内都允许</button>
+    </div>
+    <div class="modal-note" id="approvalNote"></div>
+  </div>
+</div>
+
+<div class="modal" id="historyModal" hidden>
+  <div class="modal-card settings-card history-card" role="dialog" aria-modal="true" aria-labelledby="historyTitle">
+    <div class="modal-head"><span class="settings-title" id="historyTitle">HISTORY</span>聊天记录
+      <input class="set-search" id="histSearch" type="search" placeholder="🔍 搜索聊天记录,例如 Spotify、汇率、Apex" aria-label="搜索聊天记录" autocomplete="off">
+      <button type="button" class="close-x" id="historyClose" aria-label="关闭">×</button></div>
+    <div class="set-layout">
+      <nav class="set-nav hist-days" id="histDays" aria-label="按日期"></nav>
+      <div class="set-pane hist-list" id="histList"></div>
+    </div>
+    <div class="modal-note" id="histNote">所有问答都存在这台电脑上;手机 Discord、Telegram 上问的也在。</div>
+  </div>
+</div>
+
+<div class="modal" id="settings" hidden>
+  <div class="modal-card settings-card" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <div class="modal-head"><span class="settings-title" id="settingsTitle">SETTINGS</span>设定
+      <input class="set-search" id="setSearch" type="search" placeholder="🔍 搜索设定,例如 游戏、Spotify、提醒" aria-label="搜索设定" autocomplete="off">
+      <button type="button" class="close-x" id="settingsClose" aria-label="关闭">×</button></div>
+    <div class="set-layout">
+    <nav class="set-nav" id="setNav" aria-label="设定分类"></nav>
+    <div class="set-pane" id="setPane">
+    <div class="set-empty" id="setEmpty" hidden>没有找到相关的设定。换个说法试试,或者直接跟星期五说。</div>
+
+    <div class="set-group" data-cat="general">
+      <h3>星期五</h3>
+      <div class="set-row"><label for="setCallMe">怎么称呼你</label>
+        <span class="set-ctl"><input class="mini-input" id="setCallMe" maxlength="20"><button type="button" class="mini-btn" id="saveCallMe">保存</button></span></div>
+      <div class="set-row" id="modelRow" hidden><label for="modelMode">模型</label>
+        <select class="mini-select" id="modelMode" title="自动:日常用 Sonnet 5.5(便宜一半),难题用 Opus 5.5">
+          <option value="auto">自动(推荐)</option><option value="opus">只用 Opus 5.5</option><option value="sonnet">只用 Sonnet 5.5</option>
+        </select></div>
+    </div>
+
+    <div class="set-group" data-cat="voice">
+      <h3>声音</h3>
+      <div class="set-row"><label for="setSpeak">朗读回答</label><input type="checkbox" class="switch" id="setSpeak"></div>
+      <div class="set-row"><label for="setBarge">说话可以打断她(她在说话时你一开口,她就停下来听)</label><input type="checkbox" class="switch" id="setBarge"></div>
+      <div class="set-row"><label for="setFollowUp">连续对话(用语音问时,她说完自动再听几秒)</label><input type="checkbox" class="switch" id="setFollowUp"></div>
+      <div class="set-row"><label for="setVoice">朗读声音</label>
+        <span class="set-ctl"><select class="mini-select" id="setVoice"></select><button type="button" class="mini-btn" id="previewVoice">试听</button></span></div>
+    </div>
+
+    <div class="set-group" id="rcptGroup" hidden data-cat="money">
+      <h3>邮件收据自动记账</h3>
+      <div class="set-row"><label for="setReceipts">Grab、Shopee、foodpanda、银行刷卡这类收据邮件到了,先放进“待确认”</label><input type="checkbox" class="switch" id="setReceipts"></div>
+      <div class="set-row"><span class="set-note" id="rcptNote"></span><span class="set-ctl"><button type="button" class="mini-btn" id="rcptScan">现在看邮件</button><button type="button" class="mini-btn" id="rcptAll" hidden>全部记账</button><button type="button" class="mini-btn" id="rcptNone" hidden>全部忽略</button></span></div>
+      <div id="rcptList"></div>
+      <div class="set-note">只有你按“记账”的才会记进账本。每 30 分钟看一次新邮件;读收据正文请最便宜的 Haiku 认,一次大约 RM0.01~0.03。⚠ 是同一天已经有一样金额的账,可能记过了。</div>
+    </div>
+
+    <div class="set-group" id="subGroup" hidden data-cat="money">
+      <h3>订阅管家(每月自动扣款的)</h3>
+      <div class="set-row"><span class="set-note" id="subTotal"></span><button type="button" class="mini-btn" id="subScan">去邮箱找</button></div>
+      <div id="subList"></div>
+      <div class="set-row"><label for="subName">自己加一个</label>
+        <span class="set-ctl"><input class="mini-input" id="subName" maxlength="40" placeholder="名字,例如 Netflix">
+        <input class="mini-input short" id="subAmount" inputmode="decimal" placeholder="金额">
+        <select class="mini-select" id="subCurrency"><option>MYR</option><option>USD</option><option>SGD</option><option>EUR</option><option>GBP</option><option>CNY</option><option>HKD</option><option>AUD</option><option>JPY</option></select>
+        <select class="mini-select" id="subCycle"><option value="monthly">每月</option><option value="yearly">每年</option><option value="quarterly">每季</option><option value="weekly">每周</option></select>
+        <input class="mini-input short" id="subDay" inputmode="numeric" maxlength="2" placeholder="几号">
+        <button type="button" class="mini-btn" id="subAdd">加</button></span></div>
+      <div class="set-note">扣款前两天提醒你;每 30 天自动去 Gmail 再找一次(先看收据、续订邮件的标题和预览;看不出金额或日期的,才读那一封收据的正文,最多 8 封;用最便宜的 Haiku 认,一次大约 RM0.02~0.05)。也可以说“我的订阅”“一年订阅花多少”“Netflix 取消了”。</div>
+    </div>
+
+    <div class="set-group" id="budgetGroup" hidden data-cat="money">
+      <h3>预算和余额</h3>
+      <div class="set-row"><label for="setBudget">每月预算(0 = 不限)</label>
+        <span class="set-ctl">RM <input class="mini-input short" id="setBudget" inputmode="decimal"><button type="button" class="mini-btn" id="saveBudget">保存</button></span></div>
+      <div class="set-note" id="budgetNote"></div>
+      <div class="set-row"><label for="setCredit">充值记录(用来算余额)</label>
+        <span class="set-ctl">US$ <input class="mini-input short" id="setCredit" inputmode="decimal"> <input class="mini-input date" id="setCreditSince" type="date"><button type="button" class="mini-btn" id="saveCredit">保存</button></span></div>
+      <div class="set-row"><label for="setAdminKey">Claude Console(Admin Key,可选)</label>
+        <span class="set-ctl"><input class="mini-input" id="setAdminKey" type="password" autocomplete="off" placeholder="sk-ant-admin…"><button type="button" class="mini-btn" id="saveAdminKey">保存</button></span></div>
+      <div class="set-note" id="consoleNote"></div>
+    </div>
+
+    <div class="set-group" id="careGroup" hidden data-cat="life">
+      <h3>主动关心(不花钱)</h3>
+      <div class="set-row"><label for="setCareWelcome">离开 20 分钟后回来,跟你打招呼</label><input type="checkbox" class="switch" id="setCareWelcome"></div>
+      <div class="set-row"><label for="setCareBreak">连续用电脑多久,提醒休息</label>
+        <select class="mini-select" id="setCareBreak"><option value="60">1 小时</option><option value="90">1.5 小时</option><option value="120">2 小时</option><option value="180">3 小时</option><option value="0">不提醒</option></select></div>
+      <div class="set-row"><label for="setCareNight">凌晨 1 点后还在用,提醒睡觉</label><input type="checkbox" class="switch" id="setCareNight"></div>
+    </div>
+
+    <div class="set-group" id="gameGroup" hidden data-cat="game">
+      <h3>打游戏时</h3>
+      <div class="set-row"><label for="setGameQuiet">别打扰:提醒改成右下角小通知,打完再一起说</label><input type="checkbox" class="switch" id="setGameQuiet"></div>
+      <div class="set-row"><label for="setGameBoost">游戏优化:游戏优先、后台程序让路、电源换高性能(打完自动改回来)</label><input type="checkbox" class="switch" id="setGameBoost"></div>
+      <div class="set-row" id="pttRow" hidden><label for="setPtt">打游戏时按住说话(按住对星期五说话,放开就问,不跳出窗口;选游戏里没用到的键)</label>
+        <span class="set-ctl"><select class="mini-select" id="setPtt"><option value="off">关</option></select>
+        <button type="button" class="mini-btn" id="pttCapture" hidden>按这里,再按你要的键</button></span></div>
+      <div class="set-row" id="pttDuckRow" hidden><label for="setPttDuck">按住说话时先把电脑声音(游戏、音乐)压低,说完恢复,听得更准</label><input type="checkbox" class="switch" id="setPttDuck"></div>
+      <div class="set-row" id="subtitleRow" hidden><label for="setSubtitles">游戏里显示字幕(按住说话的回答在画面下方显示几秒;全屏独占的游戏看不到,改成无边框全屏就好)</label><input type="checkbox" class="switch" id="setSubtitles"></div>
+      <div class="set-row" id="subtitleOptRow" hidden><label for="subPos">字幕位置 / 大小 / 显示多久</label>
+        <span class="set-ctl"><select class="mini-select" id="subPos"></select>
+        <select class="mini-select" id="subSize"><option value="small">小字</option><option value="medium">中字</option><option value="large">大字</option></select>
+        <select class="mini-select" id="subTime"><option value="short">短</option><option value="normal">一般</option><option value="long">长</option></select>
+        <button type="button" class="mini-btn" id="subPreview">试看字幕</button></span></div>
+      <div class="set-row" id="duckToRow" hidden><label for="duckTo">按住说话时电脑声音压到原来的</label><select class="mini-select" id="duckTo"></select></div>
+      <div class="set-row" id="shotRow" hidden><label for="setShot">截图问星期五(按一下截下画面;20 秒内按住说话问,不说就自动帮你看看画面)</label>
+        <span class="set-ctl"><select class="mini-select" id="setShot"><option value="off">关</option></select>
+        <button type="button" class="mini-btn" id="shotCapture" hidden>按这里,再按你要的键</button></span></div>
+      <div class="set-note" id="pttNote" hidden></div>
+      <div class="set-row"><label for="setGameReport">游戏后报告:每局打完说打了多久、电脑多热、星期五用了多少、哪个后台程序比较忙</label><input type="checkbox" class="switch" id="setGameReport"></div>
+      <div class="set-row"><label for="setGameClose">开游戏时自动关掉</label>
+        <span class="set-ctl"><input class="mini-input" id="setGameClose" autocomplete="off" placeholder="例如 chrome, spotify"><button type="button" class="mini-btn" id="saveGameClose">保存</button></span></div>
+      <div class="set-row"><span class="set-note">不知道填什么?看看现在哪些程序最占内存</span><button type="button" class="mini-btn" id="gameCandidates">列出程序</button></div>
+      <div class="chips" id="gameChips" hidden></div>
+      <div class="set-note">说“游戏体检”可以检查 Windows 的游戏设定。全屏运行的程序(看视频的浏览器、播放器除外)和 Apex、Dota 2 等都算游戏。程序是正常关闭的,有没保存的内容会先问你;Discord 这类关窗口只会缩到右下角。msedge 也是星期五的窗口,关掉后星期五仍在后台。</div>
+    </div>
+
+    <div class="set-group" data-cat="game" id="partyGroup" hidden>
+      <h3>一键开黑(说“开黑”开始,说“不玩了”恢复)</h3>
+      <div class="set-row"><label for="partyApps">要打开的程序(逗号分开)</label><input class="mini-input wide" id="partyApps" placeholder="Discord, Steam"></div>
+      <div class="set-row"><label for="partyGame">启动游戏(可以不填)</label><input class="mini-input wide" id="partyGame" placeholder="例如 Apex、Dota 2"></div>
+      <div class="set-row"><label for="partyPlaylist">Spotify 歌单(可以不填)</label><input class="mini-input wide" id="partyPlaylist" placeholder="你在 Spotify 的歌单名"></div>
+      <div class="set-row" id="partyLightsRow"><label for="partyLights">家里的灯(用下面“灯联动”选的那几盏)</label><select class="mini-select" id="partyLights"></select></div>
+      <div class="set-row"><label for="partyQuiet">开启别打扰(提醒改成右下角小通知)</label><input type="checkbox" class="switch" id="partyQuiet"></div>
+      <div class="set-row"><label for="partyClose">说“不玩了”时关掉开黑时打开的程序</label><input type="checkbox" class="switch" id="partyClose"></div>
+      <div class="set-row"><span class="set-note">改好后按保存</span><button type="button" class="mini-btn" id="partySave">保存</button></div>
+    </div>
+
+    <div class="set-group" data-cat="game" id="lightGroup" hidden>
+      <h3>家里的灯联动(Tapo)</h3>
+      <div class="set-row"><label for="lightGameMode">开游戏时,下面选的灯</label><select class="mini-select" id="lightGameMode"></select></div>
+      <div class="picks" id="lightGameList"></div>
+      <div class="set-row"><label for="lightAwayMin">离开电脑多久,关掉下面选的灯和插座</label><select class="mini-select" id="lightAwayMin"></select></div>
+      <div class="picks" id="lightAwayList"></div>
+      <div class="set-row"><label for="lightBack">回到电脑前时开回来</label><input type="checkbox" class="switch" id="lightBack"></div>
+      <div class="set-note">打完游戏会改回原来的亮度和颜色;只开回星期五自己关掉的。电脑睡眠后星期五就不能动了,离开时间要比 Windows 的睡眠时间短。</div>
+    </div>
+
+    <div class="set-group" id="cloudGroup" hidden data-cat="apps">
+      <h3>云端星期五(电脑关机也能用)</h3>
+      <div class="set-row"><label for="setCloud">配对码</label>
+        <span class="set-ctl"><input class="mini-input" id="setCloud" type="password" autocomplete="off" placeholder="FRIDAY-…"><button type="button" class="mini-btn" id="saveCloud">连接</button><button type="button" class="mini-btn" id="dropCloud" hidden>断开</button></span></div>
+      <div class="set-note" id="cloudNote"></div>
+    </div>
+
+    <div class="set-group" id="sceneGroup" hidden data-cat="life">
+      <h3>场景模式(一句话做好几件事,不花钱)</h3>
+      <div class="set-note" id="sceneHelp"></div>
+      <div id="sceneList"></div>
+      <div class="set-row"><span></span><button type="button" class="mini-btn" id="sceneAdd">+ 新场景</button></div>
+    </div>
+
+    <div class="set-group" id="energyGroup" hidden data-cat="life">
+      <h3>家里用电</h3>
+      <div class="set-row"><span class="set-note" id="energyNote"></span>
+        <span class="set-ctl"><label for="electricRate" class="set-note">每度电 RM</label><input class="mini-input short" id="electricRate" inputmode="decimal"><button type="button" class="mini-btn" id="electricRateSave">保存</button></span></div>
+      <div id="energyList"></div>
+      <div class="set-note">只有会计电的 Tapo 插座(例如 P110、P115)才读得到;每 15 分钟读一次,不花钱。电费只是估算(默认每度 RM0.45,大约是 TNB 住宅电费含各种收费的平均),照你的电单改会更准。半夜一直待机耗电的会提醒你;星期天晚上有每周报告。也可以问“这个月用了多少电”“哪个最耗电”。</div>
+    </div>
+
+    <div class="set-group" id="planGroup" hidden data-cat="life">
+      <h3>待办排进日历</h3>
+      <div class="set-row"><label for="planHours">只排在这个时段(一天最多 3 件)</label>
+        <span class="set-ctl"><input class="mini-input" id="planHours" maxlength="11" placeholder="09:00-22:00"><button type="button" class="mini-btn" id="planHoursSave">保存</button></span></div>
+      <div class="set-row"><span class="set-note" id="planNote">说“帮我安排这周的待办”,或按这里;先给你看安排,同意才放进 Google 日历。</span>
+        <span class="set-ctl"><button type="button" class="mini-btn" id="planWeek">安排这周</button><button type="button" class="mini-btn" id="planTomorrow">安排明天</button></span></div>
+      <div id="planList"></div>
+      <div class="set-row" id="planActions" hidden><span></span><span class="set-ctl"><button type="button" class="mini-btn" id="planApply">就这样安排</button><button type="button" class="mini-btn" id="planCancel">取消</button></span></div>
+      <div class="set-note">到时间没做完(待办没打勾)的,会自动挪到下一个空档并告诉你。日历里标题前面有 📝 的是星期五排的,你自己拖到别的时间也可以。</div>
+    </div>
+
+    <div class="set-group" id="parcelGroup" hidden data-cat="life">
+      <h3>包裹追踪</h3>
+      <div class="set-row"><span class="set-note" id="parcelNote"></span><button type="button" class="mini-btn" id="parcelScan">现在看邮件</button></div>
+      <div id="parcelList"></div>
+      <div class="set-note">从网购和快递邮件找出在路上的包裹,出货、今天派送、送到、出问题都会告诉你;每 2 小时看一次。也可以问“我的包裹到哪了”。送到 3 天后自动收起来。</div>
+    </div>
+
+    <div class="set-group" id="meetGroup" hidden data-cat="life">
+      <h3>会议 / 上课记录</h3>
+      <div class="set-row"><span class="set-note" id="meetNow">说“开始记录”或按这里;我一直听、边听边转成文字,说“停止记录”后整理出重点、决定和待办。</span>
+        <span class="set-ctl"><input class="mini-input" id="meetTitle" maxlength="20" placeholder="标题(可以不填)"><button type="button" class="mini-btn" id="meetStart">开始记录</button><button type="button" class="mini-btn" id="meetStop" hidden>停止记录</button></span></div>
+      <div class="set-note" id="meetLast" hidden></div>
+      <div class="set-row" id="meetTodosRow" hidden><span></span><button type="button" class="mini-btn" id="meetTodos">把上次的待办加进清单</button></div>
+      <div id="meetList"></div>
+      <div class="set-note">文字记录和总结存在 friday_meetings 文件夹,也会收进“我的资料库”,以后可以问“上周开会决定了什么”。记录中不会被唤醒词打断。</div>
+    </div>
+
+    <div class="set-group" id="libGroup" hidden data-cat="life">
+      <h3>我的资料库(问你自己文件里的事)</h3>
+      <div class="set-row"><label for="setLibOn">问合同、保单、账单、笔记这类事时,先在我的文件里找</label><input type="checkbox" class="switch" id="setLibOn"></div>
+      <label class="set-note" for="libFolders">要收进资料库的文件夹(一行一个):</label>
+      <textarea class="mini-input fb-sources" id="libFolders" rows="3" spellcheck="false" placeholder="例如 C:\Users\你的名字\Documents"></textarea>
+      <div class="set-row"><span class="set-note" id="libStatus"></span><span class="set-ctl"><button type="button" class="mini-btn" id="libSave">保存文件夹</button><button type="button" class="mini-btn" id="libRefresh">现在整理</button></span></div>
+      <div class="set-note" id="libBad" hidden></div>
+      <div class="set-note">收 PDF、Word(.docx)、Excel(.xlsx)、PPT(.pptx)、文字文件。索引只存在你的电脑上,问的时候才把找到的那几小段给 Claude 看。钥匙、密码这类文件不收;扫描的图片 PDF 读不到字。</div>
+    </div>
+
+    <div class="set-group" id="bgGroup" hidden data-cat="life">
+      <h3>后台长任务</h3>
+      <div class="set-note" id="bgNow">说“在后台帮我研究一下……”或“……做完告诉我”,我在后台慢慢做,做完窗口和手机都会收到报告。后台只能查资料,不能发邮件、不能改东西。</div>
+      <div id="bgList"></div>
+      <div class="set-row"><span></span><span class="set-ctl"><button type="button" class="mini-btn" id="bgCancel" hidden>停掉正在做的</button><button type="button" class="mini-btn" id="bgOpen">打开报告文件夹</button></span></div>
+    </div>
+
+    <div class="set-group" id="memtidyGroup" hidden data-cat="life">
+      <h3>记忆整理</h3>
+      <div class="set-row"><span id="memtidyNote">每周用最便宜的 Haiku 帮星期五整理一次记忆,只给建议,你勾了才改</span><button type="button" class="mini-btn" id="memtidyRun">现在整理</button></div>
+      <div id="memtidyList"></div>
+      <div class="set-row" id="memtidyActions" hidden><span></span><span class="set-ctl"><button type="button" class="mini-btn" id="memtidyApply">按勾选的改</button><button type="button" class="mini-btn" id="memtidyDismiss">全部忽略</button></span></div>
+    </div>
+
+    <div class="set-group" id="learnGroup" hidden data-cat="voice">
+      <h3>听懂我(被纠正就记住、中英马混着说)</h3>
+      <div class="set-row"><label for="setLearn">被纠正就记住:你说“不是这个意思”“我是说……”,我把教训记进记忆(每次约 RM0.005)</label><input type="checkbox" class="switch" id="setLearn"></div>
+      <div class="set-row"><label for="setSttMixed">中英马混着说:中文听得没把握时,再用英文听一次</label><input type="checkbox" class="switch" id="setSttMixed"></div>
+      <div class="set-row"><label for="vocabWords">我的常用词(听到好几个可能时,优先选有这些词的)</label>
+        <span class="set-ctl"><input class="mini-input wide" id="vocabWords" maxlength="1500" placeholder="例如 Mid Valley, Grab, tapau, mamak"><button type="button" class="mini-btn" id="vocabWordsSave">保存</button></span></div>
+      <div class="set-row"><label for="vocabHeard">听错改正:听到 → 改成</label>
+        <span class="set-ctl"><input class="mini-input" id="vocabHeard" maxlength="12" placeholder="例如 米谷"><input class="mini-input" id="vocabMeant" maxlength="30" placeholder="例如 Mid Valley"><button type="button" class="mini-btn" id="vocabAdd">加</button></span></div>
+      <div id="vocabList"></div>
+      <div class="set-note" id="vocabNote">也可以直接说“以后听到米谷就是 Mid Valley”。被你纠正“你听错了,我说的是……”时,我也会自己加进来。</div>
+    </div>
+
+    <div class="set-group" id="startGroup" hidden data-cat="pc">
+      <h3>开机变慢优化</h3>
+      <div class="set-row"><span class="set-note" id="startSummary">按“检查一下”看看开机启动了哪些程序、哪些可以关。</span><button type="button" class="mini-btn" id="startCheck">检查一下</button></div>
+      <div id="startList"></div>
+      <div class="set-note" id="startExtra" hidden></div>
+      <div class="set-row" id="startCleanRow" hidden><span class="set-note" id="startCleanText"></span><button type="button" class="mini-btn" id="startClean">清理临时文件</button></div>
+      <div class="set-note">关掉的方法和任务管理器“停用”一样:不删除、不卸载,要用时照常打开,随时可以在这里打开回来。灰色的是装给所有用户的,要在任务管理器里改。每 30 天自动检查一次,有该处理的才告诉你。</div>
+    </div>
+
+    <div class="set-group" id="healthGroup" hidden data-cat="pc">
+      <h3>电脑健康(不花钱)</h3>
+      <div class="set-row"><label for="setHealth">硬盘快满、内存太紧、很久没重启、下载文件夹太乱时提醒我</label><input type="checkbox" class="switch" id="setHealth"></div>
+      <div class="set-note" id="healthNote"></div>
+      <div class="set-row"><span id="downloadsNote">下载文件夹</span>
+        <span class="set-ctl"><button type="button" class="mini-btn" id="tidyNow">整理</button><button type="button" class="mini-btn" id="tidyUndo">撤销上次整理</button></span></div>
+      <div class="set-row"><label for="photoFolder">照片按月整理</label>
+        <span class="set-ctl"><input class="mini-input" id="photoFolder" placeholder="不填就是“图片”文件夹"><button type="button" class="mini-btn" id="photoSort">整理</button><button type="button" class="mini-btn" id="photoUndo">撤销</button></span></div>
+      <div class="set-row"><span id="virusNote">病毒扫描(Windows 自带的 Defender)</span>
+        <span class="set-ctl"><button type="button" class="mini-btn" id="virusQuick">快速扫描</button><button type="button" class="mini-btn" id="virusFull">全面扫描</button></span></div>
+      <div class="set-note" id="virusLast" hidden></div>
+      <div class="set-row" id="clipRow" hidden><label for="setClip">记住最近复制的文字(剪贴板历史,只存在本机,密码不记)</label>
+        <span class="set-ctl"><input type="checkbox" class="switch" id="setClip"><button type="button" class="mini-btn" id="clipClear">清空</button></span></div>
+      <div class="set-row"><span>大文件和重复文件</span><button type="button" class="mini-btn" id="cleanupScan">找一找</button></div>
+      <div class="set-note" id="cleanupNote" hidden></div>
+      <div id="cleanupList"></div>
+      <div class="set-row" id="cleanupActions" hidden><span class="set-note" id="cleanupPicked"></span><button type="button" class="mini-btn" id="cleanupRecycle">把勾选的丢进回收站</button></div>
+    </div>
+
+    <div class="set-group" id="appsGroup" hidden data-cat="apps">
+      <h3>连接的应用</h3>
+      <div class="set-row"><label for="steamKey">Steam 网页 API 钥匙</label>
+        <span class="set-ctl"><input class="mini-input" id="steamKey" type="password" autocomplete="off" placeholder="32 位"></span></div>
+      <div class="set-row"><label for="steamId">Steam 个人资料(网址或 17 位数字 ID)</label>
+        <span class="set-ctl"><input class="mini-input" id="steamId" autocomplete="off"><button type="button" class="mini-btn" id="steamSave">保存</button></span></div>
+      <div class="set-note" id="steamNote">钥匙在 steamcommunity.com/dev/apikey 免费申请(网域名称随便填,例如 localhost)。Steam 个人资料的“游戏详情”和“好友列表”要设成公开。钥匙只存在这台电脑,不要发给任何人。</div>
+      <div class="set-row"><label for="spotifyClient">Spotify Client ID</label>
+        <span class="set-ctl"><input class="mini-input" id="spotifyClient" autocomplete="off"><button type="button" class="mini-btn" id="spotifySave">保存</button><button type="button" class="mini-btn" id="spotifyLogin">登录 Spotify</button></span></div>
+      <div class="set-note" id="spotifyNote"></div>
+      <div class="set-row"><label for="apexKey">Apex 钥匙(apexlegendsapi.com)</label>
+        <span class="set-ctl"><input class="mini-input" id="apexKey" type="password" autocomplete="off" placeholder="钥匙"></span></div>
+      <div class="set-row"><label for="apexPlayer">Apex 的 EA 名字和平台</label>
+        <span class="set-ctl"><input class="mini-input" id="apexPlayer" autocomplete="off" placeholder="EA 名字"><select class="mini-select" id="apexPlatform"><option value="PC">PC</option><option value="PS4">PlayStation</option><option value="X1">Xbox</option><option value="SWITCH">Switch</option></select><button type="button" class="mini-btn" id="apexSave">保存</button></span></div>
+      <div class="set-note">Apex 钥匙在 portal.apexlegendsapi.com 免费申请(用 Discord 登录)。填了钥匙就能问“现在 Apex 是什么地图”,再填 EA 名字就能问排位分。</div>
+      <div class="set-row"><label for="tgToken">Telegram 机器人钥匙</label>
+        <span class="set-ctl"><input class="mini-input" id="tgToken" type="password" autocomplete="off" placeholder="123456789:AA…"><button type="button" class="mini-btn" id="tgSave">保存</button></span></div>
+      <div class="set-note" id="tgNote">在 Telegram 里找 @BotFather,发 /newbot,按它说的取名字,它会给你一把钥匙,贴在上面。钥匙只存在你的电脑,不要发给任何人。</div>
+      <div class="set-row" id="tgOwnersRow" hidden><span>能用 Telegram 控制星期五的账号</span><button type="button" class="mini-btn" id="tgPair">添加新账号</button></div>
+      <div id="tgOwners"></div>
+      <div class="set-note" id="tgPairNote" hidden></div>
+      <div class="set-row"><label for="tapoUser">Tapo 智能家居(Tapo App 的邮箱和密码)</label>
+        <span class="set-ctl"><input class="mini-input" id="tapoUser" autocomplete="off" placeholder="邮箱"><input class="mini-input" id="tapoPass" type="password" autocomplete="off" placeholder="密码"><button type="button" class="mini-btn" id="tapoSave">保存</button></span></div>
+      <div class="set-note" id="tapoNote">Tapo 设备要用你的 Tapo 账号在家里网络里验证。先在 Tapo App 里打开 我 → 第三方服务 → 第三方兼容(Third-Party Compatibility),电脑和设备要连同一个 Wi-Fi。密码只存在你的电脑,不要发给任何人。</div>
+      <div class="set-note" id="nvidiaNote" hidden>✓ 认得到 NVIDIA 显卡:可以说“显卡温度”“刚才那段存下来”“开始录像”“游戏截图”。</div>
+    </div>
+
+    <div class="set-group" id="fbGroup" hidden data-cat="backup">
+      <h3>重要文件夹备份(不花钱)</h3>
+      <div class="set-note">每天把这些文件夹复制到另一个硬盘或移动硬盘,只复制新的和改过的;旧版本留 30 天;很多文件同时变了(像中了勒索病毒)会先停下来问你。</div>
+      <label class="set-note" for="fbSources">要备份的文件夹(一行一个):</label>
+      <textarea id="fbSources" class="mini-input fb-sources" rows="3" placeholder="例如 C:\Users\你的名字\Documents"></textarea>
+      <div class="set-row"><label for="fbDest">备份到哪里</label>
+        <span class="set-ctl"><input class="mini-input" id="fbDest" placeholder="例如 E:\星期五备份"><button type="button" class="mini-btn" id="fbSave">保存</button></span></div>
+      <div class="set-row"><span class="set-note" id="fbStatus"></span>
+        <span class="set-ctl"><button type="button" class="mini-btn" id="fbRun">马上备份</button><button type="button" class="mini-btn" id="fbForce" hidden>照样备份</button></span></div>
+    </div>
+
+    <div class="set-group" id="securityGroup" hidden data-cat="security">
+      <h3>安全</h3>
+      <div class="set-row"><span>能用手机 Discord 控制星期五的账号</span><button type="button" class="mini-btn" id="discordPair">添加新账号</button></div>
+      <div id="discordOwners"></div>
+      <div class="set-note" id="pairNote" hidden></div>
+      <div class="set-row"><span>手机遥控锁(验证器 App 的 6 位数字)<b class="google-state" id="remoteLockState">—</b></span>
+        <span class="set-ctl"><button type="button" class="mini-btn" id="remoteLockSetup">开启</button><button type="button" class="mini-btn" id="remoteLockResume" hidden>恢复手机遥控</button><button type="button" class="mini-btn" id="remoteLockOff" hidden>关闭</button></span></div>
+      <div class="set-note" id="remoteLockBox" hidden>
+        <div>1. 手机打开验证器 App(Google Authenticator 或 Microsoft Authenticator)→ 加号 → <b>输入设置密钥</b>。</div>
+        <div>2. 名称填“星期五”,密钥填:<b class="mono" id="remoteLockSecret"></b>,类型选“基于时间”。</div>
+        <div>3. 把 App 里显示的 6 位数字填到这里确认:<input class="mini-input" id="remoteLockCode" inputmode="numeric" maxlength="6" placeholder="123456"><button type="button" class="mini-btn" id="remoteLockConfirm">确认开启</button></div>
+      </div>
+      <div class="set-row"><label for="setLockMinutes">离开多久自动锁窗口</label>
+        <span class="set-ctl"><select class="mini-select" id="setLockMinutes"><option value="0">不锁</option><option value="5">5 分钟</option><option value="10">10 分钟</option><option value="30">30 分钟</option></select></span></div>
+      <div class="set-row"><span>解锁 PIN(4~8 位数字)<b class="google-state" id="pinState">—</b></span>
+        <span class="set-ctl"><input class="mini-input" id="pinOld" type="password" inputmode="numeric" maxlength="8" placeholder="旧 PIN" hidden><input class="mini-input" id="pinNew" type="password" inputmode="numeric" maxlength="8" placeholder="新 PIN"><input class="mini-input" id="pinNew2" type="password" inputmode="numeric" maxlength="8" placeholder="再输一次"><button type="button" class="mini-btn" id="pinSave">保存</button></span></div>
+      <div class="set-row"><span>最近的安全记录</span></div>
+      <div id="securityEvents" class="sec-events"></div>
+      <div class="set-note" id="securityNote"></div>
+    </div>
+
+    <div class="set-group" id="backupGroup" hidden data-cat="backup">
+      <h3>备份(Google Drive)</h3>
+      <div class="set-row"><label for="setBackup">每周自动备份</label><input type="checkbox" class="switch" id="setBackup"></div>
+      <div class="set-row"><span>上次备份 <b class="google-state" id="backupLast">—</b></span>
+        <span class="set-ctl"><button type="button" class="mini-btn" id="backupNow">立即备份</button><button type="button" class="mini-btn" id="backupRestore">从备份还原</button></span></div>
+      <div class="set-note">备份记忆、提醒、待办和聊天记录到 Drive 的“星期五备份”文件夹,保留最近 8 份。密码和钥匙(.env)不会上传。</div>
+    </div>
+
+    <div class="set-group" data-cat="look">
+      <h3>外观</h3>
+      <div class="set-row"><label for="setTheme">颜色主题</label>
+        <select class="mini-select" id="setTheme"><option value="cyan">青蓝(默认)</option><option value="ironman">钢铁红金</option><option value="violet">紫色</option><option value="matrix">绿色</option></select></div>
+      <div class="set-row"><label for="setOrbStyle">光球样子</label>
+        <select class="mini-select" id="setOrbStyle"><option value="classic">经典(全息球)</option><option value="reactor">反应堆</option><option value="galaxy">星系</option><option value="wave">声波环</option><option value="atom">原子</option><option value="dna">双螺旋</option><option value="planet">星球</option><option value="cube">超立方体</option><option value="plasma">等离子</option></select></div>
+      <div class="set-row"><label for="setOrbAuto">光球自动换样子</label>
+        <select class="mini-select" id="setOrbAuto"><option value="off">不换</option><option value="10m">每 10 分钟</option><option value="1h">每小时</option><option value="1d">每天</option></select></div>
+      <div class="set-note">在光球上滚滚轮放大缩小,按住拖动可以上下左右转,双击旁边的空白转回正面。</div>
+      <div class="set-row"><label for="brightness">光球亮度</label>
+        <span class="set-ctl bright"><input type="range" id="brightness" min="20" max="120" step="5" value="70"><output id="brightOut">70%</output></span></div>
+      <div class="set-row" id="orbRow" hidden><label for="setOrb">桌面小光球(只有一颗光球浮在所有程序最上面,点一下说话、右键收起)</label><input type="checkbox" class="switch" id="setOrb"></div>
+      <div class="set-row"><label for="setPanelLeft">显示左边的面板(天气、电脑、系统、记忆)</label><input type="checkbox" class="switch" id="setPanelLeft"></div>
+      <div class="set-row"><label for="setPanelRight">显示右边的面板(今天、音乐、家里、提醒、待办)</label><input type="checkbox" class="switch" id="setPanelRight"></div>
+      <div class="set-row"><label for="setPanelPeek">收起时,鼠标移到屏幕边上的小把手,面板自动探出来</label><input type="checkbox" class="switch" id="setPanelPeek"></div>
+      <div class="set-note">快捷键:Ctrl+[ 左边、Ctrl+] 右边、Ctrl+\ 两边一起。窗口太窄时两边自动收起,点边上的小把手打开。</div>
+    </div>
+
+    <div class="set-group" data-cat="remind">
+      <h3>提醒和每日</h3>
+      <div class="set-row" id="diaryRow" hidden><label for="setDiary">晚上做今天的总结,问你今天过得怎么样(日记,不花钱)</label>
+        <select class="mini-select" id="setDiary"><option value="21:00">晚上 9:00</option><option value="22:00">晚上 10:00</option><option value="22:30">晚上 10:30</option><option value="23:00">晚上 11:00</option><option value="23:30">晚上 11:30</option><option value="off">不要</option></select></div>
+      <div class="set-row" id="briefRow" hidden><label for="setBrief">早上第一次坐到电脑前,说今天的早安简报(天气、日历、待办、账单……不花钱)</label><input type="checkbox" class="switch" id="setBrief"></div>
+      <div class="set-row" id="rainRow" hidden><label for="setRain">会下雨就提醒带伞(每天看一次天气,不花钱)</label>
+        <select class="mini-select" id="setRain"><option value="07:00">早上 7:00</option><option value="07:30">早上 7:30</option><option value="08:00">早上 8:00</option><option value="08:30">早上 8:30</option><option value="09:00">早上 9:00</option><option value="off">不提醒</option></select></div>
+      <div class="set-row" id="eventRow" hidden><label for="setEventLead">Google 日历上的活动,提前提醒我(不花钱)</label>
+        <select class="mini-select" id="setEventLead"><option value="10">10 分钟</option><option value="15">15 分钟</option><option value="30">30 分钟</option><option value="60">1 小时</option><option value="0">不提醒</option></select></div>
+      <div id="mailGroup" hidden>
+        <div class="set-row"><span>重要邮件马上提醒我(不花钱)</span><button type="button" class="mini-btn" id="mailSave">保存</button></div>
+        <div class="set-row sub"><label for="mailSenders">寄件人</label><input class="mini-input wide" id="mailSenders" placeholder="例如 boss@公司.com, Maybank, @学校.edu.my"></div>
+        <div class="set-row sub"><label for="mailWords">标题关键词</label><input class="mini-input wide" id="mailWords" placeholder="例如 发票, 面试, 紧急"></div>
+        <div class="set-row sub"><label for="mailImportant">Gmail 标为“重要”的也提醒</label><input type="checkbox" class="switch" id="mailImportant"></div>
+      </div>
+      <div class="set-row" id="weeklyRow" hidden><label for="setWeekly">每周花费报告(星期天晚上 9 点后,不花钱)</label><input type="checkbox" class="switch" id="setWeekly"></div>
+      <div class="set-row" id="calendarRow" hidden><label for="setRemindCalendar">提醒同时放进 Google 日历(电脑关机时手机也会响)</label><input type="checkbox" class="switch" id="setRemindCalendar"></div>
+      <div class="set-row" id="pushRow" hidden><label for="setPush">提醒推到手机 Discord</label>
+        <select class="mini-select" id="setPush"><option value="always">每次都推</option><option value="away">不在电脑前时才推</option><option value="off">不推</option></select></div>
+    </div>
+
+    <div class="set-group" data-cat="voice">
+      <h3>唤醒和快捷键</h3>
+      <div class="set-row" id="wakeRow" hidden><label for="setWake">喊我就回应(语音唤醒)</label><input type="checkbox" class="switch" id="setWake"></div>
+      <div class="set-row" id="wakeOptions" hidden><label for="setWakePhrase">唤醒词 / 灵敏度</label>
+        <span class="set-ctl"><select class="mini-select" id="setWakePhrase"></select>
+        <input class="mini-input" id="setWakeCustom" maxlength="10" placeholder="自己的唤醒词" hidden><button type="button" class="mini-btn" id="saveWakeCustom" hidden>保存</button>
+        <select class="mini-select" id="setWakeSensitivity"><option value="high">灵敏</option><option value="normal">一般</option><option value="low">严格(少误判)</option></select></span></div>
+      <div class="set-note" id="wakeNote" hidden></div>
+      <div class="set-row" id="hotkeyRow" hidden><label for="setHotkey">快捷键:叫出星期五并开始听</label>
+        <select class="mini-select" id="setHotkey"></select></div>
+      <div class="set-note" id="hotkeyNote" hidden></div>
+      <div class="set-row" id="askHotkeyRow" hidden><label for="setAskHotkey">选中就问:选中文字后按,帮你翻译或解释</label>
+        <select class="mini-select" id="setAskHotkey"></select></div>
+      <div class="set-note" id="askHotkeyNote" hidden></div>
+      <div class="set-row" id="quickRow" hidden><label for="setQuick">简单指令不问 Claude(调音量、切歌、几点了、记账、天气、提醒、待办……不花钱)</label><input type="checkbox" class="switch" id="setQuick"></div>
+    </div>
+
+    <div class="set-group" data-cat="other">
+      <h3>账号和版本</h3>
+      <div class="set-row" id="googleRow" hidden><span>Google 账号 <b class="google-state" id="googleState">—</b></span>
+        <button type="button" class="mini-btn" id="googleLogin" title="打开浏览器重新登录 Google(测试模式大约每 7 天要登录一次)">重新登录 Google</button></div>
+      <div class="set-row" id="autostartRow" hidden><label for="setAutostart">开机自动启动(后台运行)</label><input type="checkbox" class="switch" id="setAutostart"></div>
+      <div class="set-row"><label for="setRate">汇率(本月花费用)</label>
+        <span class="set-ctl">1 美元 = <input class="mini-input short" id="setRate" inputmode="decimal"> 马币<button type="button" class="mini-btn" id="saveRate">保存</button></span></div>
+      <div class="set-row" id="apiKeyRow" hidden><span>Claude 钥匙 <b class="mono nowrap" id="apiKeyTail">—</b></span><span class="set-note">对照 Console“API 密钥”页里那串的最后 4 个字</span></div>
+      <div class="set-row"><label for="setKeyExpires">Claude 钥匙到期日(提前提醒,也推到手机)</label>
+        <span class="set-ctl"><input class="mini-input date" id="setKeyExpires" type="date"><button type="button" class="mini-btn" id="saveKeyExpires">保存</button></span></div>
+      <div class="set-row"><label for="setAutoUpdate">半夜自动更新(凌晨 3~5 点电脑开着、没在用时;早上告诉你更新了什么)</label><input type="checkbox" class="switch" id="setAutoUpdate"></div>
+      <div class="set-row"><span>版本 <b id="versionText">—</b></span><button type="button" class="mini-btn" id="updateBtn" title="从 GitHub 下载最新的星期五并自动重启">检查更新</button></div>
+    </div>
+    </div>
+    </div>
+    <div class="modal-note">设定会保存起来,下次打开还在。</div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="/app.js" type="module"></script>
+</body>
+</html>

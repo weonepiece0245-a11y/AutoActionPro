@@ -1,1 +1,10 @@
 anthropic
+pillow
+google-api-python-client
+google-auth-oauthlib
+discord.py
+SpeechRecognition
+edge-tts
+imageio-ffmpeg
+pystray; sys_platform == 'win32'
+pypdf

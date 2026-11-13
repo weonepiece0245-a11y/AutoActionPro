@@ -1,0 +1,393 @@
+"""Spotify 点歌:“放周杰伦的晴天”“放我的歌单 开车”“放我喜欢的歌”“现在放的是什么歌”(不花钱)。
+
+要在 Spotify 开发者网站建一个免费的应用,把它的 Client ID 填进齿轮设定,再点“登录 Spotify”一次。
+登录资料存在 friday_spotify.json(只在这台电脑,不备份、不读给 Claude)。
+Spotify 只让 Premium 账号用程序直接播放;免费账号会把歌在 Spotify 里打开,你点一下播放。
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import os
+import platform
+import secrets
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Callable
+
+AUTH_URL = "https://accounts.spotify.com/authorize"
+TOKEN_URL = "https://accounts.spotify.com/api/token"
+API = "https://api.spotify.com/v1"
+SCOPES = "user-read-playback-state user-modify-playback-state user-read-currently-playing playlist-read-private user-library-read"
+TOKEN_FILE = "friday_spotify.json"
+
+
+class SpotifyError(Exception):
+    pass
+
+
+def client_id() -> str:
+    return os.environ.get("FRIDAY_SPOTIFY_CLIENT_ID", "").strip()
+
+
+def _request(method: str, url: str, headers: dict, body: bytes | None = None) -> tuple[int, dict]:
+    request = urllib.request.Request(url, data=body, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:  # noqa: S310
+            raw = response.read()
+            try:
+                data = json.loads(raw) if raw else {}
+            except ValueError:
+                data = {}  # Spotify 有时候成功了却回一段不是 JSON 的字:当成功处理
+            return response.status, data if isinstance(data, dict) else {}
+    except urllib.error.HTTPError as e:
+        try:
+            data = json.loads(e.read() or b"{}")
+        except ValueError:
+            data = {}
+        return e.code, data
+    except (urllib.error.URLError, OSError) as e:
+        raise SpotifyError("连不上 Spotify,看看网络") from e
+
+
+class Spotify:
+    def __init__(self, folder: str | os.PathLike, port: int, request: Callable = _request,
+                 open_uri: Callable[[str], None] | None = None, clock: Callable[[], float] = time.time) -> None:
+        self.path = Path(folder) / TOKEN_FILE
+        self.redirect = f"http://127.0.0.1:{port}/spotify/callback"
+        self.request = request
+        self.open_uri = open_uri or (lambda uri: os.startfile(uri))  # noqa: S606
+        self.clock = clock
+        self.sleep = time.sleep  # 测试时换掉,不真的等
+        self.paused_at = 0.0  # 星期五上次替你暂停 Spotify 的时间(“继续”时知道该叫谁继续)
+        self.pending: dict[str, str] = {}  # state -> code_verifier(登录进行中)
+        self.lock = threading.Lock()
+        try:
+            self.tokens: dict = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            self.tokens = {}
+
+    # ---------- 登录 ----------
+    @property
+    def connected(self) -> bool:
+        return bool(self.tokens.get("refresh_token")) and bool(client_id())
+
+    def login_url(self) -> str:
+        if not client_id():
+            raise SpotifyError("先在齿轮设定里填 Spotify 应用的 Client ID")
+        verifier = secrets.token_urlsafe(64)
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+        state = secrets.token_urlsafe(16)
+        self.pending = {state: verifier}  # 只认最新的这一次
+        query = urllib.parse.urlencode({"client_id": client_id(), "response_type": "code", "redirect_uri": self.redirect,
+                                        "code_challenge_method": "S256", "code_challenge": challenge,
+                                        "state": state, "scope": SCOPES})
+        return f"{AUTH_URL}?{query}"
+
+    def callback(self, query: dict) -> str:
+        """Spotify 登录完跳回来:换成登录资料。返回给浏览器看的话。"""
+        state = (query.get("state") or [""])[0]
+        verifier = self.pending.pop(state, None)
+        if verifier is None:
+            return "这个登录链接已经失效了,请回到星期五的齿轮设定重新点“登录 Spotify”。"
+        if query.get("error"):
+            return "没有登录(你按了取消,或者 Spotify 拒绝了)。"
+        code = (query.get("code") or [""])[0]
+        body = urllib.parse.urlencode({"grant_type": "authorization_code", "code": code, "redirect_uri": self.redirect,
+                                       "client_id": client_id(), "code_verifier": verifier}).encode()
+        status, data = self.request("POST", TOKEN_URL, {"Content-Type": "application/x-www-form-urlencoded"}, body)
+        if status != 200 or "access_token" not in data:
+            return "登录没成功:Spotify 没给登录资料。检查 Client ID 和 Redirect URI 有没有填对。"
+        self._store(data)
+        return "Spotify 连好了,可以关掉这个网页,回去跟星期五说“放一首歌”。"
+
+    def logout(self) -> str:
+        self.tokens = {}
+        try:
+            self.path.unlink()
+        except OSError:
+            pass
+        return "已经断开 Spotify。"
+
+    def _store(self, data: dict) -> None:
+        tokens = {"access_token": data["access_token"], "expires_at": self.clock() + int(data.get("expires_in", 3600)) - 60,
+                  "refresh_token": data.get("refresh_token") or self.tokens.get("refresh_token", "")}
+        self.tokens = tokens
+        temp = self.path.with_name(f"{self.path.name}.{threading.get_ident()}.tmp")
+        temp.write_text(json.dumps(tokens), encoding="utf-8")
+        os.replace(temp, self.path)
+
+    def _token(self) -> str:
+        if not self.connected:
+            raise SpotifyError("还没连 Spotify:齿轮设定 → 连接的应用 → 登录 Spotify")
+        with self.lock:
+            if self.clock() < self.tokens.get("expires_at", 0):
+                return self.tokens["access_token"]
+            body = urllib.parse.urlencode({"grant_type": "refresh_token", "refresh_token": self.tokens["refresh_token"],
+                                           "client_id": client_id()}).encode()
+            status, data = self.request("POST", TOKEN_URL, {"Content-Type": "application/x-www-form-urlencoded"}, body)
+            if status != 200 or "access_token" not in data:
+                raise SpotifyError("Spotify 登录过期了,到齿轮设定重新点“登录 Spotify”")
+            self._store(data)
+            return self.tokens["access_token"]
+
+    def api(self, method: str, path: str, params: dict | None = None, body: dict | None = None) -> tuple[int, dict]:
+        url = f"{API}{path}" + (f"?{urllib.parse.urlencode(params)}" if params else "")
+        headers = {"Authorization": f"Bearer {self._token()}"}
+        data = None
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+            data = json.dumps(body).encode()
+        elif method in ("PUT", "POST"):
+            data = b""
+        return self.request(method, url, headers, data)
+
+    # ---------- 播放 ----------
+    def _find(self, query: str, kind: str) -> dict | None:
+        status, data = self.api("GET", "/search", {"q": query, "type": kind, "limit": 5})
+        if status != 200:
+            raise SpotifyError("Spotify 搜索失败,等一下再试")
+        items = [i for i in (data.get(f"{kind}s") or {}).get("items") or [] if i]
+        return items[0] if items else None
+
+    def _my_playlist(self, name: str) -> dict | None:
+        status, data = self.api("GET", "/me/playlists", {"limit": 50})
+        if status != 200:
+            return None
+        want = name.lower().replace(" ", "")
+        items = [p for p in data.get("items") or [] if p]
+        exact = [p for p in items if p.get("name", "").lower().replace(" ", "") == want]
+        part = [p for p in items if want in p.get("name", "").lower().replace(" ", "")]
+        return (exact or part or [None])[0]
+
+    OK = (200, 202, 204)
+
+    def _pick_device(self) -> str | None:
+        """要在哪个设备放:正在用的那个;都没在用就用这台电脑上的 Spotify(不打开、不等)。"""
+        try:
+            status, data = self.api("GET", "/me/player/devices")
+        except SpotifyError:
+            return None
+        devices = [d for d in (data.get("devices") or []) if not d.get("is_restricted")] if status == 200 else []
+        active = [d for d in devices if d.get("is_active")]
+        computers = [d for d in devices if d.get("type") == "Computer"]
+        host = platform.node().lower()
+        named = [d for d in computers if str(d.get("name", "")).lower() == host]
+        pick = (active or named or computers or [None])[0]
+        return pick.get("id") if pick else None
+
+    def _play(self, body: dict, device: str | None) -> tuple[int, dict]:
+        return self.api("PUT", "/me/player/play", {"device_id": device} if device else None, body=body)
+
+    def _confirm(self, tries: int = 4) -> dict | None:
+        """Spotify 说“好”之后,看看是不是真的在放了。在放:播放状态;没在放:None;看不出来:{}。"""
+        for attempt in range(tries):
+            if attempt:
+                self.sleep(1.0)
+            try:
+                status, data = self.api("GET", "/me/player")
+            except SpotifyError:
+                return {}
+            if status == 200 and data.get("is_playing"):
+                return data
+            if status not in (200, 204):
+                return {}  # 查不到:就相信它
+        return None
+
+    def _started(self, body: dict, label: str, fallback_uri: str | None, device: str | None) -> str:
+        state = self._confirm()
+        tried: set[str] = set()
+        while state is None:
+            # 说好了却没放出来(常见:Spotify 刚打开,还没连上,命令跑去了别的设备):
+            # 等这台电脑的 Spotify 连上,把播放转过去再放,多等一会儿看看
+            target = device if device and device not in tried else self._device(prefer_computer=True)
+            if not target or target in tried:
+                break
+            tried.add(target)
+            self.api("PUT", "/me/player", body={"device_ids": [target], "play": False})
+            self.sleep(1.5)
+            status, data = self._play(body, target)
+            print(f"Spotify 重放{label}:设备 {target[:6]}… HTTP {status} {self._reason(data)}", flush=True)
+            state = self._confirm(tries=8) if status in self.OK else None
+        if state is None:
+            print(f"Spotify 说开始放{label}了,可是没有真的放出来", flush=True)
+            if fallback_uri:
+                self.open_uri(fallback_uri)
+                return (f"Spotify 说好了,可是没有真的放出来。我把{label}在 Spotify 里打开了,点一下播放;"
+                        f"放过一次之后我就能直接控制。")
+            return "Spotify 说好了,可是没有真的放出来。打开 Spotify 点一下播放试试。"
+        where = state.get("device") or {}
+        elsewhere = f"(在“{where['name']}”上放)" if where.get("name") and where.get("type") != "Computer" else ""
+        return f"好,放{label}{elsewhere}。"
+
+    def _start(self, body: dict, label: str, fallback_uri: str | None) -> str:
+        device = self._pick_device()
+        status, data = self._play(body, device)
+        if status in self.OK:
+            return self._started(body, label, fallback_uri, device)
+        reason = self._reason(data)
+        if status == 404 or reason == "NO_ACTIVE_DEVICE":
+            # 电脑上的 Spotify 刚打开、还没放过歌时,Spotify 当它“没在用”:
+            # 等它连上服务器,先把播放转到这台电脑,再放(刚转过去时偶尔要再试一两次)
+            device = self._device()
+            if device:
+                self.api("PUT", "/me/player", body={"device_ids": [device], "play": False})
+                for attempt in range(3):
+                    self.sleep(1.0 + attempt)
+                    status, data = self._play(body, device)
+                    reason = self._reason(data)
+                    if status in self.OK:
+                        return self._started(body, label, fallback_uri, device)
+                    if status == 403 or reason == "PREMIUM_REQUIRED":
+                        break
+        if status == 403 or reason == "PREMIUM_REQUIRED":
+            if fallback_uri:
+                self.open_uri(fallback_uri)
+                return f"已经在 Spotify 里打开{label}。免费账号 Spotify 不让程序直接播放,点一下播放就好。"
+            return "Spotify 只让 Premium 账号用程序直接播放。"
+        if fallback_uri:
+            self.open_uri(fallback_uri)
+            return (f"电脑上的 Spotify 还没连上(刚打开的 Spotify 要先放过一次歌才算“在用”),"
+                    f"我把{label}在 Spotify 里打开了,点一下播放;之后我就能直接控制。")
+        return "Spotify 没有在用的播放设备,先打开 Spotify 放一下歌,再跟我说一次。"
+
+    @staticmethod
+    def _reason(data: dict) -> str:
+        error = data.get("error") if isinstance(data, dict) else None
+        return error.get("reason", "") if isinstance(error, dict) else ""
+
+    def _device(self, wait: float = 20.0, prefer_computer: bool = False) -> str | None:
+        """找这台电脑上的 Spotify;没开就打开它,最多等 20 秒让它连上 Spotify。"""
+        opened = False
+        waited = 0.0
+        while True:
+            status, data = self.api("GET", "/me/player/devices")
+            devices = (data.get("devices") or []) if status == 200 else []
+            devices = [d for d in devices if not d.get("is_restricted")]
+            if devices:
+                active = [d for d in devices if d.get("is_active")]
+                computers = [d for d in devices if d.get("type") == "Computer"]
+                pick = (computers or active or devices) if prefer_computer else (active or computers or devices)
+                return pick[0].get("id")
+            if not opened:
+                try:
+                    self.open_uri("spotify:")  # 打开电脑上的 Spotify
+                except OSError:
+                    return None
+                opened = True
+            if waited >= wait:
+                return None
+            self.sleep(2.0)
+            waited += 2.0
+
+    def play(self, query: str) -> str:
+        query = query.strip()
+        if not query:
+            raise SpotifyError("要放什么?")
+        if query in ("我喜欢的歌", "喜欢的歌", "我收藏的歌", "收藏的歌", "我喜欢的音乐"):
+            status, data = self.api("GET", "/me/tracks", {"limit": 50})
+            uris = [i["track"]["uri"] for i in data.get("items") or [] if i.get("track")] if status == 200 else []
+            if not uris:
+                return "你在 Spotify 还没有喜欢的歌。"
+            return self._start({"uris": uris}, "你喜欢的歌", "spotify:collection:tracks")
+        if query.startswith(("歌单", "我的歌单", "播放列表")):
+            name = query.split("歌单", 1)[-1].replace("播放列表", "").strip()
+            playlist = self._my_playlist(name) or (self._find(name, "playlist") if name else None)
+            if playlist is None:
+                return f"没找到叫“{name}”的歌单。"
+            return self._start({"context_uri": playlist["uri"]}, f"歌单《{playlist.get('name', name)}》", playlist["uri"])
+        track = self._find(query, "track")
+        if track is None:
+            return f"Spotify 上没找到“{query}”。"
+        artists = "、".join(a.get("name", "") for a in track.get("artists") or [])
+        album = (track.get("album") or {}).get("uri")
+        # 连同整张专辑一起放、从这首开始:只给一首歌的话,说“下一首”时队列是空的,Spotify 会卡住(按钮全变灰)
+        body = ({"context_uri": album, "offset": {"uri": track["uri"]}} if album
+                else {"uris": [track["uri"]]})
+        return self._start(body, f"{artists}的《{track.get('name', query)}》", track["uri"])
+
+    def media(self, action: str) -> str | None:
+        """切歌、暂停、继续:Spotify 在放、或者最近才停(30 分钟内)时直接叫 Spotify 做,不按媒体键,别的程序抢不走。
+
+        不是 Spotify 就返回 None(照旧按媒体键)。一旦叫了 Spotify,就算出错也不再按媒体键(免得做两次)。
+        action:next_track / previous_track / play_pause。
+        """
+        if not self.connected:
+            return None
+        try:
+            status, data = self.api("GET", "/me/player")
+        except Exception as e:  # noqa: BLE001
+            print(f"Spotify 查播放状态出错,改按媒体键:{type(e).__name__}: {e}", flush=True)
+            return None
+        if status != 200 or not data:
+            print(f"Spotify 没有在用的设备(HTTP {status}),改按媒体键", flush=True)
+            return None  # Spotify 没有在用的设备
+        playing = bool(data.get("is_playing"))
+        now = self.clock()
+        paused_by_me = bool(self.paused_at) and now - self.paused_at < 2 * 3600
+        changed = data.get("timestamp")  # Spotify 最后一次播放、暂停、切歌的时间(毫秒)
+        recent = isinstance(changed, (int, float)) and changed > 0 and now - changed / 1000 < 30 * 60
+        if not playing and not paused_by_me and not recent:
+            return None  # Spotify 很久没动了,多半是在用别的程序放:交给媒体键
+        try:
+            if action in ("next_track", "previous_track"):
+                path = "/me/player/next" if action == "next_track" else "/me/player/previous"
+                status, data = self.api("POST", path)
+                text = "Spotify 已切到" + ("下一首" if action == "next_track" else "上一首")
+                if status in (200, 202, 204) and not playing:  # 停着的时候说“下一首”:切过去顺便接着放
+                    self.api("PUT", "/me/player/play")
+                    self.paused_at = 0.0
+                    text += ",接着放了"
+                text += "。"
+            elif action == "play_pause" and playing:
+                status, data = self.api("PUT", "/me/player/pause")
+                self.paused_at = now
+                text = "Spotify 已暂停。"
+            elif action == "play_pause":
+                status, data = self.api("PUT", "/me/player/play")
+                self.paused_at = 0.0
+                text = "Spotify 继续播放。"
+            else:
+                return None
+        except Exception as e:  # noqa: BLE001
+            print(f"Spotify {action} 出错:{type(e).__name__}: {e}", flush=True)
+            return "Spotify 好像没反应,再说一次试试。"
+        if status in (200, 202, 204):
+            return text
+        print(f"Spotify {action} 没成功:HTTP {status} {self._reason(data)}", flush=True)
+        if status == 403:
+            return "Spotify 不让做这一步(可能已经是这个状态了)。"
+        return "Spotify 好像没反应,再说一次试试。"
+
+    def control(self, action: str) -> str:
+        """Claude 叫的切歌、暂停、继续(不管 Spotify 现在在不在放,都直接叫 Spotify)。"""
+        calls = {"next": ("POST", "/me/player/next", "已切到下一首。"),
+                 "previous": ("POST", "/me/player/previous", "已切到上一首。"),
+                 "pause": ("PUT", "/me/player/pause", "已暂停。"),
+                 "resume": ("PUT", "/me/player/play", "继续播放。")}
+        method, path, text = calls[action]
+        status, data = self.api(method, path)
+        if status in (200, 202, 204):
+            if action == "pause":
+                self.paused_at = self.clock()
+            return "Spotify " + text
+        if status == 404 or self._reason(data) == "NO_ACTIVE_DEVICE":
+            raise SpotifyError("Spotify 现在没有在用的播放设备(先放一首歌)")
+        if status == 403:
+            raise SpotifyError("Spotify 不让做这一步(可能已经是暂停/播放状态,或者不是 Premium)")
+        raise SpotifyError("Spotify 没有回应,等一下再试")
+
+    def now_playing(self) -> str:
+        status, data = self.api("GET", "/me/player/currently-playing")
+        if status == 204 or not data or not data.get("item"):
+            return "Spotify 现在没有在放歌。"
+        item = data["item"]
+        artists = "、".join(a.get("name", "") for a in item.get("artists") or [])
+        state = "正在放" if data.get("is_playing") else "暂停在"
+        return f"{state}:{artists}《{item.get('name', '')}》。"
