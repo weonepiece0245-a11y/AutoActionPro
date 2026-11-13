@@ -3648,13 +3648,13 @@ def start_energy(session, toolbox: Toolbox, data_dir: str, interval: float = 15 
     session.energy = meter
     quick = getattr(session, "quick", None)
     if quick is not None:
-        quick.extra.append(friday_energy.Commands(meter))
+        quick.extra.append(friday_energy.Commands(meter, lambda period: report(period)))
 
-    def sample() -> None:
+    def sample(force: bool = False) -> None:
         home = getattr(toolbox, "home", None)
         if home is None:
             return
-        devices = [d for d in home.refresh() if d.get("energy")]
+        devices = [d for d in home.refresh(force=force) if d.get("energy")]
         if not devices or home.backend is None:
             return
         readings = {}
@@ -3668,6 +3668,25 @@ def start_energy(session, toolbox: Toolbox, data_dir: str, interval: float = 15 
         weekly = meter.weekly()
         if weekly:
             announce(session, weekly, "⚡", "每周用电报告在窗口里")
+
+    def report(period: str = "") -> str:
+        """问用电时:还没资料先去读一次;读不到就说清楚为什么。"""
+        if not meter.data["now"]:
+            _quietly(lambda: sample(force=True))
+        if meter.data["now"]:
+            return meter.describe(period)
+        home = getattr(toolbox, "home", None)
+        if home is None:
+            return "还没连上 Tapo:在 齿轮设定 → 连接的应用 填 Tapo 账号,我才读得到插座的用电。"
+        try:
+            devices = home.refresh()
+        except ValueError as e:
+            return str(e)
+        return friday_energy.explain_missing(devices)
+
+    session.energy_report = report
+    toolbox.energy_report = report
+    toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
 
     def loop() -> None:
         time.sleep(first_wait)

@@ -21,8 +21,11 @@ STANDBY_MIN_W, STANDBY_MAX_W = 1.0, 30.0
 NIGHT_HOURS = range(1, 6)
 STANDBY_REMIND_DAYS = 7
 
-ASK = re.compile(r"^(星期五)?[,，\s]*(家里)?(今天|这周|这个星期|本周|这个月|本月|最近)?(的)?(用电|用了多少电|用了几度电|电费|耗电)"
-                 r"(多少|情况|怎么样|报告|统计)?[?？]?$|^(星期五)?[,，\s]*(哪个|什么)(电器|插座|东西)?(最耗电|最费电|用电最多)[?？]?$")
+PERIOD = r"(?P<p>今天|这周|这个星期|本周|这个月|本月|最近|这星期)"
+ASK = re.compile(r"^(星期五)?[,，\s]*(帮我)?(看看|看一下|查一下|查查|看下|查下)?(我|我们)?(家里|家|插座|tapo|Tapo|TAPO)?(的)?" + PERIOD + r"?(的)?"
+                 r"(用电|用电量|用了多少电|用了多少度电|用了几度电|用了多少度|用多少电|电费|耗电|多少度电)"
+                 r"(是)?(情况|报告|统计)?(多少|几多|怎么样|如何)?(钱)?(啊|呢|了)?[?？]?$"
+                 r"|^(星期五)?[,，\s]*(家里)?(哪个|什么)(电器|插座|东西)?(最耗电|最费电|用电最多|最吃电)[?？]?$")
 
 
 def rate() -> float:
@@ -177,11 +180,22 @@ class EnergyMeter:
 
 
 class Commands:
-    def __init__(self, meter: EnergyMeter) -> None:
+    def __init__(self, meter: EnergyMeter, report: Callable[[str], str] | None = None) -> None:
         self.meter = meter
+        self.report = report or meter.describe  # report:还没资料时先去读一次插座、说清楚为什么读不到
 
     def handle(self, text: str) -> str | None:
-        found = ASK.match(str(text or "").strip())
+        found = ASK.match(re.sub(r"\s+", "", str(text or "")))
         if not found:
             return None
-        return self.meter.describe(found.group(3) or "")
+        return self.report(found.group("p") or "")
+
+
+def explain_missing(devices: list[dict]) -> str:
+    """读不到用电时说清楚原因。"""
+    if not devices:
+        return "没找到家里的 Tapo 设备(电脑和设备要连同一个 Wi-Fi),所以读不到用电。"
+    names = "、".join(d["name"] for d in devices[:8])
+    return (f"家里的 Tapo 设备({names})都不是会计电的型号,读不到用电量。"
+            "会计电的是 P110、P115、P110M 这类插座:在 Tapo App 里点进插座,有“能耗 / Energy”那一页的就是。"
+            "换成这种插座后,我会每 15 分钟记一次,告诉你每个用了多少度电、大概多少钱。")

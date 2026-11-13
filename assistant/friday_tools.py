@@ -1052,6 +1052,20 @@ UNATTENDED_REFUSAL = (
 SERVER_TOOL_LABELS = {"web_search": ("搜索", "query"), "web_fetch": ("读取网页", "url")}
 
 
+HOME_ENERGY_TOOL = {
+    "name": "home_energy",
+    "description": (
+        "家里用电:会计电的 Tapo 插座(P110、P115 这类)每个用了几度电、大概多少钱(按设定的每度电费估算)、现在几瓦、哪个最耗电。"
+        "老板问用电、电费、哪个电器最耗电时用这个(smart_home 只能开关,读不到用电)。"
+        "插座不是会计电的型号时,这个工具会说清楚是哪几个、为什么读不到;全家总用电要看 TNB 电单或 myTNB。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"period": {"type": "string", "enum": ["today", "week", "month"], "description": "默认 month"}},
+        "required": [],
+    },
+}
+
 PC_STARTUP_TOOL = {
     "name": "pc_startup",
     "description": (
@@ -1207,6 +1221,7 @@ class Toolbox:
         self.subscriptions = None  # 订阅管家(friday_subscriptions.Subscriptions)
         self.subscription_scan = None  # () -> 话:去邮箱找订阅(在后台)
         self.startup_doctor = None  # 开机变慢优化(friday_startup.StartupDoctor)
+        self.energy_report = None  # 家里用电:(today / week / month) -> 话
         self.weather_fetch = None  # 测试时换成假的天气服务
         self._handlers = {
             "remember": self._remember,
@@ -1268,6 +1283,7 @@ class Toolbox:
             "library": self._library,
             "subscriptions": self._subscriptions,
             "pc_startup": self._pc_startup,
+            "home_energy": self._home_energy,
         }
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
 
@@ -1367,6 +1383,8 @@ class Toolbox:
             tools = tools + [SUBSCRIPTIONS_TOOL]
         if self.startup_doctor is not None and self.local_tools:
             tools = tools + [PC_STARTUP_TOOL]
+        if self.energy_report is not None:
+            tools = tools + [HOME_ENERGY_TOOL]
         return tools
 
     def begin_turn(self) -> None:
@@ -2077,6 +2095,13 @@ class Toolbox:
         except Exception as e:
             return f"网站暂时打不开:{type(e).__name__}: {e}", True
         return f"不支持的 action:{action}", True
+
+    def _home_energy(self, args, on_status):
+        if self.energy_report is None:
+            return "用电统计没有开", True
+        period = {"today": "今天", "week": "这周", "month": "这个月"}.get(str(args.get("period") or "month"), "这个月")
+        on_status("读插座的用电")
+        return self.energy_report(period), False
 
     def _pc_startup(self, args, on_status):
         doctor = self.startup_doctor

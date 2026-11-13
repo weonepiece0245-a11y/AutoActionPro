@@ -12569,6 +12569,46 @@ class EnergyTest(TempDirTest):
         self.assertIn("比上星期多了 50%", text)
         self.assertIsNone(meter.weekly())
 
+    def test_phrases_and_explain(self):
+        asked = []
+        commands = friday_energy.Commands(None, lambda period: asked.append(period) or "报告")
+        for text in ("这个月用电多少", "家里用了多少电", "我这个月用了多少电", "Tapo 用电量", "用电情况怎么样",
+                     "家里电费多少钱", "今天用了多少度电", "家里哪个最耗电"):
+            self.assertEqual(commands.handle(text), "报告", text)
+        self.assertEqual(asked[:3], ["这个月", "", "这个月"])
+        self.assertIsNone(commands.handle("电脑好卡"))
+        text = friday_energy.explain_missing([{"name": "客厅插座"}, {"name": "卧室灯"}])
+        self.assertIn("客厅插座、卧室灯)都不是会计电的型号", text)
+        self.assertIn("P110", text)
+        self.assertIn("同一个 Wi-Fi", friday_energy.explain_missing([]))
+
+    def test_report_reads_now_and_tool(self):
+        class Backend:
+            def energy(self, key):
+                return {"power": 50, "today": 0.4, "month": 6.0, "on": True}
+        devices = [{"id": "a", "name": "电脑插座", "energy": True}, {"id": "b", "name": "台灯", "energy": False}]
+        home = SimpleNamespace(backend=Backend(), refresh=lambda force=False: devices)
+        toolbox = self.make_toolbox()
+        toolbox.home = home
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.quick = friday_quick.QuickCommands(toolbox)
+        with mock.patch.object(app.threading, "Thread", lambda **kw: SimpleNamespace(start=lambda: None)):
+            app.start_energy(session, toolbox, self.tmp)
+        out = toolbox.run(SimpleNamespace(id="e", name="home_energy", input={"period": "month"}), lambda s: None)
+        self.assertIn("电脑插座:6.0 度", out["content"])  # 还没资料:问的时候马上读一次
+        self.assertIn("电脑插座", session.quick.handle("这个月用了多少电"))
+        devices[0]["energy"] = False
+        other = self.make_toolbox()
+        other.home = SimpleNamespace(backend=Backend(), refresh=lambda force=False: devices)
+        tmp2 = os.path.join(self.tmp, "b")
+        os.makedirs(tmp2)
+        session2 = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        with mock.patch.object(app.threading, "Thread", lambda **kw: SimpleNamespace(start=lambda: None)):
+            app.start_energy(session2, other, tmp2)
+        self.assertIn("都不是会计电的型号", session2.energy_report(""))
+        other.home = None
+        self.assertIn("还没连上 Tapo", session2.energy_report(""))
+
     def test_settings_rate(self):
         session = app.WebSession(None, app.default_persona(), friday_web.Hub())
         env = os.path.join(self.tmp, ".env8")
