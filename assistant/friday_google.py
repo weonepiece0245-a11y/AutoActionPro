@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from email.message import EmailMessage
 from pathlib import Path
@@ -67,7 +68,7 @@ class GoogleAccount:
         self.credentials_file = Path(credentials_file)
         self.token_file = Path(token_file)
         self.login_file = self.token_file.with_name("google_login.json")  # 记下登录时间,算还剩几天
-        self._services: dict = {}
+        self._services: dict = {}  # {(线程, 名字): API 客户端}:每个线程用自己的连接(共用会把加密连接弄乱)
         self.expired = False  # 刷新授权失败过(过期或被撤销)
         self.clock = time.time
 
@@ -175,7 +176,13 @@ class GoogleAccount:
         self.token_file.write_text(creds.to_json(), encoding="utf-8")
 
     def service(self, name: str):
-        if name not in self._services:
+        """API 客户端。Google 用的连接库不能几个线程同时用(会出 SSL record layer failure 这类错),
+        所以每个线程各建一个;结束了的线程的顺手丢掉。"""
+        key = (threading.get_ident(), name)
+        if key not in self._services:
+            alive = {t.ident for t in threading.enumerate()}
+            for old in [k for k in list(self._services) if isinstance(k, tuple) and k[0] not in alive]:
+                self._services.pop(old, None)
             granted = self.granted_scopes()
             if granted is not None and not all(s in granted for s in SERVICE_SCOPES[name]):
                 raise GoogleNotReady(
@@ -185,10 +192,14 @@ class GoogleAccount:
                 from googleapiclient.discovery import build
             except ImportError as e:
                 raise GoogleNotReady(INSTALL_HINT) from e
-            self._services[name] = build(
+            self._services[key] = build(
                 name, SERVICE_VERSIONS[name], credentials=self.credentials(), cache_discovery=False
             )
-        return self._services[name]
+        return self._services[key]
+
+    def reset_connection(self, name: str) -> None:
+        """这个线程的连接坏了(断线、SSL 出错):丢掉,下次重新建。"""
+        self._services.pop((threading.get_ident(), name), None)
 
 
 # ======================== 时间 ========================
@@ -717,17 +728,26 @@ class GoogleTools(_MoreGoogleTools):
 
     def mail_headers(self, query: str, limit: int = 150) -> list[dict]:
         """只拿寄件人、主题、日期和一小段预览(订阅管家用),不拿正文。"""
-        api = self._gmail().users().messages()
+        def retry(make):  # 连线偶尔断一下(SSL、网络):换一条新连接再试,最多 3 次
+            for attempt in range(3):
+                try:
+                    return make(self._gmail().users().messages()).execute()
+                except OSError:  # ssl.SSLError、断线都是 OSError
+                    if attempt == 2:
+                        raise
+                    self.account.reset_connection("gmail")
+                    time.sleep(1 + attempt * 2)
+
         ids, token = [], None
         while len(ids) < limit:
-            response = api.list(userId="me", q=query, maxResults=min(100, limit - len(ids)), pageToken=token).execute()
+            response = retry(lambda api: api.list(userId="me", q=query, maxResults=min(100, limit - len(ids)), pageToken=token))
             ids += response.get("messages", [])
             token = response.get("nextPageToken")
             if not token:
                 break
         found = []
         for item in ids[:limit]:
-            msg = api.get(userId="me", id=item["id"], format="metadata", metadataHeaders=["From", "Subject", "Date"]).execute()
+            msg = retry(lambda api: api.get(userId="me", id=item["id"], format="metadata", metadataHeaders=["From", "Subject", "Date"]))
             found.append({"from": _header(msg, "From"), "subject": _header(msg, "Subject"), "date": _header(msg, "Date"),
                           "snippet": html.unescape(msg.get("snippet", ""))})
         return found

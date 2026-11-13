@@ -12025,6 +12025,57 @@ class SubscriptionsTest(TempDirTest):
         found = tools_obj.mail_headers("q", limit=5)
         self.assertEqual(found[0], {"from": "Netflix", "subject": "Receipt", "date": "1 Nov", "snippet": "RM55 & more"})
 
+    def test_mail_headers_retries_ssl_errors(self):
+        import ssl
+        import friday_google
+
+        failures = [ssl.SSLError("[SSL: RECORD_LAYER_FAILURE] record layer failure")]
+        resets = []
+
+        class Api:
+            def list(self, **kw):
+                return SimpleNamespace(execute=lambda: {"messages": [{"id": "a"}]})
+
+            def get(self, **kw):
+                def run():
+                    if failures:
+                        raise failures.pop()
+                    return {"snippet": "", "payload": {"headers": [{"name": "Subject", "value": "Receipt"}]}}
+                return SimpleNamespace(execute=run)
+        tools_obj = friday_google.GoogleTools.__new__(friday_google.GoogleTools)
+        tools_obj._gmail = lambda: SimpleNamespace(users=lambda: SimpleNamespace(messages=lambda: Api()))
+        tools_obj.account = SimpleNamespace(reset_connection=lambda name: resets.append(name))
+        with mock.patch.object(friday_google.time, "sleep", lambda s: None):
+            found = tools_obj.mail_headers("q")
+        self.assertEqual(found[0]["subject"], "Receipt")
+        self.assertEqual(resets, ["gmail"])
+
+    def test_google_connection_per_thread(self):
+        import friday_google
+
+        built = []
+        discovery = types.ModuleType("googleapiclient.discovery")
+        discovery.build = lambda *a, **kw: built.append(threading.get_ident()) or object()
+        package = types.ModuleType("googleapiclient")
+        account = friday_google.GoogleAccount(os.path.join(self.tmp, "c.json"), os.path.join(self.tmp, "t.json"))
+        account.granted_scopes = lambda: None
+        account.credentials = lambda: None
+        with mock.patch.dict(sys.modules, {"googleapiclient": package, "googleapiclient.discovery": discovery}):
+            mine = account.service("gmail")
+            self.assertIs(account.service("gmail"), mine)  # 同一个线程:同一条连接
+            other = []
+            t = threading.Thread(target=lambda: other.append(account.service("gmail")))
+            t.start()
+            t.join()
+            self.assertIsNot(other[0], mine)  # 别的线程:自己的连接
+            self.assertEqual(len(built), 2)
+            account.service("calendar")  # 那个线程结束了:它的连接丢掉
+            self.assertEqual(len([k for k in account._services if k[1] == "gmail"]), 1)
+            account.reset_connection("gmail")
+            self.assertIsNot(account.service("gmail"), mine)
+            account._services.clear()  # 重新登录时清空:所有线程都重建
+            self.assertEqual(account._services, {})
+
 
 import friday_startup  # noqa: E402
 

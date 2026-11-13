@@ -3539,7 +3539,8 @@ def start_subscriptions(session, toolbox: Toolbox, data_dir: str, interval: floa
                 announce(session, text, "💳", "订阅整理好了,在窗口里")
         except Exception as e:  # noqa: BLE001
             if not quiet:
-                session.hub.broadcast({"type": "reminder", "text": f"💳 去邮箱找订阅没成功:{str(e)[:120] or type(e).__name__}"})
+                why = "和 Google 的连线断了一下" if isinstance(e, OSError) else (str(e)[:120] or type(e).__name__)
+                session.hub.broadcast({"type": "reminder", "text": f"💳 去邮箱找订阅没成功:{why}。过一下再按一次“去邮箱找”试试。"})
         finally:
             subs.scanning = False
 
