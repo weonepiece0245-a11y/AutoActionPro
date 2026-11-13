@@ -313,6 +313,14 @@
       <div class="set-row"><span></span><button type="button" class="mini-btn" id="sceneAdd">+ 新场景</button></div>
     </div>
 
+    <div class="set-group" id="energyGroup" hidden data-cat="life">
+      <h3>家里用电</h3>
+      <div class="set-row"><span class="set-note" id="energyNote"></span>
+        <span class="set-ctl"><label for="electricRate" class="set-note">每度电 RM</label><input class="mini-input short" id="electricRate" inputmode="decimal"><button type="button" class="mini-btn" id="electricRateSave">保存</button></span></div>
+      <div id="energyList"></div>
+      <div class="set-note">只有会计电的 Tapo 插座(例如 P110、P115)才读得到;每 15 分钟读一次,不花钱。电费只是估算(默认每度 RM0.45,大约是 TNB 住宅电费含各种收费的平均),照你的电单改会更准。半夜一直待机耗电的会提醒你;星期天晚上有每周报告。也可以问“这个月用了多少电”“哪个最耗电”。</div>
+    </div>
+
     <div class="set-group" id="planGroup" hidden data-cat="life">
       <h3>待办排进日历</h3>
       <div class="set-row"><label for="planHours">只排在这个时段(一天最多 3 件)</label>

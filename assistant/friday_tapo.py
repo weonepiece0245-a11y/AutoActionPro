@@ -105,7 +105,36 @@ class KasaBackend:
                 pass
         return {"id": key, "name": str(getattr(dev, "alias", "") or key), "on": bool(getattr(dev, "is_on", False)),
                 "kind": "light" if light is not None else "plug", "brightness": brightness, "hsv": hsv,
-                "color_temp": color_temp}
+                "color_temp": color_temp, "energy": self._energy(dev) is not None}
+
+    @staticmethod
+    def _energy(dev):
+        """会计电的插座(P110、P115……)才有。"""
+        try:
+            from kasa import Module
+
+            return dev.modules.get(Module.Energy)
+        except Exception:
+            return None
+
+    def energy(self, key: str) -> dict | None:
+        """现在用多少瓦、今天和这个月用了几度电;不会计电的返回 None。"""
+        dev = self.handles[key]
+
+        async def read():
+            try:
+                await dev.update()
+            except Exception:
+                pass
+            module = self._energy(dev)
+            if module is None:
+                return None
+            return {"power": float(getattr(module, "current_consumption", 0) or 0),
+                    "today": float(getattr(module, "consumption_today", 0) or 0),
+                    "month": float(getattr(module, "consumption_this_month", 0) or 0),
+                    "on": bool(getattr(dev, "is_on", False))}
+
+        return self._run(read())
 
     def set_on(self, key: str, on: bool) -> None:
         dev = self.handles[key]

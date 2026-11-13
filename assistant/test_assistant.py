@@ -12514,5 +12514,91 @@ class PlannerTest(TempDirTest):
         self.assertIn("安排这周", app.apply_settings({"plan_propose": "这周"}, session, None, env)["message"])
         self.assertIn("放进日历了", app.apply_settings({"plan_apply": True}, session, None, env)["message"])
 
+
+import friday_energy  # noqa: E402
+
+
+class EnergyTest(TempDirTest):
+    def make(self, when):
+        now = [when]
+        return friday_energy.EnergyMeter(os.path.join(self.tmp, "e.json"), clock=lambda: now[0]), now
+
+    def test_record_and_describe(self):
+        meter, now = self.make(datetime.datetime(2026, 11, 13, 20, 0))
+        with mock.patch.dict(os.environ, {"FRIDAY_ELECTRIC_RATE": "0.5"}):
+            meter.record({"冰箱": {"power": 85, "today": 1.2, "month": 15.0, "on": True},
+                          "电脑": {"power": 320, "today": 2.4, "month": 30.5, "on": True}, "坏的": None})
+            meter.record({"冰箱": {"power": 80, "today": 1.1, "month": 15.0, "on": True}})  # 读数偶尔小一点:留最大的
+            text = meter.describe("今天")
+            self.assertIn("今天插座一共用了 3.6 度电,约 RM1.80", text)
+            self.assertTrue(text.index("电脑") < text.index("冰箱"))
+            self.assertIn("现在在用电的:冰箱 80 瓦、电脑 320 瓦", text)
+            self.assertIn("这个月插座一共用了 45.5 度电", meter.describe())  # 用插座自己记的这个月
+            self.assertIn("最耗电的是 电脑", friday_energy.Commands(meter).handle("哪个最耗电"))
+            self.assertIn("今天插座", friday_energy.Commands(meter).handle("今天用了多少电"))
+            self.assertIsNone(friday_energy.Commands(meter).handle("电脑好卡"))
+            state = meter.state()
+            self.assertEqual(state["devices"][0]["name"], "电脑")
+            self.assertEqual(state["month_cost"], 22.75)
+        again, _ = self.make(datetime.datetime(2026, 11, 13, 21, 0))
+        self.assertEqual(again.data["days"]["2026-11-13"]["冰箱"], 1.2)
+
+    def test_standby_warning(self):
+        meter, now = self.make(datetime.datetime(2026, 11, 14, 1, 0))
+        for minute in range(0, 300, 15):
+            now[0] = datetime.datetime(2026, 11, 14, 1, 0) + datetime.timedelta(minutes=minute)
+            self.assertEqual(meter.record({"电视": {"power": 9, "today": 0.1, "month": 3, "on": True},
+                                           "路由器": {"power": 0.3, "today": 0, "month": 0, "on": True}}), [])
+        now[0] = datetime.datetime(2026, 11, 14, 6, 5)
+        notes = meter.record({"电视": {"power": 9, "today": 0.2, "month": 3, "on": True}})
+        self.assertEqual(len(notes), 1)
+        self.assertIn("电视 半夜一直在待机用电(大约 9 瓦)", notes[0])
+        now[0] = datetime.datetime(2026, 11, 14, 6, 20)
+        self.assertEqual(meter.record({"电视": {"power": 9, "today": 0.2, "month": 3, "on": True}}), [])  # 一星期说一次
+
+    def test_weekly(self):
+        meter, now = self.make(datetime.datetime(2026, 11, 8, 12, 0))
+        for day in range(2, 16):
+            meter.data["days"][f"2026-11-{day:02d}"] = {"冷气": 3.0 if day > 8 else 2.0}
+        meter.data["now"]["冷气"] = {"power": 0, "month": 0}
+        now[0] = datetime.datetime(2026, 11, 15, 19, 0)
+        self.assertIsNone(meter.weekly())  # 星期天 8 点前不说
+        now[0] = datetime.datetime(2026, 11, 15, 20, 30)
+        text = meter.weekly()
+        self.assertIn("这星期插座一共用了 21.0 度电", text)
+        self.assertIn("比上星期多了 50%", text)
+        self.assertIsNone(meter.weekly())
+
+    def test_settings_rate(self):
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        env = os.path.join(self.tmp, ".env8")
+        Path(env).write_text("", encoding="utf-8")
+        with mock.patch.dict(os.environ, {}):
+            self.assertIn("error", app.apply_settings({"electric_rate": "abc"}, session, None, env))
+            self.assertIn("error", app.apply_settings({"electric_rate": 9}, session, None, env))
+            app.apply_settings({"electric_rate": "0.52"}, session, None, env)
+            self.assertEqual(friday_energy.rate(), 0.52)
+
+    def test_kasa_energy_reading(self):
+        import friday_tapo
+
+        class Energy:
+            current_consumption, consumption_today, consumption_this_month = 12.5, 0.8, 9.1
+        kasa = types.ModuleType("kasa")
+        kasa.Module = SimpleNamespace(Energy="Energy", Light="Light")
+
+        class Dev:
+            is_on = True
+            modules = {"Energy": Energy()}
+
+            async def update(self):
+                pass
+        backend = friday_tapo.KasaBackend.__new__(friday_tapo.KasaBackend)
+        backend.handles = {"1.2.3.4": Dev()}
+        backend._run = lambda coro, timeout=25: asyncio.run(coro)
+        with mock.patch.dict(sys.modules, {"kasa": kasa}):
+            self.assertEqual(backend.energy("1.2.3.4"), {"power": 12.5, "today": 0.8, "month": 9.1, "on": True})
+            self.assertTrue(backend._info("1.2.3.4", Dev())["energy"])
+
 if __name__ == "__main__":
     unittest.main()

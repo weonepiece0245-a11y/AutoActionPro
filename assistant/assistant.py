@@ -2331,6 +2331,7 @@ def settings_state(session, meter=None) -> dict:
                      if getattr(session, "receipts", None) is not None else None),
         "parcels": session.parcels.state() if getattr(session, "parcels", None) is not None else None,
         "planner": session.planner.state() if getattr(session, "planner", None) is not None else None,
+        "energy": session.energy.state() if getattr(session, "energy", None) is not None else None,
         "scenes": scenes_state(session),
         "cleanup": getattr(session, "cleanup_items", None) if os.name == "nt" or getattr(session, "cleanup_items", None) else None,
         "weekly_report": __import__("friday_alerts").weekly_enabled(),
@@ -2682,6 +2683,16 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
             save_env_value(env, key, "on" if on else "off")
             os.environ[key] = "on" if on else "off"
             done.append(on_text if on else off_text)
+    if "electric_rate" in payload:
+        try:
+            value = round(float(payload["electric_rate"]), 3)
+        except (TypeError, ValueError):
+            return {"error": "电费要是数字,例如 0.45"}
+        if not 0.05 <= value <= 3:
+            return {"error": "每度电要在 RM0.05 到 RM3 之间"}
+        save_env_value(env, "FRIDAY_ELECTRIC_RATE", str(value))
+        os.environ["FRIDAY_ELECTRIC_RATE"] = str(value)
+        done.append(f"电费改成每度 RM{value:.2f}")
     planner = getattr(session, "planner", None)
     if any(k in payload for k in ("plan_propose", "plan_apply", "plan_cancel", "plan_hours")):
         if planner is None:
@@ -3627,6 +3638,45 @@ def start_subscriptions(session, toolbox: Toolbox, data_dir: str, interval: floa
         quick.extra.append(friday_subscriptions.Commands(subs, scan_soon))
     threading.Thread(target=loop, daemon=True, name="friday-subscriptions").start()
     return subs
+
+
+def start_energy(session, toolbox: Toolbox, data_dir: str, interval: float = 15 * 60, first_wait: float = 120):
+    """家里用电统计:每 15 分钟读会计电的 Tapo 插座;半夜待机耗电提醒、星期天晚上每周报告。"""
+    import friday_energy
+
+    meter = friday_energy.EnergyMeter(os.path.join(data_dir, "friday_energy.json"))
+    session.energy = meter
+    quick = getattr(session, "quick", None)
+    if quick is not None:
+        quick.extra.append(friday_energy.Commands(meter))
+
+    def sample() -> None:
+        home = getattr(toolbox, "home", None)
+        if home is None:
+            return
+        devices = [d for d in home.refresh() if d.get("energy")]
+        if not devices or home.backend is None:
+            return
+        readings = {}
+        for device in devices:
+            try:
+                readings[device["name"]] = home.backend.energy(device["id"])
+            except Exception:  # noqa: BLE001
+                continue
+        for note in meter.record(readings):
+            announce(session, note, "⚡", note)
+        weekly = meter.weekly()
+        if weekly:
+            announce(session, weekly, "⚡", "每周用电报告在窗口里")
+
+    def loop() -> None:
+        time.sleep(first_wait)
+        while True:
+            _quietly(sample)
+            time.sleep(interval)
+
+    threading.Thread(target=loop, daemon=True, name="friday-energy").start()
+    return meter
 
 
 def start_planner(session, toolbox: Toolbox, data_dir: str, interval: float = 3600, first_wait: float = 600):
@@ -5502,6 +5552,7 @@ def run_web(args) -> None:
     _startup_step(session, "开机变慢优化", lambda: start_startup_doctor(session, toolbox, data_dir))
     _startup_step(session, "邮件收据和包裹", lambda: start_mail_scanners(session, toolbox, data_dir))
     _startup_step(session, "待办排进日历", lambda: start_planner(session, toolbox, data_dir))
+    _startup_step(session, "家里用电统计", lambda: start_energy(session, toolbox, data_dir))
     toolbox.meter, toolbox.budget = session.meter, getattr(session, "budget", None)
     import friday_scenes
 

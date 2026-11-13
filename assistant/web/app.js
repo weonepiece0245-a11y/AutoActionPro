@@ -1085,11 +1085,26 @@ function fillSettings() {
       list.append(row);
     }
   }
+  const en = s.energy;
+  $("energyGroup").hidden = !en;
+  if (en) {
+    if (document.activeElement !== $("electricRate")) $("electricRate").value = en.rate;
+    $("energyNote").textContent = en.devices.length ? `这个月插座一共 ${en.month_total} 度电,约 RM${en.month_cost.toFixed(2)}`
+      : "还没有资料:要有会计电的 Tapo 插座,而且已经在“连接的应用”里连上 Tapo。";
+    const list = $("energyList");
+    list.replaceChildren();
+    for (const d of en.devices) {
+      const row = document.createElement("div");
+      row.className = "set-row sub";
+      row.textContent = `${d.name} · 现在 ${d.power} 瓦 · 今天 ${d.today} 度 · 这星期 ${d.week} 度 · 这个月 ${d.month} 度(约 RM${(d.month * en.rate).toFixed(2)})`;
+      list.append(row);
+    }
+  }
   const pl = s.planner;
   $("planGroup").hidden = !pl;
   if (pl) {
     if (document.activeElement !== $("planHours")) $("planHours").value = pl.hours;
-    const fmt = (iso) => { const d = new Date(iso); return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
+    const fmt = (iso) => `${Number(iso.slice(5, 7))}/${Number(iso.slice(8, 10))} ${iso.slice(11, 16)}`;  // 照星期五排的时间显示
     const showing = pl.proposal.length ? pl.proposal : pl.entries;
     $("planNote").textContent = pl.proposal.length ? "这样安排好吗?(还没放进日历)"
       : pl.entries.length ? `已经排进日历 ${pl.entries.length} 件:` : "说“帮我安排这周的待办”,或按这里;先给你看安排,同意才放进 Google 日历。";
@@ -1826,6 +1841,7 @@ $("setReceipts").onchange = (e) => saveSetting({ receipts_on: e.target.checked }
 $("rcptScan").onclick = () => saveSetting({ receipt_scan: true });
 $("rcptAll").onclick = () => saveSetting({ receipt_confirm: "all" });
 $("rcptNone").onclick = () => { if (confirm("全部忽略?(不会记账)")) saveSetting({ receipt_dismiss: "all" }); };
+$("electricRateSave").onclick = () => saveSetting({ electric_rate: $("electricRate").value.trim() });
 $("planHoursSave").onclick = () => saveSetting({ plan_hours: $("planHours").value.trim() });
 $("planWeek").onclick = () => saveSetting({ plan_propose: "这周" }, 6000);
 $("planTomorrow").onclick = () => saveSetting({ plan_propose: "明天" }, 6000);
