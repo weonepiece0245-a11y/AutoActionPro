@@ -2326,6 +2326,10 @@ def settings_state(session, meter=None) -> dict:
         "meeting": meeting_state(session),
         "subscriptions": session.subscriptions.state() if getattr(session, "subscriptions", None) is not None else None,
         "startup": startup_state(session),
+        "receipts": ({"on": __import__("friday_receipts").enabled(), "pending": session.receipts.pending,
+                      "last_scan": session.receipts.last_scan, "scanning": session.receipts.scanning}
+                     if getattr(session, "receipts", None) is not None else None),
+        "parcels": session.parcels.state() if getattr(session, "parcels", None) is not None else None,
         "scenes": scenes_state(session),
         "cleanup": getattr(session, "cleanup_items", None) if os.name == "nt" or getattr(session, "cleanup_items", None) else None,
         "weekly_report": __import__("friday_alerts").weekly_enabled(),
@@ -2677,6 +2681,37 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
             save_env_value(env, key, "on" if on else "off")
             os.environ[key] = "on" if on else "off"
             done.append(on_text if on else off_text)
+    inbox = getattr(session, "receipts", None)
+    if any(k in payload for k in ("receipts_on", "receipt_confirm", "receipt_dismiss", "receipt_scan", "parcel_scan",
+                                  "parcel_received")):
+        if inbox is None:
+            return {"error": "邮件收据和包裹现在用不了"}
+        if "receipts_on" in payload:
+            on = bool(payload["receipts_on"])
+            save_env_value(env, "FRIDAY_RECEIPTS", "on" if on else "off")
+            os.environ["FRIDAY_RECEIPTS"] = "on" if on else "off"
+            done.append("邮件收据自动记账打开了" if on else "不再看邮件收据了")
+        for key, action in (("receipt_confirm", inbox.confirm), ("receipt_dismiss", inbox.dismiss)):
+            if key in payload:
+                ids = None if payload[key] == "all" else [str(i) for i in payload[key]] if isinstance(payload[key], list) else None
+                if ids is None and payload[key] != "all":
+                    return {"error": "格式不对"}
+                result = action(ids)
+                done.append(result if isinstance(result, str) else f"忽略了 {result} 笔")
+        if payload.get("receipt_scan"):
+            done.append(session.receipts_scan())
+        if payload.get("parcel_scan"):
+            done.append(session.parcels_scan())
+        if "parcel_received" in payload:
+            parcels = session.parcels
+            with parcels.lock:
+                item = next((i for i in parcels.items if i.get("id") == payload["parcel_received"]), None)
+                if item is None:
+                    return {"error": "找不到这个包裹"}
+                item["received"] = True
+                parcels._tidy()
+                parcels._save()
+            done.append("收起来了")
     doctor = getattr(session, "startup_doctor", None)
     if any(k in payload for k in ("startup_check", "startup_toggle", "startup_clean")):
         if doctor is None or doctor.registry is None:
@@ -3573,6 +3608,108 @@ def start_subscriptions(session, toolbox: Toolbox, data_dir: str, interval: floa
         quick.extra.append(friday_subscriptions.Commands(subs, scan_soon))
     threading.Thread(target=loop, daemon=True, name="friday-subscriptions").start()
     return subs
+
+
+def start_mail_scanners(session, toolbox: Toolbox, data_dir: str, first_wait: float = 240):
+    """邮件收据自动记账(每 30 分钟)、包裹追踪(每 2 小时):都要连了 Google。"""
+    import friday_parcels
+    import friday_receipts
+
+    def to_myr(amount: float, currency: str) -> float | None:
+        fx = getattr(toolbox, "fx", None)
+        try:
+            return amount * fx[0].rate(currency, "MYR") if fx else None
+        except Exception:
+            return None
+
+    inbox = friday_receipts.ReceiptInbox(os.path.join(data_dir, "friday_receipts.json"), getattr(toolbox, "ledger", None),
+                                         to_myr=to_myr)
+    parcels = friday_parcels.Parcels(os.path.join(data_dir, "friday_parcels.json"))
+    session.receipts, session.parcels = inbox, parcels
+
+    def ready() -> str | None:
+        if getattr(toolbox, "google", None) is None:
+            return "要先在齿轮设定里连上 Google,我才能看邮件。"
+        if getattr(getattr(session, "assistant", None), "client", None) is None:
+            return "星期五还没准备好,等一下再试。"
+        return None
+
+    def run_receipts(quiet: bool = True) -> None:
+        if inbox.scanning or ready() or getattr(toolbox, "ledger", None) is None:
+            return
+        inbox.scanning = True
+        try:
+            budget = getattr(session, "budget", None)
+            if budget is not None:
+                budget.before_ask()
+            google = toolbox.google
+            mails = google.mail_headers(friday_receipts.QUERY, limit=30, skip=set(inbox.seen))
+            new = inbox.scan(mails, google.mail_body, friday_receipts.extractor(session.assistant.client,
+                                                                                getattr(session.assistant, "on_usage", None)))
+            if new:
+                total = len(inbox.pending)
+                first = "、".join(f"{n['item']} {'RM' if n['currency'] == 'MYR' else n['currency'] + ' '}{n['amount']:,.2f}" for n in new[:3])
+                announce(session, f"从邮件找到 {len(new)} 笔花费:{first}{'……' if len(new) > 3 else ''}。"
+                                  f"现在有 {total} 笔待确认,说“全部记账”或去 齿轮设定 → 花费 确认。", "🧾", "有邮件收据待确认")
+            elif not quiet:
+                session.hub.broadcast({"type": "reminder", "text": "🧾 " + inbox.describe()})
+        except Exception as e:  # noqa: BLE001
+            if not quiet:
+                session.hub.broadcast({"type": "reminder", "text": f"🧾 看邮件收据没成功:{str(e)[:120] or type(e).__name__}"})
+        finally:
+            inbox.scanning = False
+            session.hub.broadcast({"type": "mailscan"})
+
+    def run_parcels(quiet: bool = True) -> None:
+        if parcels.scanning or ready():
+            return
+        parcels.scanning = True
+        try:
+            budget = getattr(session, "budget", None)
+            if budget is not None:
+                budget.before_ask()
+            google = toolbox.google
+            mails = google.mail_headers(friday_parcels.QUERY, limit=30, skip=set(parcels.seen))
+            notes = parcels.scan(mails, google.mail_body, friday_parcels.extractor(session.assistant.client,
+                                                                                   getattr(session.assistant, "on_usage", None)))
+            for note in notes:
+                announce(session, note.lstrip("📦 "), "📦", note)
+            if not quiet and not notes:
+                session.hub.broadcast({"type": "reminder", "text": "📦 " + parcels.describe()})
+        except Exception as e:  # noqa: BLE001
+            if not quiet:
+                session.hub.broadcast({"type": "reminder", "text": f"📦 看包裹邮件没成功:{str(e)[:120] or type(e).__name__}"})
+        finally:
+            parcels.scanning = False
+            session.hub.broadcast({"type": "mailscan"})
+
+    def soon(run, label: str):
+        def start() -> str:
+            problem = ready()
+            if problem:
+                return problem
+            threading.Thread(target=lambda: _quietly(lambda: run(quiet=False)), daemon=True, name=f"friday-{label}").start()
+            return "好,我去邮箱看看(大约一分钟),看好了告诉你。"
+        return start
+
+    session.receipts_scan, session.parcels_scan = soon(run_receipts, "receipts"), soon(run_parcels, "parcels")
+    quick = getattr(session, "quick", None)
+    if quick is not None:
+        quick.extra += [friday_receipts.Commands(inbox), friday_parcels.Commands(parcels, session.parcels_scan)]
+
+    def loop() -> None:
+        time.sleep(first_wait)
+        rounds = 0
+        while True:
+            if friday_receipts.enabled():
+                _quietly(run_receipts)
+            if rounds % 4 == 0:
+                _quietly(run_parcels)
+            rounds += 1
+            time.sleep(30 * 60)
+
+    threading.Thread(target=loop, daemon=True, name="friday-mail-scanners").start()
+    return inbox, parcels
 
 
 def start_startup_doctor(session, toolbox: Toolbox, data_dir: str, interval: float = 6 * 3600, first_wait: float = 900):
@@ -5275,6 +5412,7 @@ def run_web(args) -> None:
     _startup_step(session, "我的资料库", lambda: start_library(session, toolbox, data_dir))
     _startup_step(session, "订阅管家", lambda: start_subscriptions(session, toolbox, data_dir))
     _startup_step(session, "开机变慢优化", lambda: start_startup_doctor(session, toolbox, data_dir))
+    _startup_step(session, "邮件收据和包裹", lambda: start_mail_scanners(session, toolbox, data_dir))
     toolbox.meter, toolbox.budget = session.meter, getattr(session, "budget", None)
     import friday_scenes
 

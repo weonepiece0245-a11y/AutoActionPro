@@ -12255,5 +12255,130 @@ class StartupDoctorTest(TempDirTest):
         self.assertNotIn("command", steam)
         self.assertFalse(next(i for i in state["items"] if i["name"] == "Discord")["enabled"])
 
+
+import friday_receipts  # noqa: E402
+import friday_parcels  # noqa: E402
+
+
+class ReceiptsTest(TempDirTest):
+    def make(self):
+        ledger = friday_ledger.Ledger(os.path.join(self.tmp, "l.json"), clock=lambda: datetime.datetime(2026, 11, 13, 20, 0))
+        inbox = friday_receipts.ReceiptInbox(os.path.join(self.tmp, "r.json"), ledger,
+                                             to_myr=lambda a, c: a * 4.5 if c == "USD" else None,
+                                             today=lambda: datetime.date(2026, 11, 13))
+        return inbox, ledger
+
+    MAILS = [{"id": "g1", "from": "Grab <no-reply@grab.com>", "subject": "Your Grab E-Receipt", "date": "13 Nov 2026", "snippet": ""},
+             {"id": "s1", "from": "Shopee", "subject": "Payment confirmed", "date": "12 Nov 2026", "snippet": ""},
+             {"id": "p1", "from": "Promo", "subject": "50% off!", "date": "12 Nov 2026", "snippet": ""},
+             {"id": "u1", "from": "Steam", "subject": "Thank you for your purchase", "date": "11 Nov 2026", "snippet": ""}]
+
+    def extract(self, text):
+        self.seen_text = text
+        return [{"n": 1, "is_purchase": True, "item": "Grab 到 KLCC", "amount": 18.5, "currency": "MYR", "category": "交通", "date": "2026-11-13"},
+                {"n": 2, "is_purchase": True, "item": "Shopee 手机壳", "amount": 12.9, "currency": "myr", "category": "购物", "date": "2026-11-12"},
+                {"n": 3, "is_purchase": False, "item": "", "amount": 0, "currency": "MYR", "category": "其他", "date": ""},
+                {"n": 4, "is_purchase": True, "item": "Steam 游戏", "amount": 10, "currency": "USD", "category": "娱乐", "date": "2026-11-11"},
+                {"n": 9, "is_purchase": True, "item": "不存在", "amount": 5, "currency": "MYR", "category": "其他", "date": ""}]
+
+    def test_scan_confirm_and_dedupe(self):
+        inbox, ledger = self.make()
+        ledger.add("Shopee 手机壳", 12.9, "购物", "2026-11-12")  # 已经自己记过了
+        bodies = []
+        added = inbox.scan(self.MAILS, lambda i: bodies.append(i) or f"body of {i}", self.extract)
+        self.assertEqual(bodies, ["g1", "s1", "p1", "u1"])
+        self.assertIn("=== 1 ===\n寄件人:Grab", self.seen_text)
+        self.assertEqual([a["item"] for a in added], ["Grab 到 KLCC", "Shopee 手机壳", "Steam 游戏"])
+        self.assertTrue(added[1]["duplicate"])
+        self.assertFalse(added[0]["duplicate"])
+        self.assertEqual(inbox.scan(self.MAILS, lambda i: "x", self.extract), [])  # 看过的不再看
+        text = inbox.describe()
+        self.assertIn("3 笔待确认", text)
+        self.assertIn("⚠ 好像已经记过", text)
+        self.assertEqual(len(ledger.entries), 1)  # 还没确认:不记
+        out = inbox.confirm(["g1"])
+        self.assertIn("记好了 1 笔:Grab 到 KLCC RM18.50", out)
+        self.assertEqual(ledger.entries[-1]["category"], "交通")
+        self.assertEqual(inbox.dismiss(["s1"]), 1)
+        out = friday_receipts.Commands(inbox).handle("全部记账")
+        self.assertIn("Steam 游戏 RM45.00", out)  # 美金换成马币
+        self.assertEqual(inbox.pending, [])
+        again, _ = self.make()
+        self.assertIn("g1", again.seen)
+
+    def test_foreign_without_rate(self):
+        inbox, ledger = self.make()
+        inbox.scan([{"id": "e1", "from": "x", "subject": "y", "date": "", "snippet": ""}], lambda i: "",
+                   lambda t: [{"n": 1, "is_purchase": True, "item": "日本网购", "amount": 1000, "currency": "JPY",
+                               "category": "购物", "date": "2026-11-20"}])
+        self.assertEqual(inbox.pending[0]["date"], "2026-11-13")  # 未来的日期改成今天
+        self.assertIn("换不了 JPY 的汇率", inbox.confirm())
+        self.assertEqual(len(inbox.pending), 1)
+
+    def test_settings(self):
+        inbox, ledger = self.make()
+        inbox.scan(self.MAILS, lambda i: "", self.extract)
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.receipts = inbox
+        session.parcels = friday_parcels.Parcels(os.path.join(self.tmp, "p.json"))
+        session.receipts_scan = lambda: "好,我去邮箱看看"
+        env = os.path.join(self.tmp, ".env6")
+        Path(env).write_text("", encoding="utf-8")
+        self.assertIn("记好了 1 笔", app.apply_settings({"receipt_confirm": ["g1"]}, session, None, env)["message"])
+        self.assertIn("忽略了 2 笔", app.apply_settings({"receipt_dismiss": "all"}, session, None, env)["message"])
+        self.assertIn("error", app.apply_settings({"receipt_confirm": "x"}, session, None, env))
+        with mock.patch.dict(os.environ, {}):
+            app.apply_settings({"receipts_on": False}, session, None, env)
+            self.assertFalse(friday_receipts.enabled())
+
+
+class ParcelsTest(TempDirTest):
+    def make(self, today=datetime.date(2026, 11, 13)):
+        day = [today]
+        return friday_parcels.Parcels(os.path.join(self.tmp, "p.json"), today=lambda: day[0]), day
+
+    def test_status_changes_notify_once(self):
+        parcels, day = self.make()
+        first = [{"id": "m1", "from": "Shopee", "subject": "Your order has been shipped", "date": "11 Nov", "snippet": ""},
+                 {"id": "m0", "from": "Shopee", "subject": "Order placed", "date": "10 Nov", "snippet": ""}]
+        texts = []
+
+        def extract(text):
+            texts.append(text)
+            return [{"n": 1, "item": "蓝牙耳机", "shop": "Shopee", "courier": "", "tracking": "", "status": "ordered", "eta": "", "date": "2026-11-10"},
+                    {"n": 2, "item": "蓝牙耳机", "shop": "Shopee", "courier": "SPX", "tracking": "MY123456789", "status": "shipped",
+                     "eta": "2026-11-15", "date": "2026-11-11"}]
+        notes = parcels.scan(first, lambda i: f"body {i}", extract)
+        self.assertTrue(texts[0].index("Order placed") < texts[0].index("has been shipped"))  # 旧的先
+        self.assertEqual(notes, ["📦 蓝牙耳机(Shopee)出货了,预计 11-15 到。"])
+        self.assertEqual(len(parcels.items), 1)
+        self.assertEqual(parcels.items[0]["tracking"], "MY123456789")
+        second = [{"id": "m2", "from": "SPX", "subject": "Out for delivery", "date": "13 Nov", "snippet": ""}] + first
+        notes = parcels.scan(second, lambda i: "", lambda t: [
+            {"n": 1, "item": "包裹", "shop": "", "courier": "SPX", "tracking": "MY 1234-56789", "status": "out_for_delivery", "eta": "", "date": "2026-11-13"}])
+        self.assertEqual(notes, ["📦 蓝牙耳机(Shopee)今天派送,注意接电话 / 开门。"])  # 用追踪号码对上同一个
+        self.assertIn("今天派送", friday_parcels.Commands(parcels, lambda: "").handle("我的包裹到哪了"))
+        notes = parcels.scan([{"id": "m3", "from": "SPX", "subject": "Delivered", "date": "", "snippet": ""}], lambda i: "", lambda t: [
+            {"n": 1, "item": "", "shop": "", "courier": "", "tracking": "MY123456789", "status": "delivered", "eta": "", "date": "2026-11-13"}])
+        self.assertEqual(notes, ["📦 蓝牙耳机(Shopee)送到了,记得去拿。"])
+        old = parcels.scan([{"id": "m4", "from": "SPX", "subject": "late shipped mail", "date": "", "snippet": ""}], lambda i: "", lambda t: [
+            {"n": 1, "item": "", "shop": "", "courier": "", "tracking": "MY123456789", "status": "shipped", "eta": "", "date": "2026-11-11"}])
+        self.assertEqual(old, [])  # 晚到的旧邮件不会把状态改回去
+        self.assertEqual(parcels.items[0]["status"], "delivered")
+        day[0] = datetime.date(2026, 11, 17)
+        self.assertIn("没有在路上的包裹", parcels.describe())  # 送到 3 天后收起来
+
+    def test_received_and_commands(self):
+        parcels, _ = self.make()
+        parcels.scan([{"id": "a", "from": "", "subject": "", "date": "", "snippet": ""}], lambda i: "", lambda t: [
+            {"n": 1, "item": "猫粮", "shop": "Lazada", "courier": "J&T", "tracking": "JT001", "status": "in_transit", "eta": "", "date": "2026-11-12"}])
+        scans = []
+        commands = friday_parcels.Commands(parcels, lambda: scans.append(1) or "好,我去邮箱看看")
+        self.assertEqual(commands.handle("检查我的包裹"), "好,我去邮箱看看")
+        self.assertIn("猫粮(Lazada):运送中,J&T、JT001", commands.handle("有什么快递"))
+        self.assertIsNone(commands.handle("工资到了"))  # 不是包裹:交给 Claude
+        self.assertIn("猫粮 收起来了", commands.handle("猫粮收到了"))
+        self.assertEqual(parcels.state()["items"], [])
+
 if __name__ == "__main__":
     unittest.main()

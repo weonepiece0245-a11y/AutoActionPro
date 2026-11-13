@@ -726,8 +726,8 @@ class GoogleTools(_MoreGoogleTools):
             raise ValueError(f"不支持的 action:{action}")
         return handler(args, confirm)
 
-    def mail_headers(self, query: str, limit: int = 150) -> list[dict]:
-        """只拿寄件人、主题、日期和一小段预览(订阅管家用),不拿正文。"""
+    def mail_headers(self, query: str, limit: int = 150, skip: set | None = None) -> list[dict]:
+        """只拿寄件人、主题、日期和一小段预览(订阅管家、收据、包裹用),不拿正文。skip:看过的邮件 id,不再拿。"""
         def retry(make):  # 连线偶尔断一下(SSL、网络):换一条新连接再试,最多 3 次
             for attempt in range(3):
                 try:
@@ -747,6 +747,8 @@ class GoogleTools(_MoreGoogleTools):
                 break
         found = []
         for item in ids[:limit]:
+            if skip and item["id"] in skip:
+                continue
             msg = retry(lambda api: api.get(userId="me", id=item["id"], format="metadata", metadataHeaders=["From", "Subject", "Date"]))
             found.append({"id": item["id"], "from": _header(msg, "From"), "subject": _header(msg, "Subject"),
                           "date": _header(msg, "Date"), "snippet": html.unescape(msg.get("snippet", ""))})

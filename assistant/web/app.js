@@ -409,6 +409,7 @@ function handle(ev) {
     case "meeting":
       showMeeting(ev); break;
     case "startup":
+    case "mailscan":
       loadState().then(() => fillSettings()); break;
     case "orb_click":  // 点了桌面小光球:开始听(在听就停)
       ensureAudio();
@@ -1056,6 +1057,54 @@ function fillSettings() {
     $("startExtra").textContent = extra.join(" ");
     $("startCleanRow").hidden = !st.temp_bytes;
     $("startCleanText").textContent = `临时文件夹里有 ${(st.temp_bytes / 1024 ** 2).toFixed(0)} MB 超过 7 天没用的临时文件`;
+  }
+  const rc = s.receipts;
+  $("rcptGroup").hidden = !rc;
+  if (rc) {
+    $("setReceipts").checked = rc.on;
+    $("rcptNote").textContent = rc.scanning ? "正在看邮件……"
+      : rc.pending.length ? `${rc.pending.length} 笔待确认` : "没有待确认的" + (rc.last_scan ? `(上次看邮件 ${rc.last_scan})` : "");
+    $("rcptAll").hidden = $("rcptNone").hidden = !rc.pending.length;
+    const list = $("rcptList");
+    list.replaceChildren();
+    for (const p of rc.pending) {
+      const row = document.createElement("div");
+      row.className = "set-row sub";
+      const text = document.createElement("span");
+      text.textContent = `${p.date.slice(5)} ${p.item} · ${p.currency === "MYR" ? "RM" : p.currency + " "}${p.amount.toFixed(2)} · ${p.category}` + (p.duplicate ? " · ⚠ 好像已经记过" : "");
+      text.title = `${p.from}\n${p.subject}`;
+      const ctl = document.createElement("span");
+      ctl.className = "set-ctl";
+      for (const [label, key] of [["记账", "receipt_confirm"], ["忽略", "receipt_dismiss"]]) {
+        const b = document.createElement("button");
+        b.type = "button"; b.className = "mini-btn"; b.textContent = label;
+        b.onclick = () => saveSetting({ [key]: [p.id] });
+        ctl.append(b);
+      }
+      row.append(text, ctl);
+      list.append(row);
+    }
+  }
+  const pc = s.parcels;
+  $("parcelGroup").hidden = !pc;
+  if (pc) {
+    const statusText = { ordered: "下单了", shipped: "出货了", in_transit: "运送中", out_for_delivery: "今天派送", delivered: "送到了", problem: "出问题了" };
+    $("parcelNote").textContent = pc.scanning ? "正在看邮件……"
+      : pc.items.length ? `在路上的包裹 ${pc.items.length} 个` : "现在没有在路上的包裹" + (pc.last_scan ? `(上次看邮件 ${pc.last_scan})` : "");
+    const list = $("parcelList");
+    list.replaceChildren();
+    for (const i of pc.items) {
+      const row = document.createElement("div");
+      row.className = "set-row sub";
+      const text = document.createElement("span");
+      text.textContent = `${i.item || "包裹"}${i.shop ? "(" + i.shop + ")" : ""} · ${statusText[i.status] || ""}`
+        + (i.eta && i.status !== "delivered" ? ` · 预计 ${i.eta.slice(5)}` : "") + (i.courier ? ` · ${i.courier}` : "") + (i.tracking ? ` · ${i.tracking}` : "");
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "mini-btn"; b.textContent = "收到了";
+      b.onclick = () => saveSetting({ parcel_received: i.id });
+      row.append(text, b);
+      list.append(row);
+    }
   }
   const subs = s.subscriptions;
   $("subGroup").hidden = !subs;
@@ -1749,6 +1798,11 @@ $("duckTo").onchange = (e) => saveSetting({ duck_to: e.target.value });
 $("subPreview").onclick = () => saveSetting({ subtitle_preview: true });
 $("startCheck").onclick = () => saveSetting({ startup_check: true });
 $("startClean").onclick = () => { if (confirm("清掉临时文件夹里超过 7 天没用的临时文件?(正在用的不会动)")) saveSetting({ startup_clean: true }, 4500); };
+$("setReceipts").onchange = (e) => saveSetting({ receipts_on: e.target.checked });
+$("rcptScan").onclick = () => saveSetting({ receipt_scan: true });
+$("rcptAll").onclick = () => saveSetting({ receipt_confirm: "all" });
+$("rcptNone").onclick = () => { if (confirm("全部忽略?(不会记账)")) saveSetting({ receipt_dismiss: "all" }); };
+$("parcelScan").onclick = () => saveSetting({ parcel_scan: true });
 $("subScan").onclick = () => saveSetting({ sub_scan: true }, 5000);
 $("subAdd").onclick = async () => {
   const ok = await saveSetting({ sub_add: { name: $("subName").value.trim(), amount: Number($("subAmount").value) || 0,

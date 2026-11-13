@@ -209,6 +209,14 @@
         <span class="set-ctl"><select class="mini-select" id="setVoice"></select><button type="button" class="mini-btn" id="previewVoice">试听</button></span></div>
     </div>
 
+    <div class="set-group" id="rcptGroup" hidden data-cat="money">
+      <h3>邮件收据自动记账</h3>
+      <div class="set-row"><label for="setReceipts">Grab、Shopee、foodpanda、银行刷卡这类收据邮件到了,先放进“待确认”</label><input type="checkbox" class="switch" id="setReceipts"></div>
+      <div class="set-row"><span class="set-note" id="rcptNote"></span><span class="set-ctl"><button type="button" class="mini-btn" id="rcptScan">现在看邮件</button><button type="button" class="mini-btn" id="rcptAll" hidden>全部记账</button><button type="button" class="mini-btn" id="rcptNone" hidden>全部忽略</button></span></div>
+      <div id="rcptList"></div>
+      <div class="set-note">只有你按“记账”的才会记进账本。每 30 分钟看一次新邮件;读收据正文请最便宜的 Haiku 认,一次大约 RM0.01~0.03。⚠ 是同一天已经有一样金额的账,可能记过了。</div>
+    </div>
+
     <div class="set-group" id="subGroup" hidden data-cat="money">
       <h3>订阅管家(每月自动扣款的)</h3>
       <div class="set-row"><span class="set-note" id="subTotal"></span><button type="button" class="mini-btn" id="subScan">去邮箱找</button></div>
@@ -303,6 +311,13 @@
       <div class="set-note" id="sceneHelp"></div>
       <div id="sceneList"></div>
       <div class="set-row"><span></span><button type="button" class="mini-btn" id="sceneAdd">+ 新场景</button></div>
+    </div>
+
+    <div class="set-group" id="parcelGroup" hidden data-cat="life">
+      <h3>包裹追踪</h3>
+      <div class="set-row"><span class="set-note" id="parcelNote"></span><button type="button" class="mini-btn" id="parcelScan">现在看邮件</button></div>
+      <div id="parcelList"></div>
+      <div class="set-note">从网购和快递邮件找出在路上的包裹,出货、今天派送、送到、出问题都会告诉你;每 2 小时看一次。也可以问“我的包裹到哪了”。送到 3 天后自动收起来。</div>
     </div>
 
     <div class="set-group" id="meetGroup" hidden data-cat="life">
