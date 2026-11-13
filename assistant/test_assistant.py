@@ -11897,5 +11897,133 @@ class MeetingTest(TempDirTest):
         self.assertIn("error", app.apply_settings({"meeting_open": "../x.txt"}, session, None, env))
         self.assertIn("error", app.apply_settings({"meeting_todos": True}, session, None, env))
 
+
+import friday_subscriptions  # noqa: E402
+
+
+class SubscriptionsTest(TempDirTest):
+    def make(self, today=datetime.date(2026, 11, 13)):
+        day = [today]
+        subs = friday_subscriptions.Subscriptions(os.path.join(self.tmp, "subs.json"), today=lambda: day[0],
+                                                  to_myr=lambda amount, cur: amount * 4.5 if cur == "USD" else None)
+        return subs, day
+
+    def test_add_list_and_total(self):
+        subs, _ = self.make()
+        self.assertIn("加进订阅:Netflix:每月 RM55,下次 11-15", subs.add("Netflix", 55, "MYR", "monthly", day=15))
+        subs.add("ChatGPT Plus", 20, "USD", "monthly", day=5)  # 5 号已经过了:下个月
+        subs.add("iCloud+", 4.9, "myr", "monthly", next_charge="2026-12-01")
+        subs.add("域名", 10, "SGD", "yearly", next_charge="2027-03-01")
+        self.assertEqual(subs._find("chatgpt")["next"], "2026-12-05")
+        total, unknown = subs.yearly()
+        self.assertAlmostEqual(total, 55 * 12 + 20 * 12 * 4.5 + 4.9 * 12, places=2)
+        self.assertEqual(unknown, ["SGD 10"])
+        text = subs.describe()
+        self.assertIn("你有 4 个订阅", text)
+        self.assertTrue(text.index("Netflix") < text.index("ChatGPT"))  # 先扣的排前面
+        self.assertIn("好,Netflix 记成已取消", subs.cancel("netflix"))
+        self.assertIsNone(subs.cancel("不存在的"))
+        self.assertIn("3 个订阅", subs.describe())
+        with self.assertRaises(ValueError):
+            subs.add("", 10)
+        with self.assertRaises(ValueError):
+            subs.add("X", 10, cycle="daily")
+        again, _ = self.make()
+        self.assertEqual(len(again.items), 4)  # 存起来了
+
+    def test_reminds_two_days_before_once_and_rolls(self):
+        subs, day = self.make()
+        subs.add("Spotify", 17.9, "MYR", "monthly", next_charge="2026-11-16", cancel_hint="Spotify 网站 → 账户")
+        self.assertEqual(subs.due(), [])  # 还有 3 天
+        day[0] = datetime.date(2026, 11, 14)
+        notes = subs.due()
+        self.assertEqual(notes, ["Spotify 后天(11/16)会自动扣款 RM17.90。要取消的话:Spotify 网站 → 账户。"])
+        self.assertEqual(subs.due(), [])  # 同一期只说一次
+        day[0] = datetime.date(2026, 11, 17)
+        self.assertEqual(subs.due(), [])
+        self.assertEqual(subs._find("spotify")["next"], "2026-12-16")  # 过了:排到下个月
+        day[0] = datetime.date(2026, 12, 16)
+        self.assertIn("今天", subs.due()[0])
+        subs.add("年费", 100, cycle="yearly", next_charge="2027-01-31")
+        self.assertEqual(friday_subscriptions.step(datetime.date(2027, 1, 31), "monthly"), datetime.date(2027, 2, 28))
+        subs.set_cancelled(subs._find("年费")["id"], True)
+        day[0] = datetime.date(2027, 1, 30)
+        self.assertFalse(any("年费" in n for n in subs.due()))  # 取消了不提醒
+
+    def test_scan_from_mail(self):
+        subs, _ = self.make()
+        subs.add("Netflix", 60, "MYR", "monthly", day=20)  # 自己加的不会被邮件盖掉
+        seen = []
+
+        def classify(listing):
+            seen.append(listing)
+            return [{"name": "YouTube Premium", "amount": 23.9, "currency": "MYR", "cycle": "monthly", "last_charge": "2026-11-02",
+                     "next_charge": "", "cancel_hint": "YouTube → 购买内容和会员"},
+                    {"name": "Netflix", "amount": 55, "currency": "MYR", "cycle": "monthly", "last_charge": "",
+                     "next_charge": "2026-11-20", "cancel_hint": ""}]
+        mails = [{"from": "YouTube <no-reply@youtube.com>", "subject": "Your YouTube Premium receipt", "date": "2 Nov 2026",
+                  "snippet": "RM23.90"}]
+        text = subs.scan(mails, classify)
+        self.assertIn("从邮箱找到 1 个订阅", text)
+        self.assertIn("YouTube <no-reply@youtube.com> | Your YouTube Premium receipt | 2 Nov 2026 | RM23.90", seen[0])
+        self.assertEqual(subs._find("youtube")["next"], "2026-12-02")
+        self.assertEqual(subs._find("netflix")["amount"], 60)
+        self.assertEqual(subs.last_scan, "2026-11-13")
+        self.assertFalse(subs.scan_due())
+        self.assertIn("没找到收据", subs.scan([], classify))
+
+    def test_commands_and_tool(self):
+        subs, _ = self.make()
+        scans = []
+        commands = friday_subscriptions.Commands(subs, lambda: scans.append(1) or "好,我去邮箱找")
+        self.assertIn("现在没有记着的订阅", commands.handle("我的订阅"))
+        self.assertEqual(commands.handle("检查我的订阅"), "好,我去邮箱找")
+        subs.add("Netflix", 55, day=15)
+        self.assertIn("一年大约 RM660", commands.handle("一年订阅花多少钱"))
+        self.assertIn("记成已取消", commands.handle("Netflix 取消了"))
+        self.assertIsNone(commands.handle("会议取消了"))  # 不是订阅:交给 Claude
+        toolbox = self.make_toolbox()
+        toolbox.subscriptions = subs
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+        out = toolbox.run(SimpleNamespace(id="s", name="subscriptions", input={"action": "add", "name": "ChatGPT Plus",
+                                                                            "amount": 20, "currency": "USD", "day": 5}), lambda s: None)
+        self.assertIn("ChatGPT Plus:每月 USD 20", out["content"])
+        out = toolbox.run(SimpleNamespace(id="s", name="subscriptions", input={"action": "scan"}), lambda s: None)
+        self.assertTrue(out["is_error"])
+
+    def test_settings(self):
+        subs, _ = self.make()
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.subscriptions = subs
+        session.subscription_scan = lambda: "好,我去邮箱找"
+        env = os.path.join(self.tmp, ".env4")
+        Path(env).write_text("", encoding="utf-8")
+        out = app.apply_settings({"sub_add": {"name": "Unifi", "amount": 129, "currency": "MYR", "cycle": "monthly", "day": "8"}},
+                                 session, None, env)
+        self.assertIn("Unifi:每月 RM129,下次 12-08", out["message"])
+        number = subs.items[0]["id"]
+        app.apply_settings({"sub_cancel": {"id": number, "cancelled": True}}, session, None, env)
+        self.assertTrue(subs.items[0]["cancelled"])
+        self.assertIn("error", app.apply_settings({"sub_remove": 99}, session, None, env))
+        self.assertIn("error", app.apply_settings({"sub_add": {"name": ""}}, session, None, env))
+        self.assertIn("邮箱", app.apply_settings({"sub_scan": True}, session, None, env)["message"])
+        app.apply_settings({"sub_remove": number}, session, None, env)
+        self.assertEqual(subs.items, [])
+
+    def test_mail_headers(self):
+        import friday_google
+
+        class Api:
+            def list(self, **kw):
+                return SimpleNamespace(execute=lambda: {"messages": [{"id": "a"}, {"id": "b"}]})
+
+            def get(self, **kw):
+                return SimpleNamespace(execute=lambda: {"snippet": "RM55 &amp; more", "payload": {"headers": [
+                    {"name": "From", "value": "Netflix"}, {"name": "Subject", "value": "Receipt"}, {"name": "Date", "value": "1 Nov"}]}})
+        tools_obj = friday_google.GoogleTools.__new__(friday_google.GoogleTools)
+        tools_obj._gmail = lambda: SimpleNamespace(users=lambda: SimpleNamespace(messages=lambda: Api()))
+        found = tools_obj.mail_headers("q", limit=5)
+        self.assertEqual(found[0], {"from": "Netflix", "subject": "Receipt", "date": "1 Nov", "snippet": "RM55 & more"})
+
 if __name__ == "__main__":
     unittest.main()

@@ -715,6 +715,23 @@ class GoogleTools(_MoreGoogleTools):
             raise ValueError(f"不支持的 action:{action}")
         return handler(args, confirm)
 
+    def mail_headers(self, query: str, limit: int = 150) -> list[dict]:
+        """只拿寄件人、主题、日期和一小段预览(订阅管家用),不拿正文。"""
+        api = self._gmail().users().messages()
+        ids, token = [], None
+        while len(ids) < limit:
+            response = api.list(userId="me", q=query, maxResults=min(100, limit - len(ids)), pageToken=token).execute()
+            ids += response.get("messages", [])
+            token = response.get("nextPageToken")
+            if not token:
+                break
+        found = []
+        for item in ids[:limit]:
+            msg = api.get(userId="me", id=item["id"], format="metadata", metadataHeaders=["From", "Subject", "Date"]).execute()
+            found.append({"from": _header(msg, "From"), "subject": _header(msg, "Subject"), "date": _header(msg, "Date"),
+                          "snippet": html.unescape(msg.get("snippet", ""))})
+        return found
+
     def _list_mail(self, args: dict, confirm: Approver) -> str:
         query = (args.get("query") or "in:inbox newer_than:3d").strip()
         limit = max(1, min(20, int(args.get("max") or 10)))

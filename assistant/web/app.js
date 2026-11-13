@@ -1019,6 +1019,38 @@ function fillSettings() {
     for (const scene of sc.list) list.append(sceneCard(scene));
   }
   if (s.meeting) showMeeting(s.meeting);
+  const subs = s.subscriptions;
+  $("subGroup").hidden = !subs;
+  if (subs) {
+    const live = subs.items.filter((i) => !i.cancelled);
+    $("subTotal").textContent = subs.scanning ? "正在邮箱里找订阅……"
+      : live.length ? `${live.length} 个订阅,一年大约 RM${subs.yearly.toLocaleString()}` + (subs.unknown.length ? ` + ${subs.unknown.join("、")}` : "")
+        + (subs.last_scan ? `(上次找邮件 ${subs.last_scan})` : "")
+      : "还没有记着的订阅。按“去邮箱找”,或者在下面自己加。";
+    const cycleText = { monthly: "每月", yearly: "每年", weekly: "每周", quarterly: "每季" };
+    const list = $("subList");
+    list.replaceChildren();
+    for (const item of subs.items) {
+      const row = document.createElement("div");
+      row.className = "set-row sub" + (item.cancelled ? " muted" : "");
+      const text = document.createElement("span");
+      const price = item.amount ? `${item.currency === "MYR" ? "RM" : item.currency + " "}${item.amount}` : "金额不明";
+      text.textContent = `${item.name} · ${cycleText[item.cycle] || "每月"} ${price}` + (item.next ? ` · 下次 ${item.next.slice(5)}` : "")
+        + (item.cancelled ? " · 已取消" : "") + (item.source === "email" ? " · 从邮件找到" : "");
+      if (item.cancel_hint) text.title = "怎么取消:" + item.cancel_hint;
+      const ctl = document.createElement("span");
+      ctl.className = "set-ctl";
+      const toggle = document.createElement("button");
+      toggle.type = "button"; toggle.className = "mini-btn"; toggle.textContent = item.cancelled ? "恢复" : "已取消";
+      toggle.onclick = () => saveSetting({ sub_cancel: { id: item.id, cancelled: !item.cancelled } });
+      const del = document.createElement("button");
+      del.type = "button"; del.className = "mini-btn"; del.textContent = "删掉";
+      del.onclick = () => saveSetting({ sub_remove: item.id });
+      ctl.append(toggle, del);
+      row.append(text, ctl);
+      list.append(row);
+    }
+  }
   const lib = s.library;
   $("libGroup").hidden = !lib;
   if (lib) {
@@ -1677,6 +1709,12 @@ $("subSize").onchange = (e) => saveSetting({ sub_size: e.target.value });
 $("subTime").onchange = (e) => saveSetting({ sub_time: e.target.value });
 $("duckTo").onchange = (e) => saveSetting({ duck_to: e.target.value });
 $("subPreview").onclick = () => saveSetting({ subtitle_preview: true });
+$("subScan").onclick = () => saveSetting({ sub_scan: true }, 5000);
+$("subAdd").onclick = async () => {
+  const ok = await saveSetting({ sub_add: { name: $("subName").value.trim(), amount: Number($("subAmount").value) || 0,
+    currency: $("subCurrency").value, cycle: $("subCycle").value, day: $("subDay").value.trim() } });
+  if (ok) { $("subName").value = ""; $("subAmount").value = ""; $("subDay").value = ""; }
+};
 $("meetStart").onclick = () => saveSetting({ meeting_start: $("meetTitle").value.trim() });
 $("meetStop").onclick = () => saveSetting({ meeting_stop: true });
 $("meetTodos").onclick = () => saveSetting({ meeting_todos: true });

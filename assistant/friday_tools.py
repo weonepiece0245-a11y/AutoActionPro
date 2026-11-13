@@ -1052,6 +1052,25 @@ UNATTENDED_REFUSAL = (
 SERVER_TOOL_LABELS = {"web_search": ("搜索", "query"), "web_fetch": ("读取网页", "url")}
 
 
+SUBSCRIPTIONS_TOOL = {
+    "name": "subscriptions",
+    "description": (
+        "订阅管家:老板每月 / 每年自动扣款的订阅(串流、云端、软件、手机月费、健身房……)。"
+        "list:列出全部、一年总共多少;add:老板说订了什么就加(name、amount、currency 例如 MYR/USD、cycle、day 每月几号或 next_charge 下次日期);"
+        "cancel:老板说取消了 / 不用了;scan:去 Gmail 找收据和续订邮件(在后台做,做完会通知)。扣款前两天会自动提醒。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["list", "add", "cancel", "scan"]},
+            "name": {"type": "string"}, "amount": {"type": "number"}, "currency": {"type": "string"},
+            "cycle": {"type": "string", "enum": ["monthly", "yearly", "weekly", "quarterly"]},
+            "day": {"type": "integer", "description": "每月几号扣"}, "next_charge": {"type": "string", "description": "YYYY-MM-DD"},
+        },
+        "required": ["action"],
+    },
+}
+
 LIBRARY_TOOL = {
     "name": "library",
     "description": (
@@ -1170,6 +1189,8 @@ class Toolbox:
         self.archive: ConversationArchive | None = None  # 聊天记录档案,attach_archive() 设置
         self.background = None  # 后台长任务:(目标) -> 话
         self.library = None  # 我的资料库(friday_library.Library)
+        self.subscriptions = None  # 订阅管家(friday_subscriptions.Subscriptions)
+        self.subscription_scan = None  # () -> 话:去邮箱找订阅(在后台)
         self.weather_fetch = None  # 测试时换成假的天气服务
         self._handlers = {
             "remember": self._remember,
@@ -1229,6 +1250,7 @@ class Toolbox:
             "dates": self._dates,
             "background_task": self._background_task,
             "library": self._library,
+            "subscriptions": self._subscriptions,
         }
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
 
@@ -1324,6 +1346,8 @@ class Toolbox:
             tools = tools + [BACKGROUND_TOOL]
         if self.library is not None:
             tools = tools + [LIBRARY_TOOL]
+        if self.subscriptions is not None:
+            tools = tools + [SUBSCRIPTIONS_TOOL]
         return tools
 
     def begin_turn(self) -> None:
@@ -2033,6 +2057,31 @@ class Toolbox:
             return str(e), True
         except Exception as e:
             return f"网站暂时打不开:{type(e).__name__}: {e}", True
+        return f"不支持的 action:{action}", True
+
+    def _subscriptions(self, args, on_status):
+        subs = self.subscriptions
+        if subs is None:
+            return "订阅管家没有开", True
+        action = args.get("action")
+        if action == "list":
+            return subs.describe(), False
+        if action == "add":
+            try:
+                text = subs.add(str(args.get("name") or ""), args.get("amount") or 0, str(args.get("currency") or "MYR"),
+                                str(args.get("cycle") or "monthly"), str(args.get("next_charge") or ""),
+                                day=int(args["day"]) if isinstance(args.get("day"), (int, float)) else None)
+            except ValueError as e:
+                return str(e), True
+            on_status(text[:80])
+            return text, False
+        if action == "cancel":
+            text = subs.cancel(str(args.get("name") or ""))
+            return (text, False) if text else ("订阅清单里没有这个(或者名字对上好几个)", True)
+        if action == "scan":
+            if self.subscription_scan is None:
+                return "要先连 Google 才能从邮箱找订阅", True
+            return self.subscription_scan(), False
         return f"不支持的 action:{action}", True
 
     def _library(self, args, on_status):

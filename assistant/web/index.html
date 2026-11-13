@@ -209,6 +209,20 @@
         <span class="set-ctl"><select class="mini-select" id="setVoice"></select><button type="button" class="mini-btn" id="previewVoice">试听</button></span></div>
     </div>
 
+    <div class="set-group" id="subGroup" hidden data-cat="money">
+      <h3>订阅管家(每月自动扣款的)</h3>
+      <div class="set-row"><span class="set-note" id="subTotal"></span><button type="button" class="mini-btn" id="subScan">去邮箱找</button></div>
+      <div id="subList"></div>
+      <div class="set-row"><label for="subName">自己加一个</label>
+        <span class="set-ctl"><input class="mini-input" id="subName" maxlength="40" placeholder="名字,例如 Netflix">
+        <input class="mini-input short" id="subAmount" inputmode="decimal" placeholder="金额">
+        <select class="mini-select" id="subCurrency"><option>MYR</option><option>USD</option><option>SGD</option><option>EUR</option><option>GBP</option><option>CNY</option><option>HKD</option><option>AUD</option><option>JPY</option></select>
+        <select class="mini-select" id="subCycle"><option value="monthly">每月</option><option value="yearly">每年</option><option value="quarterly">每季</option><option value="weekly">每周</option></select>
+        <input class="mini-input short" id="subDay" inputmode="numeric" maxlength="2" placeholder="几号">
+        <button type="button" class="mini-btn" id="subAdd">加</button></span></div>
+      <div class="set-note">扣款前两天提醒你;每 30 天自动去 Gmail 再找一次(只看收据、续订邮件的标题和预览,用最便宜的 Haiku 认,一次大约 RM0.02)。也可以说“我的订阅”“一年订阅花多少”“Netflix 取消了”。</div>
+    </div>
+
     <div class="set-group" id="budgetGroup" hidden data-cat="money">
       <h3>预算和余额</h3>
       <div class="set-row"><label for="setBudget">每月预算(0 = 不限)</label>

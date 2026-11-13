@@ -2324,6 +2324,7 @@ def settings_state(session, meter=None) -> dict:
         "background": session.background.state() if getattr(session, "background", None) is not None else None,
         "library": library_state(session),
         "meeting": meeting_state(session),
+        "subscriptions": session.subscriptions.state() if getattr(session, "subscriptions", None) is not None else None,
         "scenes": scenes_state(session),
         "cleanup": getattr(session, "cleanup_items", None) if os.name == "nt" or getattr(session, "cleanup_items", None) else None,
         "weekly_report": __import__("friday_alerts").weekly_enabled(),
@@ -2675,6 +2676,29 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
             save_env_value(env, key, "on" if on else "off")
             os.environ[key] = "on" if on else "off"
             done.append(on_text if on else off_text)
+    subs = getattr(session, "subscriptions", None)
+    if any(k in payload for k in ("sub_add", "sub_remove", "sub_cancel", "sub_scan")):
+        if subs is None:
+            return {"error": "订阅管家现在用不了"}
+        try:
+            if isinstance(payload.get("sub_add"), dict):
+                add = payload["sub_add"]
+                day = add.get("day")
+                done.append(subs.add(str(add.get("name") or ""), add.get("amount") or 0, str(add.get("currency") or "MYR"),
+                                     str(add.get("cycle") or "monthly"),
+                                     day=int(day) if str(day or "").isdigit() else None))
+            if "sub_remove" in payload:
+                if not subs.remove(int(payload["sub_remove"])):
+                    return {"error": "找不到这个订阅"}
+                done.append("删掉了")
+            if isinstance(payload.get("sub_cancel"), dict):
+                if not subs.set_cancelled(int(payload["sub_cancel"].get("id", 0)), bool(payload["sub_cancel"].get("cancelled"))):
+                    return {"error": "找不到这个订阅"}
+                done.append("记成已取消,不再提醒" if payload["sub_cancel"].get("cancelled") else "恢复提醒了")
+            if payload.get("sub_scan"):
+                done.append(session.subscription_scan())
+        except (ValueError, TypeError) as e:
+            return {"error": str(e) or "格式不对"}
     recorder = getattr(session, "meeting", None)
     if any(k in payload for k in ("meeting_start", "meeting_stop", "meeting_todos", "meeting_open")):
         if recorder is None:
@@ -3457,6 +3481,80 @@ def start_auto_lock(session, interval: float = 15) -> None:
             time.sleep(interval)
 
     threading.Thread(target=lambda: _quietly(loop), daemon=True, name="friday-auto-lock").start()
+
+
+def start_subscriptions(session, toolbox: Toolbox, data_dir: str, interval: float = 3600, first_wait: float = 180):
+    """订阅管家:从邮件找订阅、扣款前两天提醒、每 30 天再找一次。"""
+    import friday_subscriptions
+
+    def to_myr(amount: float, currency: str) -> float | None:
+        fx = getattr(toolbox, "fx", None)
+        if not fx:
+            return None
+        try:
+            return amount * fx[0].rate(currency, "MYR")
+        except Exception:
+            return None
+
+    subs = friday_subscriptions.Subscriptions(os.path.join(data_dir, "friday_subscriptions.json"), to_myr=to_myr)
+    session.subscriptions = subs
+    toolbox.subscriptions = subs
+
+    def can_scan() -> str | None:
+        if getattr(toolbox, "google", None) is None:
+            return "要先在齿轮设定里连上 Google,我才能去邮箱找订阅。可以先自己加:“我订了 Netflix 每月 RM55 15 号扣”。"
+        if getattr(session, "assistant", None) is None:
+            return "星期五还没准备好,等一下再试。"
+        return None
+
+    def scan(quiet: bool = False) -> None:
+        if subs.scanning:
+            return
+        subs.scanning = True
+        try:
+            budget = getattr(session, "budget", None)
+            if budget is not None:
+                budget.before_ask()
+            mails = toolbox.google.mail_headers(friday_subscriptions.MAIL_QUERY)
+            classify = friday_subscriptions.classifier(session.assistant.client, getattr(session.assistant, "on_usage", None))
+            before = len(subs.items)
+            text = subs.scan(mails, classify)
+            if not quiet or len(subs.items) > before:
+                announce(session, text, "💳", "订阅整理好了,在窗口里")
+        except Exception as e:  # noqa: BLE001
+            if not quiet:
+                session.hub.broadcast({"type": "reminder", "text": f"💳 去邮箱找订阅没成功:{str(e)[:120] or type(e).__name__}"})
+        finally:
+            subs.scanning = False
+
+    def scan_soon() -> str:
+        problem = can_scan()
+        if problem:
+            return problem
+        if subs.scanning:
+            return "正在邮箱里找订阅了,好了会告诉你。"
+        threading.Thread(target=lambda: _quietly(scan), daemon=True, name="friday-subs-scan").start()
+        return "好,我去邮箱找收据和续订邮件(大约一两分钟),找好了告诉你。"
+
+    def loop() -> None:
+        time.sleep(first_wait)
+        while True:
+            def check() -> None:
+                for note in subs.due():
+                    announce(session, note, "💳", note)
+                if subs.scan_due() and can_scan() is None:
+                    scan(quiet=True)
+            _quietly(check)
+            time.sleep(interval)
+
+    session.subscription_scan = scan_soon
+    toolbox.subscription_scan = scan_soon
+    toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+    quick = getattr(session, "quick", None)
+    if quick is not None:
+        quick.extra.append(friday_subscriptions.Commands(subs, scan_soon))
+    threading.Thread(target=loop, daemon=True, name="friday-subscriptions").start()
+    return subs
 
 
 class MeetingCommands:
@@ -5078,6 +5176,7 @@ def run_web(args) -> None:
     _startup_step(session, "后台长任务", lambda: start_background(session, toolbox, data_dir))
     _startup_step(session, "会议记录", lambda: start_meeting(session, toolbox, data_dir, voice_module))
     _startup_step(session, "我的资料库", lambda: start_library(session, toolbox, data_dir))
+    _startup_step(session, "订阅管家", lambda: start_subscriptions(session, toolbox, data_dir))
     toolbox.meter, toolbox.budget = session.meter, getattr(session, "budget", None)
     import friday_scenes
 
