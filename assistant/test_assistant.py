@@ -65,15 +65,31 @@ if "anthropic" not in sys.modules:
 import anthropic  # noqa: E402
 
 
+def _bare_error(cls, message, **fields):
+    """不经过 __init__ 建一个错误(各版本的 anthropic 建法都不一样;程序只看 message、status_code)。"""
+    error = cls.__new__(cls)
+    Exception.__init__(error, message)
+    for name, value in {"message": message, "request": None, "response": None, "body": None, **fields}.items():
+        try:
+            setattr(error, name, value)
+        except AttributeError:  # 唯读的属性:不用设
+            pass
+    return error
+
+
 def api_connection_error(message="断网"):
     """断网的错误。测试用的桩是 APIConnectionError("…");真的 anthropic 要 message=、request=。"""
     cls = anthropic.APIConnectionError
     try:
         return cls(message)
     except TypeError:
+        pass
+    try:
         import httpx
 
         return cls(message=message, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+    except (ImportError, TypeError):  # 没有 httpx(新版的 anthropic 不一定用它)
+        return _bare_error(cls, message)
 
 
 def api_status_error(message, status_code=500, cls=None):
@@ -82,10 +98,15 @@ def api_status_error(message, status_code=500, cls=None):
     try:
         return cls(message, status_code=status_code)
     except TypeError:
+        pass
+    try:
         import httpx
 
         request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
         return cls(message, response=httpx.Response(status_code, request=request), body=None)
+    except (ImportError, TypeError):
+        return _bare_error(cls, message, status_code=status_code,
+                           response=SimpleNamespace(status_code=status_code, headers={}))
 
 
 def bare_env(values=None):

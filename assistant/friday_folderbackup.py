@@ -107,8 +107,10 @@ class FolderBackup:
         import friday_security
 
         lowered = str(target).lower()
+        in_temp = _inside(target, Path(tempfile.gettempdir()))  # 临时文件夹在 AppData 里面,但不是程序的东西
         if (friday_security.is_protected_write(target) or target == Path(target.anchor)
-                or any(part in lowered for part in ("\\windows", "\\program files", "\\programdata", "\\appdata"))):
+                or (not in_temp and any(part in lowered for part in ("\\windows", "\\program files", "\\programdata",
+                                                                      "\\appdata")))):
             raise ValueError("不能备份到这里(系统、程序、开机启动的文件夹,或整个硬盘的最上层);在里面建一个文件夹,例如 E:\\星期五备份")
         self.sources, self.dest = clean, str(target)
         self.blocked = False
