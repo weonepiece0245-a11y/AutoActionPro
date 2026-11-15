@@ -988,9 +988,44 @@ class ToolboxTest(TempDirTest):
         self.assertEqual(statuses, ["执行命令:echo 你好"])
 
     def test_failed_command_is_error(self):
+        # 退出码不是 0 但没有错误输出(像 findstr 没找到):不算出错,退出码照样写
         result, _ = self.run_tool(self.make_toolbox(), "run_command", {"command": "exit 3", "reason": "测试"})
-        self.assertTrue(result["is_error"])
+        self.assertNotIn("is_error", result)
         self.assertIn("退出码:3", result["content"])
+        py = f'"{sys.executable}" -c'
+        # 退出码不是 0 而且有错误输出:算出错
+        result, _ = self.run_tool(self.make_toolbox(), "run_command",
+                                  {"command": py + ' "import sys; sys.stderr.write(\'boom\'); sys.exit(2)"', "reason": "测试"})
+        self.assertTrue(result["is_error"])
+        self.assertIn("boom", result["content"])
+        # 退出码 0、只是把进度写在错误输出(git、pip 会这样):不算出错
+        result, _ = self.run_tool(self.make_toolbox(), "run_command",
+                                  {"command": py + ' "import sys; sys.stderr.write(\'progress 50%\')"', "reason": "测试"})
+        self.assertNotIn("is_error", result)
+        self.assertIn("progress 50%", result["content"])
+
+    def test_decode_mixed_utf8_and_gbk(self):
+        mixed = "中文 UTF-8\n".encode("utf-8") + "中文 GBK\n".encode("gbk") + "又是 UTF-8".encode("utf-8")
+        with mock.patch("locale.getpreferredencoding", return_value="gbk"):
+            self.assertEqual(tools._decode(mixed), "中文 UTF-8\n中文 GBK\n又是 UTF-8")  # 一行一行解,不会整段乱
+            self.assertEqual(tools._decode("全部 UTF-8".encode("utf-8")), "全部 UTF-8")
+            self.assertEqual(tools._decode("全部 GBK".encode("gbk")), "全部 GBK")
+
+    def test_read_long_file_by_lines(self):
+        toolbox = self.make_toolbox()
+        body = "\n".join(f"第{i}行 " + "字" * 50 for i in range(1, 4001))
+        Path(toolbox.workdir, "长.py").write_text(body, encoding="utf-8")
+        whole, _ = self.run_tool(toolbox, "read_file", {"path": "长.py"})
+        self.assertIn("用 start_line 读后面", whole["content"])
+        part, _ = self.run_tool(toolbox, "read_file", {"path": "长.py", "start_line": 3500, "lines": 3})
+        self.assertIn("3500\t第3500行", part["content"])
+        self.assertIn("3502\t第3502行", part["content"])
+        self.assertNotIn("第3503行", part["content"])
+        self.assertIn("下一段从第 3503 行开始", part["content"])
+        end, _ = self.run_tool(toolbox, "read_file", {"path": "长.py", "start_line": 3999})
+        self.assertIn("到最后一行了,共 4000 行", end["content"])
+        none, _ = self.run_tool(toolbox, "read_file", {"path": "长.py", "start_line": 9999})
+        self.assertTrue(none["is_error"])
 
     def test_write_then_read_file(self):
         toolbox = self.make_toolbox()
@@ -13374,6 +13409,19 @@ class CodeLabTest(TempDirTest):
         record = lab.self_test([{"file": "other.py", "old": "X = 1", "new": "X = 1  # 注解"}], "改 other")
         self.assertEqual(record["blind"], [])  # 改的地方测得到
         self.assertIn("通过了", friday_lab.Lab.describe(record))
+
+    def test_related_tests_know_module_aliases(self):
+        app_dir = Path(self.tmp, "app5")
+        app_dir.mkdir()
+        (app_dir / "test_assistant.py").write_text(
+            "import sys, unittest\nimport friday_tools\ntools = sys.modules[\"friday_tools\"]\nimport friday_web as fw\n\n"
+            "class ToolboxTest(unittest.TestCase):\n    def test_run(self):\n        tools.Toolbox\n\n"
+            "class WebTest(unittest.TestCase):\n    def test_x(self):\n        fw.Hub\n\n"
+            "class OtherTest(unittest.TestCase):\n    def test_y(self):\n        pass\n", encoding="utf-8")
+        failed = {"test_assistant.ToolboxTest.test_run", "test_assistant.WebTest.test_x", "test_assistant.OtherTest.test_y"}
+        # 测试里用别名 tools. 叫 friday_tools:改 friday_tools.py 时这组也算相关(以前漏掉,误报“通过”)
+        self.assertEqual(friday_lab.Lab.related_tests(app_dir, ["friday_tools.py"], failed), ["test_assistant.ToolboxTest.test_run"])
+        self.assertEqual(friday_lab.Lab.related_tests(app_dir, ["friday_web.py"], failed), ["test_assistant.WebTest.test_x"])
 
     def test_selftest_can_start_lab_runner_but_nothing_else(self):
         import shutil as _shutil

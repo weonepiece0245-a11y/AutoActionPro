@@ -478,6 +478,12 @@ class Lab:
         sections = {}
         for match in re.finditer(r"^class (\w+)\(.*?(?=^class \w+\(|\Z)", text, re.S | re.M):
             sections[match.group(1)] = match.group(0)
+        # 测试档案里给模块取的别名:tools = sys.modules["friday_tools"]、import friday_x as y
+        aliases: dict[str, set] = {}
+        for alias, module in re.findall(r'^(\w+)\s*=\s*sys\.modules\[["\'](\w+)["\']\]', text, re.M):
+            aliases.setdefault(module, set()).add(alias + ".")
+        for module, alias in re.findall(r"^import (\w+) as (\w+)", text, re.M):
+            aliases.setdefault(module, set()).add(alias + ".")
         keys = set()
         for name in changed:
             stem = Path(name).stem
@@ -487,6 +493,7 @@ class Lab:
                 keys.add("app.")
             elif stem != "test_assistant":
                 keys.add(stem)
+                keys |= aliases.get(stem, set())
         # 只看 class 里面(有缩排的那几行),名字要整个对上(friday_lab 不算 friday_label)
         patterns = [re.compile(r"^[ \t]+.*" + (re.escape(k) if k.endswith(".") else r"\b" + re.escape(k) + r"\b"), re.M)
                     for k in keys]
@@ -507,7 +514,8 @@ class Lab:
         record = {"kind": "self_test", "time": self.clock().strftime("%Y-%m-%d %H:%M"), "title": str(title or "自我测试")[:60],
                   "ok": ok, "ran": after.get("ran", 0), "baseline_failed": len(before_failed),
                   "new_failures": new_failures[:30], "fixed": fixed[:30], "changed": changed,
-                  "error": after.get("error", ""), "output": after.get("output", ""), "blind": blind[:30]}
+                  "error": after.get("error", ""), "output": after.get("output", ""), "blind": blind[:30],
+                  "baseline_list": sorted(before_failed)[:80]}
         record["report"] = self._write_report(record, edits)
         if after.get("ran"):
             step(f"   改过的:跑了 {after['ran']} 个测试,用了 {after.get('seconds', 0)} 秒")
@@ -540,6 +548,9 @@ class Lab:
         if record.get("blind"):
             lines[3] = "结果:⚠ 没法完全确认(没有多坏掉的,但相关测试本来就跑不了)"
             lines += ["", "改到的地方,这些相关测试在这台电脑本来就过不了(测不到):"] + [f"- {t}" for t in record["blind"]]
+        if record.get("baseline_list"):  # 给帮你升级的人看:哪些测试在这台电脑跑不了
+            lines += ["", f"这台电脑本来就过不了的测试({record['baseline_failed']} 个):"] + \
+                [f"- {t}" for t in record["baseline_list"][:80]]
         if record["fixed"]:
             lines += ["", "改了以后修好的:"] + [f"- {t}" for t in record["fixed"]]
         lines += ["", "改了什么:"]

@@ -226,11 +226,21 @@ class Memory:
 
 
 def _decode(data: bytes) -> str:
-    """命令输出可能是 UTF-8,也可能是系统编码(中文 Windows 上是 GBK)。"""
+    """命令输出可能是 UTF-8,也可能是系统编码(中文 Windows 上是 GBK),还可能两种混在一起
+    (例如 dir 出的是 GBK、findstr 一个 UTF-8 文件出的是 UTF-8)。
+    整段先当 UTF-8 解,成功就直接用;失败才一行一行解,每行先 UTF-8 再系统编码。(星期五自己提的改进)"""
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:
-        return data.decode(locale.getpreferredencoding(False), errors="replace")
+        pass
+    fallback = locale.getpreferredencoding(False)
+    lines = []
+    for line in data.splitlines(keepends=True):
+        try:
+            lines.append(line.decode("utf-8"))
+        except UnicodeDecodeError:
+            lines.append(line.decode(fallback, errors="replace"))
+    return "".join(lines)
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -316,10 +326,14 @@ CLIENT_TOOLS = [
     },
     {
         "name": "read_file",
-        "description": "读取用户电脑上的一个文本文件。用户提到某个文件、让你看看它的内容时调用。相对路径相对于默认工作目录。",
+        "description": ("读取用户电脑上的一个文本文件。用户提到某个文件、让你看看它的内容时调用。相对路径相对于默认工作目录。"
+                        "一次最多 10 万字;很长的文件(例如星期五自己的程序)用 start_line、lines 读某一段,"
+                        "结果会标出总行数和下一段从第几行开始。读程序用这个,不要用命令(编码会乱)。"),
         "input_schema": {
             "type": "object",
-            "properties": {"path": {"type": "string", "description": "文件路径"}},
+            "properties": {"path": {"type": "string", "description": "文件路径"},
+                           "start_line": {"type": "integer", "description": "从第几行开始读(第一行是 1;不给就从头)"},
+                           "lines": {"type": "integer", "description": "读几行(不给就读到 10 万字为止)"}},
             "required": ["path"],
         },
     },
@@ -2528,11 +2542,16 @@ class Toolbox:
             )
         except subprocess.TimeoutExpired:
             return f"命令超过 {COMMAND_TIMEOUT} 秒没有结束,已停止。", True
+        except OSError as e:
+            return f"命令开不起来:{e}", True
         output = f"退出码:{proc.returncode}\n{_decode(proc.stdout)}"
         stderr = _decode(proc.stderr)
         if stderr.strip():
             output += f"\n[错误输出]\n{stderr}"
-        return _truncate(output, MAX_OUTPUT_CHARS), proc.returncode != 0
+        # 算出错:超时、开不起来、退出码不是 0 而且有错误输出。
+        # 不算:退出码是 0(git、pip 会把进度写在错误输出);退出码不是 0 但没有错误输出(例如 findstr 没找到)。
+        # 退出码都照样写在结果第一行。
+        return _truncate(output, MAX_OUTPUT_CHARS), proc.returncode != 0 and bool(stderr.strip())
 
     def _read_file(self, args, on_status):
         path = self._resolve(args["path"])
@@ -2543,7 +2562,33 @@ class Toolbox:
         data = path.read_bytes()
         if b"\0" in data[:8000]:
             return f"{path} 看起来不是文本文件,无法直接读取。", True
-        return friday_security.mark_external(_truncate(_decode(data), MAX_READ_CHARS)), False
+        text = _decode(data)
+        start, count = args.get("start_line"), args.get("lines")
+        if start or count:  # 读某一段:每行前面标行号
+            all_lines = text.splitlines()
+            first = max(1, int(start or 1))
+            picked, size, last = [], 0, first - 1
+            for number in range(first, len(all_lines) + 1):
+                if count and number - first >= int(count):
+                    break
+                line = f"{number}\t{all_lines[number - 1]}"
+                if size + len(line) > MAX_READ_CHARS:
+                    break
+                picked.append(line)
+                size += len(line) + 1
+                last = number
+            tail = (f"\n……(共 {len(all_lines)} 行;下一段从第 {last + 1} 行开始)" if last < len(all_lines)
+                    else f"\n(到最后一行了,共 {len(all_lines)} 行)")
+            if not picked:
+                return f"{path} 只有 {len(all_lines)} 行,没有第 {first} 行。", True
+            return friday_security.mark_external("\n".join(picked) + tail), False
+        if len(text) > MAX_READ_CHARS:
+            lines_total = text.count("\n") + 1
+            cut = text[:MAX_READ_CHARS]
+            return friday_security.mark_external(
+                cut + f"\n……(内容太长,只给了前 {MAX_READ_CHARS} 个字,大约到第 {cut.count(chr(10)) + 1} 行;"
+                      f"共 {lines_total} 行,用 start_line 读后面)"), False
+        return friday_security.mark_external(text), False
 
     def _write_file(self, args, on_status):
         path = self._resolve(args["path"])
