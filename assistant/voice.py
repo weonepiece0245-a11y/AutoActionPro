@@ -591,18 +591,38 @@ def transcribe_detail(data: bytes, engine: str | None = None, language: str = "z
 
     engine = engine or os.environ.get("FRIDAY_STT") or "google"
     pcm = decode_audio(data)
+    if engine == "whisper":  # 本机 Whisper:华语夹英文、马来文认得准;出问题就退回 Google
+        import friday_whisper
+
+        global WHISPER_PROBLEM
+        try:
+            words = friday_voicefix.VOCAB.known() + list(friday_voicefix.MALAYSIA.values())
+            text, confidence = friday_voicefix.pick(friday_whisper.transcribe(pcm, language, words))
+            WHISPER_PROBLEM = ""
+            # Whisper 的把握度和 Google 不一样:只有很低的才当成“没把握”(先问你是不是这个意思)
+            return friday_voicefix.clean(text, language), (confidence if confidence is not None and confidence < 0.45 else None)
+        except Exception as e:  # noqa: BLE001
+            WHISPER_PROBLEM = str(e)[:200]
+            print(f"本机语音识别用不了,改用 Google:{WHISPER_PROBLEM}", flush=True)
+            engine = "google"
     alternatives = _transcribe_raw(pcm, engine, language)
     text, confidence = friday_voicefix.pick(alternatives)
     if (engine == "google" and str(language).lower().startswith("zh") and friday_voicefix.unsure(confidence)
             and friday_voicefix.mixed_enabled()):
-        # 中英马混着说:中文听得没把握,再用英文听一次;英文很有把握、而且几乎都是英文字母,就用英文的
-        try:
-            english, sure = friday_voicefix.pick(_transcribe_raw(pcm, engine, "en-US"))
-        except VoiceUnavailable:
-            english, sure = None, None
-        if english and sure is not None and sure >= 0.8 and friday_voicefix.mostly_latin(english):
-            text, confidence = english, sure
+        # 中英马混着说:中文听得没把握,再用马来西亚英文、马来文各听一次;很有把握、而且几乎都是字母,就用那个
+        for other in ("en-MY", "ms-MY"):
+            try:
+                guess, sure = friday_voicefix.pick(_transcribe_raw(pcm, engine, other))
+            except VoiceUnavailable:
+                guess, sure = None, None
+            if guess and sure is not None and sure >= 0.8 and friday_voicefix.mostly_latin(guess) \
+                    and sure > (confidence or 0):
+                text, confidence = guess, sure
+                break
     return friday_voicefix.clean(text, language), confidence
+
+
+WHISPER_PROBLEM = ""  # 本机语音识别最近一次出的问题(设定里显示)
 
 
 def _transcribe_raw(pcm: bytes, engine: str, language: str) -> list[tuple[str, float | None]]:

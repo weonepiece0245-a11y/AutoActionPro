@@ -11515,13 +11515,76 @@ class VocabTest(TempDirTest):
         sr = FakeSR([{"alternative": [{"transcript": "被 可 那 格拉", "confidence": 0.35}]},
                      {"alternative": [{"transcript": "book a Grab", "confidence": 0.92}]},
                      {"alternative": [{"transcript": "明天下雨吗", "confidence": 0.4}]},
-                     {"alternative": [{"transcript": "ming tian", "confidence": 0.5}]}])
+                     {"alternative": [{"transcript": "ming tian", "confidence": 0.5}]},
+                     {"alternative": [{"transcript": "hujan esok", "confidence": 0.6}]}])
         with mock.patch.object(voice, "decode_audio", return_value=b"PCM"), \
                 mock.patch.dict(sys.modules, {"speech_recognition": sr}), \
                 mock.patch.dict(os.environ, {"FRIDAY_STT": "google", "FRIDAY_STT_MIXED": "on"}):
             self.assertEqual(voice.transcribe_detail(b"OGG"), ("book a Grab", 0.92))
-            self.assertEqual(voice.transcribe_detail(b"OGG"), ("明天下雨吗", 0.4))  # 英文也没把握:用中文的
-        self.assertEqual([lang for _, lang in sr.recognized], ["zh-CN", "en-US", "zh-CN", "en-US"])
+            self.assertEqual(voice.transcribe_detail(b"OGG"), ("明天下雨吗", 0.4))  # 英文、马来文也没把握:用中文的
+        self.assertEqual([lang for _, lang in sr.recognized], ["zh-CN", "en-MY", "zh-CN", "en-MY", "ms-MY"])
+
+    def test_local_whisper_engine_and_fallback(self):
+        import numpy  # noqa: F401
+
+        import friday_whisper
+
+        calls = []
+
+        class Model:
+            def __init__(self, size, device, compute_type, download_root):
+                calls.append(("load", size, device))
+                if device == "cuda":
+                    raise RuntimeError("no CUDA")
+
+            def transcribe(self, audio, **kw):
+                calls.append(("transcribe", kw["language"], kw["initial_prompt"]))
+                segs = [SimpleNamespace(text="星期五,帮我 check 一下", avg_logprob=-0.2, no_speech_prob=0.01),
+                        SimpleNamespace(text="明天的 meeting", avg_logprob=-0.3, no_speech_prob=0.02)]
+                return iter(segs), SimpleNamespace(language="zh")
+
+        fake = types.ModuleType("faster_whisper")
+        fake.WhisperModel = Model
+        self.vocab.set_words(["tapau"])
+        pcm = b"\x00\x01" * 16000
+        with mock.patch.object(voice, "decode_audio", return_value=pcm), \
+                mock.patch.dict(sys.modules, {"faster_whisper": fake}), \
+                mock.patch.object(friday_whisper, "_model", None), mock.patch.object(friday_whisper, "_failed", ""), \
+                mock.patch.dict(os.environ, {"FRIDAY_STT": "whisper"}):
+            text, sure = voice.transcribe_detail(b"OGG")
+            self.assertEqual(text, "星期五,帮我 check 一下明天的 meeting")
+            self.assertIsNone(sure)  # 有把握:不用再问
+            self.assertEqual([c[2] for c in calls if c[0] == "load"], ["cuda", "cpu"])  # 显卡不行换 CPU
+            language, prompt = [c[1:] for c in calls if c[0] == "transcribe"][0]
+            self.assertIsNone(language)  # 华语:让它自己判断(会夹英文、马来文)
+            self.assertIn("tapau", prompt)
+            self.assertIn("Bahasa Melayu", prompt)
+            self.assertEqual(voice.transcribe_detail(b"OGG", language="en-US")[0], "星期五,帮我 check 一下明天的 meeting")
+            self.assertEqual([c[1] for c in calls if c[0] == "transcribe"][-1], "en")
+        sr = FakeSR([{"alternative": [{"transcript": "用 Google 听的", "confidence": 0.9}]}])
+        with mock.patch.object(voice, "decode_audio", return_value=pcm), \
+                mock.patch.dict(sys.modules, {"speech_recognition": sr}), \
+                mock.patch.object(friday_whisper, "_model", None), \
+                mock.patch.object(friday_whisper, "load", side_effect=RuntimeError("还没装本机语音识别")), \
+                mock.patch.dict(os.environ, {"FRIDAY_STT": "whisper"}):
+            self.assertEqual(voice.transcribe_detail(b"OGG"), ("用 Google 听的", 0.9))  # 没装好:退回 Google
+            self.assertIn("还没装", voice.WHISPER_PROBLEM)
+
+    def test_whisper_install_and_simplified(self):
+        import friday_whisper
+
+        ran = []
+
+        def run(cmd, **kw):
+            ran.append(cmd)
+            if cmd[0] == "nvidia-smi":
+                return SimpleNamespace(returncode=0, stdout=b"GPU 0: NVIDIA GeForce RTX 4070", stderr=b"")
+            return SimpleNamespace(returncode=1, stdout=b"", stderr=b"ERROR: No matching distribution for ctranslate2")
+        with self.assertRaises(RuntimeError) as e:
+            friday_whisper.install(run=run)
+        self.assertIn("ctranslate2", str(e.exception))
+        self.assertIn("nvidia-cublas-cu12", ran[-1])  # 有显卡:连显卡用的程序库一起装
+        self.assertEqual(friday_whisper.to_simplified("這個會議還沒確定,幫我記帳"), "这个会议还没确定,帮我记账")
 
     def test_settings(self):
         session = app.WebSession(None, app.default_persona(), friday_web.Hub())

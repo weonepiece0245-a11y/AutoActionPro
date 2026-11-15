@@ -395,7 +395,10 @@
     <div class="set-group" id="learnGroup" hidden data-cat="voice">
       <h3>听懂我(被纠正就记住、中英马混着说)</h3>
       <div class="set-row"><label for="setLearn">被纠正就记住:你说“不是这个意思”“我是说……”,我把教训记进记忆(每次约 RM0.005)</label><input type="checkbox" class="switch" id="setLearn"></div>
-      <div class="set-row"><label for="setSttMixed">中英马混着说:中文听得没把握时,再用英文听一次</label><input type="checkbox" class="switch" id="setSttMixed"></div>
+      <div class="set-row"><label for="setSttEngine">语音识别:华语夹 English、Bahasa 说的话,本机 Whisper 认得准很多(在你电脑上认,不上传、不花钱;第一次要下载约 1.6GB)</label>
+        <select class="mini-select" id="setSttEngine"><option value="google">Google(快,要上网)</option><option value="whisper">本机 Whisper(中英马混着说)</option></select></div>
+      <div class="set-note" id="sttNote" hidden></div>
+      <div class="set-row"><label for="setSttMixed">用 Google 时:华语听得没把握,再用马来西亚英文、马来文各听一次</label><input type="checkbox" class="switch" id="setSttMixed"></div>
       <div class="set-row"><label for="vocabWords">我的常用词(听到好几个可能时,优先选有这些词的)</label>
         <span class="set-ctl"><input class="mini-input wide" id="vocabWords" maxlength="1500" placeholder="例如 Mid Valley, Grab, tapau, mamak"><button type="button" class="mini-btn" id="vocabWordsSave">保存</button></span></div>
       <div class="set-row"><label for="vocabHeard">听错改正:听到 → 改成</label>

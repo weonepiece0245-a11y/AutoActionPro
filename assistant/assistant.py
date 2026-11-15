@@ -2298,8 +2298,46 @@ def vocab_state(session) -> dict | None:
     if vocab is None:
         return None
     lessons = getattr(session, "lessons", None)
+    import friday_whisper
+
+    stt = {"engine": os.environ.get("FRIDAY_STT", "google") or "google", "installing": WHISPER_INSTALL["busy"],
+           "note": WHISPER_INSTALL["note"], "info": friday_whisper.info(),
+           "problem": getattr(sys.modules.get("voice"), "WHISPER_PROBLEM", "")}
     return {"fixes": vocab.fixes, "words": vocab.words, "learn": friday_lessons.learning_enabled(),
-            "mixed": friday_voicefix.mixed_enabled(), "lessons": len(lessons.items()) if lessons is not None else 0}
+            "mixed": friday_voicefix.mixed_enabled(), "lessons": len(lessons.items()) if lessons is not None else 0,
+            "stt": stt}
+
+
+WHISPER_INSTALL = {"busy": False, "note": ""}  # 本机语音识别正在装 / 装的结果
+
+
+def install_whisper(session, env: str) -> str:
+    """在背景装本机 Whisper(程序库 + 模型),装好就换过去;装不成就留在 Google。"""
+    import friday_whisper
+
+    if WHISPER_INSTALL["busy"]:
+        return "正在装本机语音识别了,装好会告诉你。"
+
+    def status(text: str) -> None:
+        WHISPER_INSTALL["note"] = text
+        session.hub.broadcast({"type": "status", "text": text})
+        session.hub.broadcast({"type": "mailscan"})
+
+    def job() -> None:
+        WHISPER_INSTALL["busy"] = True
+        try:
+            text = friday_whisper.install(on_status=status)
+            save_env_value(env, "FRIDAY_STT", "whisper")
+            os.environ["FRIDAY_STT"] = "whisper"
+            status("🎙 " + text)
+        except Exception as e:  # noqa: BLE001
+            status(f"⚠ 本机语音识别没装成,继续用 Google:{str(e)[:300]}")
+        finally:
+            WHISPER_INSTALL["busy"] = False
+            session.hub.broadcast({"type": "mailscan"})
+
+    threading.Thread(target=job, daemon=True, name="friday-whisper-install").start()
+    return "好,开始装本机语音识别(装程序库 + 下载约 1.6GB 的模型,要几分钟到十几分钟),装好会自动换过去。"
 
 
 def memtidy_state(session) -> dict | None:
@@ -3148,9 +3186,20 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
                 done.append(f"「{scene['name']}」:" + (";".join(steps) or "做好了"))
         except ValueError as e:
             return {"error": str(e)}
+    if "stt_engine" in payload:
+        engine = str(payload["stt_engine"])
+        if engine not in ("google", "whisper"):
+            return {"error": "没有这个选项"}
+        if engine == "whisper" and not __import__("friday_whisper").installed():
+            done.append(install_whisper(session, env))
+        else:
+            save_env_value(env, "FRIDAY_STT", engine)
+            os.environ["FRIDAY_STT"] = engine
+            done.append("语音识别改用本机 Whisper(在你电脑上认,不上传)" if engine == "whisper"
+                        else "语音识别改用 Google(快,要上网)")
     for field, key, on_text, off_text in (
             ("learn", "FRIDAY_LEARN", "被纠正时我会把教训记下来", "被纠正时不自动记教训了"),
-            ("stt_mixed", "FRIDAY_STT_MIXED", "中文听得没把握时,我会再用英文听一次", "只用中文听")):
+            ("stt_mixed", "FRIDAY_STT_MIXED", "中文听得没把握时,我会再用马来西亚英文、马来文听一次", "只用中文听")):
         if field in payload:
             on = bool(payload[field])
             save_env_value(env, key, "on" if on else "off")
@@ -6494,6 +6543,9 @@ def run_web(args) -> None:
     _startup_step(session, "下载的账单自动归档", lambda: start_bill_filer(session, toolbox, data_dir))
     _startup_step(session, "月结单导入记账", lambda: start_statements(session, toolbox, data_dir))
     _startup_step(session, "每周自我检讨", lambda: start_self_review(session, toolbox, data_dir))
+    if os.environ.get("FRIDAY_STT") == "whisper":  # 先在背景载入本机语音模型:第一句话才不会等
+        threading.Thread(target=lambda: _quietly(lambda: __import__("friday_whisper").load()), daemon=True,
+                         name="friday-whisper-load").start()
     toolbox.meter, toolbox.budget = session.meter, getattr(session, "budget", None)
     import friday_scenes
 

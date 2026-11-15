@@ -1449,6 +1449,14 @@ function fillSettings() {
   $("learnGroup").hidden = !vc;
   if (vc) {
     $("setLearn").checked = vc.learn; $("setSttMixed").checked = vc.mixed;
+    const stt = vc.stt || {};
+    $("setSttEngine").value = stt.installing ? "whisper" : (stt.engine || "google");
+    const sttText = stt.installing ? (stt.note || "🎙 正在装本机语音识别……")
+      : stt.problem && stt.engine === "whisper" ? "⚠ 本机语音识别出问题,这次改用 Google 听:" + stt.problem
+      : stt.engine === "whisper" && stt.info ? `🎙 正在用本机 Whisper(${stt.info})`
+      : stt.note && stt.note.startsWith("⚠") ? stt.note : "";
+    $("sttNote").hidden = !sttText;
+    $("sttNote").textContent = sttText;
     if (document.activeElement !== $("vocabWords")) $("vocabWords").value = vc.words.join(", ");
     const list = $("vocabList");
     list.replaceChildren();
@@ -2164,6 +2172,7 @@ $("bgCancel").onclick = () => saveSetting({ bg_cancel: true });
 $("bgOpen").onclick = () => saveSetting({ bg_open: true });
 $("setLearn").onchange = (e) => saveSetting({ learn: e.target.checked });
 $("setSttMixed").onchange = (e) => saveSetting({ stt_mixed: e.target.checked });
+$("setSttEngine").onchange = (e) => saveSetting({ stt_engine: e.target.value }, 6000);
 $("vocabWordsSave").onclick = () => saveSetting({ vocab_words: $("vocabWords").value });
 $("vocabAdd").onclick = async () => {
   if (await saveSetting({ vocab_add: { heard: $("vocabHeard").value, meant: $("vocabMeant").value } })) {
