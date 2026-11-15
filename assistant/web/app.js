@@ -409,11 +409,10 @@ function handle(ev) {
       if (speaking && !readerPlaying) { audioEl.defaultPlaybackRate = speechRate; audioEl.playbackRate = speechRate; }
       break;
     case "audio_pause":
-      if (speaking && !readerPlaying) { audioEl.pause(); audioPaused = true; stopBargeWatch(); }
+      if (speaking && !readerPlaying) { audioEl.pause(); audioPaused = true; speaking = false; stopBargeWatch(); refreshMode(); }
       break;
     case "audio_resume":
-      if (audioPaused) { audioPaused = false; audioEl.play().catch(() => {}); }
-      break;
+      resumeSpeaking(); break;
     case "stop_audio":
       audioPaused = false; stopSpeaking(); break;
     case "sleeptimer":
@@ -630,7 +629,7 @@ async function uploadPending() {
 async function sendText(text) {
   if ((!text && !pending.length) || busy) return;
   ensureAudio();
-  stopSpeaking();
+  pauseSpeaking();
   followUpTurn = null;  // 打字问的,不用接着听
   removeChips();
   beep(660, 0.06);
@@ -2060,9 +2059,32 @@ function enqueueAudio(url, turn) {
   if (turn !== undefined && turn <= ignoreTurn) return;
   if (turn !== undefined && turn !== audioTurn) { stopSpeaking(); audioTurn = turn; }
   audioQueue.push(url);
-  if (!speaking) playNext();
+  if (!speaking && !audioPaused) playNext();  // 暂停着:先排着,说“继续”再播
+}
+// 你开口(按麦克风、说话打断、打字送出)时:回答先暂停、记住读到哪,告诉星期五;
+// 你说“继续”就接着读,“别读了”就丢掉,问别的她会叫窗口丢掉旧的再回答
+function pauseSpeaking() {
+  if (reader || readerPlaying) { stopSpeaking(); return false; }  // 读文章:停在那一段,说“继续”接着读(原来的做法)
+  if (!speaking) return audioPaused;
+  audioEl.pause();
+  audioPaused = true;
+  speaking = false; orbState.level = 0; stopBargeWatch(); refreshMode();
+  api("/api/command", { command: "speech_paused" }).catch(() => {});
+  return true;
+}
+function resumeSpeaking(tell = false) {
+  if (!audioPaused) return;
+  audioPaused = false;
+  speaking = true; refreshMode();
+  if (tell) api("/api/command", { command: "speech_resumed" }).catch(() => {});
+  if (audioEl.src && !audioEl.ended && audioEl.currentTime > 0) {
+    audioEl.play().then(startBargeWatch).catch(() => playNext());
+  } else {
+    playNext();
+  }
 }
 function stopSpeaking() {
+  audioPaused = false;
   if (reader || readerPlaying) stopReaderLocal();
   stopBargeWatch();
   if (audioTurn !== null) ignoreTurn = Math.max(ignoreTurn, audioTurn);
@@ -2185,7 +2207,7 @@ async function listen({ followUp = false, stream = null, spoke = false } = {}) {
   if (recorder) return;
   followUpTurn = null;
   ensureAudio();
-  if (!spoke) stopSpeaking();
+  if (!spoke) pauseSpeaking();
   if (!stream) {
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
@@ -2231,11 +2253,11 @@ async function listen({ followUp = false, stream = null, spoke = false } = {}) {
     recorder = null;
     orbState.level = 0;
     refreshMode();
-    if (!spoke) { if (!followUp) toast("没听到声音"); return; }
+    if (!spoke) { if (!followUp) toast("没听到声音"); resumeSpeaking(true); return; }  // 你没说话:接着读
     const pendingLine = addLine("识别中……");
     const r = await api("/api/voice", new Blob(chunks, { type: type || "audio/webm" }), { "X-Speak": speakOn ? "1" : "0" });
     pendingLine.remove(); // 识别完了(听清了会显示你说的话,没听清会提示),这一行不用留着
-    if (!r.text) toast(r.error ? `语音识别失败:${r.error}` : "没听清,再说一次?", 3500);
+    if (!r.text) { toast(r.error ? `语音识别失败:${r.error}` : "没听清,再说一次?", 3500); resumeSpeaking(true); }
   };
   recorder.start(250);
   watch();
@@ -2269,7 +2291,7 @@ async function startBargeWatch() {
       if (++loud >= BARGE_FRAMES) {  // 大约 0.2 秒都比她的声音大:是你在说话
         clearInterval(timer);
         bargeStream = null;
-        stopSpeaking();
+        pauseSpeaking();
         listen({ stream, spoke: true });
       }
     } else {

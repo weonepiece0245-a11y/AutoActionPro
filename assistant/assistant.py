@@ -1178,15 +1178,20 @@ class SpeechControls:
         found = self.SPEED.match(sentence)
         if found:
             faster = None if not found.group(2) else found.group(2) == "快"
-            return self._quiet(session.set_speech_rate(faster))
+            reply = session.set_speech_rate(faster)
+            if session._audio_paused:  # 你一开口她先停了:改好速度就接着读
+                session.resume_speech()
+                session.hub.broadcast({"type": "audio_resume"})
+            return self._quiet(reply)
         if not (session.still_speaking() or session._audio_paused):
             return None
-        if self.PAUSE.match(sentence) and not session._audio_paused:
-            session._audio_paused = True
-            session.hub.broadcast({"type": "audio_pause"})
+        if self.PAUSE.match(sentence):
+            if not session._audio_paused:
+                session.pause_speech()
+                session.hub.broadcast({"type": "audio_pause"})
             return self._quiet("好,先停一下。说“继续”接着读。")
         if self.RESUME.match(sentence) and session._audio_paused:
-            session._audio_paused = False
+            session.resume_speech()
             session.hub.broadcast({"type": "audio_resume"})
             return self._quiet("好,接着读。")
         if self.STOP.match(sentence):
@@ -1199,6 +1204,7 @@ class SpeechControls:
         return None
 
     def _quiet(self, reply: str) -> str:
+        self.session._control_handled = True
         quick = getattr(self.session, "quick", None)
         if quick is not None:
             quick.silent = True  # 这句不用再读出来(读出来会把正在读的切掉)
@@ -1333,9 +1339,13 @@ class WebSession:
         interpreter = getattr(self, "interpreter", None)
         if interpreter is not None and interpreter.active and source in ("web", "voice") and not blocks and not prefix:
             return self._interpret(text, source)
-        if (self._leftover and not self._audio_paused and source in ("web", "voice", "ptt")
+        if source in ("web", "voice", "ptt"):
+            self.pause_speech()  # 窗口没来得及说的话(旧版窗口):也当成先暂停
+        at_end = not self._audio_paused or self._paused_left < 5  # 已经读到“要我接着读吗”那里了
+        if (self._leftover and at_end and source in ("web", "voice", "ptt")
                 and CONTINUE_READING.match(text.strip())):
             hub.broadcast({"type": "status", "text": "🔊 接着读"})
+            self._audio_paused = False
             if self.speak_leftover():
                 return "好,接着读。"
         if source != "task" and self._leftover:
@@ -1344,7 +1354,10 @@ class WebSession:
             self._read_note = (f"[上一条回答语音只读到“……{spoken}”,后面没有读出来,{self._call_me_hint()}只在窗口看得到文字]"
                                if spoken else "")
             self._leftover = ""
+        self._control_handled = False
         quick = self._quick_reply(text) if source != "task" and not prefix and not blocks else None
+        if not self._control_handled:
+            self.drop_paused_speech()  # 不是“暂停 / 继续 / 别读了”:暂停着的回答就不读了,回答新的
         if quick:
             quick = cjk_punct(quick)
             hub.broadcast({"type": "status", "text": "⚡ 电脑上直接办好了,没有问 Claude(不花钱)"})
@@ -1531,6 +1544,37 @@ class WebSession:
     _speak_waiting = False
     _audio_paused = False
 
+    _paused_left = 0.0  # 暂停时还剩几秒没播
+    _control_handled = False  # 这句是不是朗读控制(暂停 / 继续 / 别读了)
+
+    def pause_speech(self, window_says: bool = False) -> None:
+        """窗口把正在读的回答暂停了(你开口说话、打字):先停着,看你说的是什么再决定。
+        window_says:窗口说它真的停了(就算估计的播放时间已经过了也信它)。"""
+        stream = self._stream
+        playing = window_says and stream is not None and not stream.cancelled
+        if not self._audio_paused and (playing or self.still_speaking()):
+            self._audio_paused = True
+            self._paused_left = max(0.0, self._speech_until - time.time())
+
+    def resume_speech(self) -> None:
+        if self._audio_paused:
+            self._audio_paused = False
+            self._speech_until = time.time() + self._paused_left
+
+    def drop_paused_speech(self, why: str = "问了别的") -> None:
+        """暂停着的回答不读了(你问了别的)。"""
+        if self._audio_paused:
+            self._audio_paused = False
+            if self._stream is not None:
+                self._stream.cancel(why)
+            self.hub.broadcast({"type": "stop_audio"})
+
+    def speech_signal(self, what: str) -> None:
+        if what == "speech_paused":
+            self.pause_speech(window_says=True)
+        elif what == "speech_resumed":
+            self.resume_speech()
+
     @staticmethod
     def _call_me_hint() -> str:
         return os.environ.get("FRIDAY_CALL_ME") or "老板"
@@ -1574,7 +1618,8 @@ class WebSession:
 
         def publish(audio: bytes) -> None:
             # 窗口按顺序播:估一下这段要播多久(Edge 语音是 48kbps 的 MP3,一秒大约 6000 字节)
-            self._speech_until = max(self._speech_until, time.time()) + len(audio) / 6000
+            rate = __import__("friday_reader").speech_rate()  # 读慢一点:播得久一点
+            self._speech_until = max(self._speech_until, time.time()) + len(audio) / 6000 / rate
             self.hub.broadcast({"type": "audio", "url": f"/audio/{self.hub_audio.put(audio)}.mp3", "turn": turn})
 
         def ended() -> None:
@@ -5803,6 +5848,7 @@ def run_web(args) -> None:
         hub.broadcast({"type": "error", "text": f"🛡 {crash_reason},守护程序已经自动把我重新打开了。"})
         phone_alert(session, f"🛡 {crash_reason},守护程序已经自动把星期五重新打开了。", delay=60)
     ctx.lock = session.window_lock
+    ctx.speech = session.speech_signal
     import friday_quick
 
     session.quick = friday_quick.QuickCommands(toolbox, meter=session.meter, budget=getattr(session, "budget", None))

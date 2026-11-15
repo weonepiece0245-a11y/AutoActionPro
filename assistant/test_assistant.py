@@ -12792,6 +12792,67 @@ class LongSpeechTest(TempDirTest):
         self.assertEqual(events[-1], {"type": "stop_audio"})
         self.assertTrue(stream.cancelled)
 
+    def test_speaking_to_her_pauses_then_decides(self):
+        class FakeAssistant:
+            exchanges = []
+
+            def __init__(self):
+                self.asked = []
+
+            def ask(self, text, on_text, on_status):
+                self.asked.append(text)
+                return "回答"
+
+            def remember_local(self, question, answer):
+                pass
+        session, events = self.make_session()
+        session.assistant = FakeAssistant()
+        session.quick = friday_quick.QuickCommands(SimpleNamespace())
+        session.quick.extra.insert(0, app.SpeechControls(session))
+
+        def reading():
+            stream = session._new_stream()
+            stream.feed("很长很长的回答。")
+            stream.finish()
+            self.wait(stream)
+            session._speech_until = time.time() + 20
+            return stream
+        # 1. 你一开口:窗口先暂停、告诉星期五;说“继续”就接着读,不交给 Claude
+        stream = reading()
+        session.speech_signal("speech_paused")
+        self.assertTrue(session._audio_paused)
+        self.assertGreater(session._paused_left, 15)
+        time.sleep(0.05)
+        self.assertEqual(session.ask("继续", source="voice", speak=True), "好，接着读。")
+        self.assertIn({"type": "audio_resume"}, events)
+        self.assertFalse(session._audio_paused)
+        self.assertFalse(stream.cancelled)
+        self.assertEqual(session.assistant.asked, [])
+        # 2. “暂停”:保持暂停
+        events.clear()
+        session.speech_signal("speech_paused")
+        self.assertIn("先停一下", session.ask("暂停", source="voice", speak=True))
+        self.assertTrue(session._audio_paused)
+        self.assertNotIn({"type": "stop_audio"}, events)
+        # 3. 问了别的:丢掉暂停着的,回答新问题
+        session.ask("帮我写一首诗", source="voice", speak=False)
+        self.assertIn({"type": "stop_audio"}, events)
+        self.assertTrue(stream.cancelled)
+        self.assertEqual(len(session.assistant.asked), 1)
+        # 4. 窗口说接着播(你没说话):星期五也知道还在读
+        stream = reading()
+        session.speech_signal("speech_paused")
+        session.speech_signal("speech_resumed")
+        self.assertFalse(session._audio_paused)
+        self.assertTrue(session.still_speaking())
+        # 5. 估计的播放时间过了,但窗口说它停了:也信它
+        stream = reading()
+        session._speech_until = time.time() - 1
+        session.speech_signal("speech_paused")
+        self.assertTrue(session._audio_paused)
+        self.assertIn("不读了", session.ask("别读了", source="voice", speak=True))
+        self.assertTrue(stream.cancelled)
+
     def test_claude_told_about_reading(self):
         class FakeAssistant:
             exchanges = []

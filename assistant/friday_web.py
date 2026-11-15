@@ -367,6 +367,7 @@ class WebContext:
         self.lock = None  # 窗口锁(friday_locks.WindowLock);锁着时只能解锁
         self.uploads: dict[str, tuple] = {}  # 贴进来、拖进来的文件:id -> (文件名, 类型, 内容, 时间)
         self.reader = None  # 读给我听(friday_reader.Reader)
+        self.speech: Callable[[str], None] | None = None  # 窗口暂停 / 接着播回答的声音(speech_paused / speech_resumed)
         self.orb_state: Callable[[], dict] | None = None  # 桌面小光球要的状态(在听/在说/颜色/声音大小)
         self.orb_action: Callable[[str], None] | None = None  # 小光球被点了:click / open / hide
         self.dashboard = None  # 主画面仪表板(friday_dashboard.Dashboard)
@@ -625,6 +626,10 @@ def make_handler(ctx: WebContext):
                 return self._json(200 if ok else 404, {"ok": ok})
             if url.path == "/api/command":
                 command = str(data.get("command") or "")
+                if command in ("speech_paused", "speech_resumed"):  # 窗口暂停 / 接着播回答:马上告诉星期五(不排队)
+                    if ctx.speech is not None:
+                        ctx.speech(command)
+                    return self._json(200, {"ok": True})
                 if command not in ("clear", "update", "model:auto", "model:opus", "model:sonnet"):
                     return self._json(400, {"error": "不支持的命令"})
                 ctx.events.put(("command", command))
