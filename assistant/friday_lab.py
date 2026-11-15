@@ -538,7 +538,7 @@ class Lab:
     def summary(self) -> str:
         items = self.recent(6)
         if not items:
-            return "代码实验室还没跑过东西。叫我“算一下……”“把这个 Excel 整理成……”,我会写代码在实验室里跑。"
+            return "老板,实验室还空着呢,一次都没开过工~想算贷款、整理 Excel,直接跟我说“帮我算一下……”就好,我写好代码在这里跑给你看。"
         lines = [f"- {r['time']} {'✅' if r['ok'] else '❌'} {r['title']}" for r in items]
         return ("正在跑:" + self.busy + "\n" if self.busy else "") + "代码实验室最近:\n" + "\n".join(lines)
 
