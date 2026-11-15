@@ -421,6 +421,11 @@
         <span class="set-ctl"><button type="button" class="mini-btn" id="tidyNow">整理</button><button type="button" class="mini-btn" id="tidyUndo">撤销上次整理</button></span></div>
       <div class="set-row"><label for="photoFolder">照片按月整理</label>
         <span class="set-ctl"><input class="mini-input" id="photoFolder" placeholder="不填就是“图片”文件夹"><button type="button" class="mini-btn" id="photoSort">整理</button><button type="button" class="mini-btn" id="photoUndo">撤销</button></span></div>
+      <div id="billGroup" hidden>
+        <div class="set-row"><label for="setBillFile">下载的账单自动归档:新的账单、收据、发票、月结单 PDF,10 分钟后改成“2026-11 TNB 电费 RM120.50”放进归档文件夹</label><input type="checkbox" class="switch" id="setBillFile"></div>
+        <div class="set-row sub"><label for="setBillFolder">归档到</label><input class="mini-input wide" id="setBillFolder" placeholder=""><button type="button" class="mini-btn" id="billFolderSave">保存</button><button type="button" class="mini-btn" id="billUndo">撤销上次</button></div>
+        <div class="set-note" id="billNote"></div>
+      </div>
       <div class="set-row" id="photoFindRow" hidden><span id="photoFindNote">照片按时间地点找</span>
         <span class="set-ctl"><button type="button" class="mini-btn" id="photoReindex">重新整理目录</button></span></div>
       <div class="set-row"><span id="virusNote">病毒扫描(Windows 自带的 Defender)</span>

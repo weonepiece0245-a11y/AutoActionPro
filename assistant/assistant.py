@@ -2744,6 +2744,7 @@ def settings_state(session, meter=None) -> dict:
         "rain_alert": __import__("friday_alerts").rain_time(),
         "event_lead": __import__("friday_events").lead_minutes() if google_ready(session) else None,
         "departure": departure_state(session),
+        "billfile": billfile_state(session),
         "photofind": session.photofind.stats() if getattr(session, "photofind", None) is not None else None,
         "mail_alert": mail_alert_state(session),
         "memtidy": memtidy_state(session),
@@ -3386,6 +3387,28 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         save_env_value(env, "FRIDAY_EVENT_LEAD", str(lead))
         os.environ["FRIDAY_EVENT_LEAD"] = str(lead)
         done.append(f"日历上的活动开始前 {lead} 分钟提醒你" if lead else "不再提前提醒日历上的活动")
+    if "bill_file" in payload:
+        on = bool(payload["bill_file"])
+        save_env_value(env, "FRIDAY_BILL_FILE", "on" if on else "off")
+        os.environ["FRIDAY_BILL_FILE"] = "on" if on else "off"
+        done.append("下载的账单会自动改名归档" if on else "不再自动归档下载的账单")
+    if "bill_folder" in payload:
+        folder = str(payload["bill_folder"] or "").strip().strip('"')
+        if folder:
+            path = Path(folder).expanduser()
+            if not path.is_absolute():
+                return {"error": "要写完整的文件夹位置,例如 D:\\账单"}
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                return {"error": f"这个文件夹建不了:{e}"}
+        save_env_value(env, "FRIDAY_BILL_FOLDER", folder)
+        os.environ["FRIDAY_BILL_FOLDER"] = folder
+        done.append(f"账单归档到 {__import__('friday_billfile').archive_root()}")
+    if payload.get("bill_undo"):
+        filer = getattr(session, "billfiler", None)
+        n = filer.undo() if filer is not None else 0
+        done.append(f"搬回下载文件夹 {n} 个" if n else "没有可以撤销的归档")
     if payload.get("photo_reindex"):
         index = getattr(session, "photofind", None)
         if index is None:
@@ -4237,6 +4260,48 @@ class PhotoCommands:
         if result["total"]:
             show_photos(self.session, result, understood)
         return self.index.describe(result, understood)
+
+
+def start_bill_filer(session, toolbox: Toolbox, data_dir: str, interval: float = 10 * 60):
+    """下载的账单自动归档:每 10 分钟看一次下载文件夹,新的账单 PDF 改名、放进归档文件夹。"""
+    import friday_billfile
+    import friday_library
+    import friday_security
+
+    assistant = getattr(session, "assistant", None)
+    client = getattr(assistant, "client", None)
+    ask = friday_billfile.claude_asker(client, getattr(assistant, "on_usage", None)) if client is not None else None
+    filer = friday_billfile.BillFiler(os.path.join(data_dir, "friday_billfile.json"), ask=ask,
+                                      hide=friday_library.hide_private, is_secret=friday_security.is_secret_path)
+    session.billfiler = filer
+    quick = getattr(session, "quick", None)
+    if quick is not None:
+        quick.extra.append(friday_billfile.Commands(filer))
+
+    def loop() -> None:
+        time.sleep(200)
+        while True:
+            try:
+                text = friday_billfile.describe(filer.scan())
+                if text:
+                    session.hub.broadcast({"type": "status", "text": text})
+                    session.hub.broadcast({"type": "mailscan"})
+            except Exception as e:
+                print(f"账单归档出错:{e}", flush=True)
+            time.sleep(interval)
+
+    threading.Thread(target=loop, daemon=True, name="friday-billfile").start()
+    return filer
+
+
+def billfile_state(session) -> dict | None:
+    import friday_billfile
+
+    filer = getattr(session, "billfiler", None)
+    if filer is None:
+        return None
+    return {"on": friday_billfile.enabled(), "folder": str(friday_billfile.archive_root()),
+            "custom": os.environ.get("FRIDAY_BILL_FOLDER", ""), "recent": filer.recent(5)}
 
 
 def start_photo_find(session, toolbox: Toolbox, data_dir: str, ctx=None, interval: float = 6 * 3600) -> None:
@@ -6301,6 +6366,7 @@ def run_web(args) -> None:
     _startup_step(session, "功能使用统计", lambda: start_toolstats(session, toolbox, data_dir))
     _startup_step(session, "代码实验室", lambda: start_lab(session, toolbox, data_dir, ctx))
     _startup_step(session, "照片按时间地点找", lambda: start_photo_find(session, toolbox, data_dir, ctx))
+    _startup_step(session, "下载的账单自动归档", lambda: start_bill_filer(session, toolbox, data_dir))
     toolbox.meter, toolbox.budget = session.meter, getattr(session, "budget", None)
     import friday_scenes
 

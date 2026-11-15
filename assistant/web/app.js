@@ -1532,6 +1532,16 @@ function fillSettings() {
   if (s.brief != null) $("setBrief").checked = s.brief;
   $("eventRow").hidden = s.event_lead === null || s.event_lead === undefined;
   if (s.event_lead != null) $("setEventLead").value = String(s.event_lead);
+  const bf = s.billfile;
+  $("billGroup").hidden = !bf;
+  if (bf) {
+    $("setBillFile").checked = bf.on;
+    $("setBillFolder").placeholder = bf.folder;
+    if (document.activeElement !== $("setBillFolder")) $("setBillFolder").value = bf.custom || "";
+    $("billNote").textContent = bf.recent.length
+      ? "最近归档:" + bf.recent.map((m) => `${m.time.slice(5)} ${m.name}`).join(";")
+      : "认不出的文件不会动;有密码的 PDF 也不动。认不出时会请 Haiku 看前两页(身份证、卡号先遮掉,每个约 RM0.01)。";
+  }
   const pf = s.photofind;
   $("photoFindRow").hidden = !pf;
   if (pf) {
@@ -1930,6 +1940,9 @@ function showCleanup(items) {
   updatePicked();
 }
 $("photoReindex").onclick = () => saveSetting({ photo_reindex: true });
+$("setBillFile").onchange = (e) => saveSetting({ bill_file: e.target.checked });
+$("billFolderSave").onclick = () => saveSetting({ bill_folder: $("setBillFolder").value.trim() });
+$("billUndo").onclick = () => saveSetting({ bill_undo: true });
 $("photoSort").onclick = () => {
   const folder = $("photoFolder").value.trim();
   if (!confirm(`把${folder ? "“" + folder + "”" : "“图片”文件夹"}最上层的照片和视频,按拍摄月份分进“2026-11”这样的子文件夹?整理错了可以撤销。`)) return;

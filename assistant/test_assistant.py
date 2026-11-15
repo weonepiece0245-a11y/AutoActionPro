@@ -13879,5 +13879,106 @@ class VideoSummaryTest(unittest.TestCase):
                               lambda s: None)
             self.assertTrue(out["is_error"])
 
+
+def make_pdf(lines: list[str]) -> bytes:
+    """做一个最简单、有文字的 PDF(测试用)。"""
+    content = "BT /F1 11 Tf 50 750 Td 14 TL " + " ".join(
+        "(" + line.replace("\\", "").replace("(", "").replace(")", "") + ") Tj T*" for line in lines) + " ET"
+    objects = ["<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+               "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+               "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+               f"<< /Length {len(content)} >>\nstream\n{content}\nendstream"]
+    out, offsets = b"%PDF-1.4\n", []
+    for i, obj in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n{obj}\nendobj\n".encode("latin-1")
+    xref = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode()
+    for off in offsets:
+        out += f"{off:010d} 00000 n \n".encode()
+    out += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+    return out
+
+
+class BillFileTest(TempDirTest):
+    def setUp(self):
+        super().setUp()
+        import friday_billfile
+
+        self.down = Path(self.tmp, "Downloads")
+        self.down.mkdir()
+        self.root = Path(self.tmp, "归档")
+        patcher = mock.patch.dict(os.environ, {"FRIDAY_BILL_FOLDER": str(self.root), "FRIDAY_BILL_FILE": "on"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.clock = [time.time()]
+        self.asked = []
+
+        def ask(name, text):
+            self.asked.append(text)
+            return {"is_bill": "Policy" in text, "vendor": "Great Eastern", "kind": "保单", "amount": None,
+                    "currency": "MYR", "date": "2026-03-01"}
+        self.filer = friday_billfile.BillFiler(os.path.join(self.tmp, "b.json"), downloads=lambda: self.down, ask=ask,
+                                               hide=__import__("friday_library").hide_private, clock=lambda: self.clock[0])
+        self.filer.scan()  # 第一次:原来的不动
+
+    def put(self, name, lines, age=3600):
+        path = self.down / name
+        path.write_bytes(make_pdf(lines))
+        t = self.clock[0] - age
+        os.utime(path, (t, t))
+        return path
+
+    def test_known_bill_renamed_and_filed_without_claude(self):
+        self.put("bill_839201.pdf", ["Tenaga Nasional Berhad", "Bil Elektrik", "Tarikh Bil: 05/11/2026",
+                                     "Amount Due RM 120.50"])
+        moved = self.filer.scan()
+        self.assertEqual(len(moved), 1)
+        self.assertEqual(moved[0]["name"], "2026-11 TNB 电费 RM120.50.pdf")
+        self.assertTrue(Path(self.root, "2026", "账单", "2026-11 TNB 电费 RM120.50.pdf").is_file())
+        self.assertEqual(self.asked, [])  # 关键词就认得出:不花钱
+
+    def test_unknown_asks_haiku_with_numbers_hidden_and_skips_non_bills(self):
+        self.put("doc1.pdf", ["Policy Schedule", "Life insured IC 900101-14-5678", "Card 4111 1111 1111 1234"])
+        self.put("notes.pdf", ["Meeting notes about the project roadmap and the next sprint goals"])
+        moved = self.filer.scan()
+        self.assertEqual([m["name"] for m in moved], ["2026-03 Great Eastern 保单.pdf"])
+        self.assertTrue((self.down / "notes.pdf").exists())  # 不是账单:不动
+        self.assertNotIn("900101-14-5678", " ".join(self.asked))
+        self.assertNotIn("4111 1111 1111 1234", " ".join(self.asked))
+        self.assertIn("5678", self.asked[0])
+        self.assertEqual(self.filer.scan(), [])  # 看过的不再问
+        self.assertEqual(len(self.asked), 2)
+
+    def test_waits_after_download_and_undo(self):
+        import friday_billfile
+
+        self.put("Maybank_statement.pdf", ["Maybank", "Statement of Account", "Statement Date 30/10/2026"], age=60)
+        self.assertEqual(self.filer.scan(), [])  # 刚下载:先不动
+        self.clock[0] += friday_billfile.WAIT_SECONDS
+        moved = self.filer.scan()
+        self.assertEqual(moved[0]["name"], "2026-10 Maybank 月结单.pdf")
+        self.assertIn("撤销归档", friday_billfile.describe(moved))
+        cmd = friday_billfile.Commands(self.filer)
+        self.assertIn("2026-10 Maybank", cmd.handle("归档了什么"))
+        self.assertIn("搬回去了 1 个", cmd.handle("撤销归档"))
+        self.assertTrue((self.down / "Maybank_statement.pdf").exists())
+        self.assertIn("没有可以撤销", cmd.handle("撤销归档"))
+
+    def test_existing_files_and_broken_pdfs_untouched(self):
+        import friday_billfile
+
+        self.put("old_TNB_bill.pdf", ["Tenaga Nasional", "Bill", "Amount Due RM 99.00"])
+        filer = friday_billfile.BillFiler(os.path.join(self.tmp, "b2.json"), downloads=lambda: self.down)
+        self.assertEqual(filer.scan(), [])  # 开之前就在的
+        self.assertEqual(filer.scan(), [])
+        (self.down / "broken.pdf").write_bytes(b"not a pdf")
+        os.utime(self.down / "broken.pdf", (self.clock[0] - 3600,) * 2)
+        self.assertEqual(filer.scan(), [])  # 打不开的不动
+        self.assertTrue((self.down / "broken.pdf").exists())
+        name, year = friday_billfile.new_name({"vendor": 'a/b:c*', "kind": "收据", "amount": 1234.5, "currency": "USD",
+                                               "date": "bad"}, datetime.date(2026, 1, 2))
+        self.assertEqual((name, year), ("2026-01 a b c 收据 USD 1,234.50.pdf", "2026"))
+
 if __name__ == "__main__":
     unittest.main()
