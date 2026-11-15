@@ -10592,8 +10592,33 @@ class SpotifyMediaKeysTest(TempDirTest):
         with mock.patch.dict(os.environ, {"FRIDAY_SPOTIFY_CLIENT_ID": "c" * 32}):
             self.assertEqual(spotify.control("next"), "Spotify 已切到下一首。")
             spotify.request = lambda method, url, headers, body=None: (404, {"error": {"reason": "NO_ACTIVE_DEVICE"}})
-            with self.assertRaises(friday_spotify.SpotifyError):
-                spotify.control("pause")
+            # 没在放还按暂停:说一声就好,不算出错(以前会报错,仪表板记一笔假问题)
+            self.assertEqual(spotify.control("pause"), "Spotify 现在没有在放。")
+            spotify.sleep = lambda seconds: None
+            spotify._device = lambda **kw: None
+            with self.assertRaises(friday_spotify.SpotifyError) as e:  # 电脑上也找不到 Spotify:才报错
+                spotify.control("resume")
+            self.assertIn("打开 Spotify 放一首歌再试", str(e.exception))
+
+    def test_resume_moves_playback_to_this_pc(self):
+        spotify = self.make(lambda: (200, {}))
+        seen = []
+
+        def request(method, url, headers, body=None):
+            path = url.split("v1")[-1]
+            seen.append((method, path))
+            if path.startswith("/me/player/next") and "device_id" not in path:
+                return 404, {"error": {"reason": "NO_ACTIVE_DEVICE"}}  # 没有在用的设备
+            return 204, {}
+        spotify.request = request
+        spotify.sleep = lambda seconds: None
+        asked = []
+        spotify._device = lambda **kw: asked.append(kw) or "PC-123"
+        with mock.patch.dict(os.environ, {"FRIDAY_SPOTIFY_CLIENT_ID": "c" * 32}):
+            self.assertEqual(spotify.control("next"), "Spotify 已切到下一首(先把播放转到这台电脑上了)。")
+        self.assertEqual(asked, [{"prefer_computer": True}])
+        self.assertIn(("PUT", "/me/player"), seen)  # 先把播放转过来
+        self.assertIn(("POST", "/me/player/next?device_id=PC-123"), seen)  # 再做一次原来的动作
 
 
 

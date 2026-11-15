@@ -366,7 +366,11 @@ class Spotify:
         return "Spotify 好像没反应,再说一次试试。"
 
     def control(self, action: str) -> str:
-        """Claude 叫的切歌、暂停、继续(不管 Spotify 现在在不在放,都直接叫 Spotify)。"""
+        """Claude 和仪表板叫的切歌、暂停、继续(不管 Spotify 现在在不在放,都直接叫 Spotify)。
+
+        没有在用的播放设备时:暂停就说本来没在放(不算出错);继续、下一首、上一首先找这台电脑上的
+        Spotify(没开就打开,最多等 20 秒),把播放转过去再做一次;还是找不到才报错。(星期五自己提的改进)
+        """
         calls = {"next": ("POST", "/me/player/next", "已切到下一首。"),
                  "previous": ("POST", "/me/player/previous", "已切到上一首。"),
                  "pause": ("PUT", "/me/player/pause", "已暂停。"),
@@ -378,7 +382,20 @@ class Spotify:
                 self.paused_at = self.clock()
             return "Spotify " + text
         if status == 404 or self._reason(data) == "NO_ACTIVE_DEVICE":
-            raise SpotifyError("Spotify 现在没有在用的播放设备(先放一首歌)")
+            if action == "pause":
+                return "Spotify 现在没有在放。"
+            device = self._device(prefer_computer=True)
+            if device:
+                self.api("PUT", "/me/player", body={"device_ids": [device], "play": False})
+                for attempt in range(3):  # 刚转过去时偶尔要再试一两次
+                    self.sleep(1.0 + attempt)
+                    status, data = self.api(method, path, {"device_id": device})
+                    if status in self.OK:
+                        return "Spotify " + text.rstrip("。") + "(先把播放转到这台电脑上了)。"
+                    if status == 403 or self._reason(data) == "PREMIUM_REQUIRED":
+                        break
+            if status == 404 or self._reason(data) == "NO_ACTIVE_DEVICE":
+                raise SpotifyError("Spotify 现在没有在用的播放设备(打开 Spotify 放一首歌再试)")
         if status == 403:
             raise SpotifyError("Spotify 不让做这一步(可能已经是暂停/播放状态,或者不是 Premium)")
         raise SpotifyError("Spotify 没有回应,等一下再试")
