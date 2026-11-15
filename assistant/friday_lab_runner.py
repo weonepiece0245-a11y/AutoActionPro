@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import sys
 import tempfile
 
@@ -204,8 +205,15 @@ def main(argv: list[str]) -> int:
             return 1
         result = unittest.TextTestRunner(stream=sys.stdout, verbosity=1).run(suite)
         print(f"\n@@RESULT ran={result.testsRun} failures={len(result.failures)} errors={len(result.errors)}")
-        for test, _ in result.failures + result.errors:
+        for test, trace in result.failures + result.errors:
             print(f"@@FAILED {test.id()}")
+            # 为什么过不了(给帮你升级的人看):安全网挡住的那一行优先,不然用错误的最后一行
+            lines = [line.strip() for line in str(trace).splitlines() if line.strip()]
+            blocked = [line for line in lines if "代码实验室" in line]
+            starts = [i for i, line in enumerate(lines)
+                      if re.match(r"^[\w.]+(Error|Exception|Exit|Interrupt|Warning)\b", line)]
+            why = blocked[-1] if blocked else (" ".join(lines[starts[-1]:]) if starts else (lines or ["?"])[-1])
+            print(f"@@WHY {test.id()}\t{why[:240]}")
         return 0 if result.wasSuccessful() else 1
     print("不认识的模式", file=sys.stderr)
     return 2

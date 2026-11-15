@@ -409,8 +409,9 @@ class Lab:
             return {"ran": 0, "failed": [], "error": f"测试超过 {SELFTEST_TIMEOUT // 60} 分钟没跑完", "output": ""}
         found = re.search(r"@@RESULT ran=(\d+) failures=(\d+) errors=(\d+)", out)
         failed = re.findall(r"@@FAILED (\S+)", out)
+        why = dict(re.findall(r"@@WHY (\S+)\t(.*)", out))
         result = {"ran": int(found.group(1)) if found else 0, "failed": failed, "seconds": round(time.monotonic() - started),
-                  "output": _clip(out, 6000)}
+                  "output": _clip(out, 6000), "why": why}
         if not found:
             tail = "\n".join(line for line in out.strip().splitlines()[-15:] if "@@LOADFAIL" not in line)
             reason = "测试档案载入不了" if "@@LOADFAIL" in out else "测试没跑完就停了"
@@ -515,7 +516,8 @@ class Lab:
                   "ok": ok, "ran": after.get("ran", 0), "baseline_failed": len(before_failed),
                   "new_failures": new_failures[:30], "fixed": fixed[:30], "changed": changed,
                   "error": after.get("error", ""), "output": after.get("output", ""), "blind": blind[:30],
-                  "baseline_list": sorted(before_failed)[:80]}
+                  "baseline_list": sorted(before_failed)[:80],
+                  "baseline_why": {t: w for t, w in ((self.baseline or {}).get("why") or {}).items() if t in before_failed}}
         record["report"] = self._write_report(record, edits)
         if after.get("ran"):
             step(f"   改过的:跑了 {after['ran']} 个测试,用了 {after.get('seconds', 0)} 秒")
@@ -548,9 +550,17 @@ class Lab:
         if record.get("blind"):
             lines[3] = "结果:⚠ 没法完全确认(没有多坏掉的,但相关测试本来就跑不了)"
             lines += ["", "改到的地方,这些相关测试在这台电脑本来就过不了(测不到):"] + [f"- {t}" for t in record["blind"]]
-        if record.get("baseline_list"):  # 给帮你升级的人看:哪些测试在这台电脑跑不了
-            lines += ["", f"这台电脑本来就过不了的测试({record['baseline_failed']} 个):"] + \
-                [f"- {t}" for t in record["baseline_list"][:80]]
+        if record.get("baseline_list"):  # 给帮你升级的人看:哪些测试在这台电脑跑不了、为什么
+            why = record.get("baseline_why") or {}
+            guarded = [t for t in record["baseline_list"] if "代码实验室" in why.get(t, "")]
+            others = [t for t in record["baseline_list"] if t not in guarded]
+            lines += ["", f"这台电脑本来就过不了的测试({record['baseline_failed']} 个):"]
+            if guarded:
+                lines += ["", f"【安全网故意挡住的({len(guarded)} 个,正常,在副本里本来就不能做)】"] + \
+                    [f"- {t} —— {why.get(t, '')}" for t in guarded]
+            if others:
+                lines += ["", f"【其他原因({len(others)} 个,要帮你升级的人看看能不能修)】"] + \
+                    [f"- {t} —— {why.get(t, '(没有原因)')}" for t in others]
         if record["fixed"]:
             lines += ["", "改了以后修好的:"] + [f"- {t}" for t in record["fixed"]]
         lines += ["", "改了什么:"]

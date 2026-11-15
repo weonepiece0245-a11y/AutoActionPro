@@ -13413,6 +13413,25 @@ class CodeLabTest(TempDirTest):
         record = self.make().run_code("import sys\nprint(sys.stdout.encoding, sys.stdout.line_buffering, '✅')", "编码")
         self.assertEqual(record["output"].strip(), "utf-8 True ✅")  # 用 -E 开也一样(Windows 不是 UTF-8 时会出错)
 
+    def test_report_explains_why_tests_cannot_run(self):
+        app_dir = Path(self.tmp, "app6")
+        app_dir.mkdir()
+        (app_dir / "calc.py").write_text("X = 1\n", encoding="utf-8")
+        (app_dir / "test_assistant.py").write_text(
+            "import os, subprocess, sys, unittest\nimport calc\n\n"
+            "class T(unittest.TestCase):\n"
+            "    def test_blocked(self):\n        subprocess.run([sys.executable, '-c', 'pass'])\n"
+            "    def test_env(self):\n        self.assertEqual(os.sep, '?', 'Windows 路径不一样')\n"
+            "    def test_ok(self):\n        self.assertEqual(calc.X, 1)\n", encoding="utf-8")
+        lab = self.make(app_dir=app_dir)
+        record = lab.self_test([{"file": "calc.py", "old": "X = 1", "new": "X = 1  # 注解"}], "看原因")
+        report = Path(record["report"]).read_text(encoding="utf-8")
+        self.assertIn("【安全网故意挡住的(1 个", report)
+        self.assertIn("test_assistant.T.test_blocked —— PermissionError: 代码实验室不允许:subprocess.Popen", report)
+        self.assertIn("【其他原因(1 个", report)
+        self.assertIn("test_assistant.T.test_env —— AssertionError", report)
+        self.assertIn("Windows 路径不一样", report)
+
     def test_self_test_when_tests_cannot_load(self):
         app_dir = Path(self.tmp, "app2")
         app_dir.mkdir()
@@ -13558,6 +13577,7 @@ class CodeLabTest(TempDirTest):
         events.clear()
         lab.self_test([{"file": "calc.py", "old": "return a + b", "new": "return a * b"}], "再改")
         self.assertIn("对照组用上次的结果", "".join(e.get("text", "") for e in events))
+
         self.assertEqual(good["ran"], 2)
         self.assertIn("✅ 通过", Path(good["report"]).read_text(encoding="utf-8"))
         bad = lab.self_test([{"file": "calc.py", "old": "return a + b", "new": "return a - b"}], "改坏")
