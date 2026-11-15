@@ -283,7 +283,7 @@ class Lab:
             return None
         if run_id == "reports":  # 自我测试的报告
             path = self.folder / "reports" / name
-            return path if name.endswith("自我测试.txt") and path.is_file() else None
+            return path if name.endswith(("自我测试.txt", "每周检讨.md")) and path.is_file() else None
         if not RUN_ID.match(run_id):
             return None
         with self.lock:
@@ -501,7 +501,9 @@ class Lab:
         new_failures = [t for t in after.get("failed", []) if t not in before_failed]
         fixed = [t for t in before_failed if after.get("ran") and t not in after.get("failed", [])]
         ok = bool(after.get("ran")) and not after.get("error") and not new_failures
-        blind = self.related_tests(self.folder / "selftest" / "changed", changed, before_failed) if ok else []
+        # 测不到 = 相关的测试改之前、改之后都过不了(改之后通过了的就是修好了,不算)
+        still_failing = before_failed & set(after.get("failed", []))
+        blind = self.related_tests(self.folder / "selftest" / "changed", changed, still_failing) if ok else []
         record = {"kind": "self_test", "time": self.clock().strftime("%Y-%m-%d %H:%M"), "title": str(title or "自我测试")[:60],
                   "ok": ok, "ran": after.get("ran", 0), "baseline_failed": len(before_failed),
                   "new_failures": new_failures[:30], "fixed": fixed[:30], "changed": changed,

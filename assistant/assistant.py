@@ -2768,6 +2768,8 @@ def settings_state(session, meter=None) -> dict:
         "planner": session.planner.state() if getattr(session, "planner", None) is not None else None,
         "energy": session.energy.state() if getattr(session, "energy", None) is not None else None,
         "lab": ({"busy": session.lab.busy, "runs": session.lab.recent(10)} if getattr(session, "lab", None) is not None else None),
+        "selfreview": ({"on": __import__("friday_selfreview").enabled(), "busy": session.selfreview.busy,
+                        "last": session.selfreview.last} if getattr(session, "selfreview", None) is not None else None),
         "scenes": scenes_state(session),
         "cleanup": getattr(session, "cleanup_items", None) if os.name == "nt" or getattr(session, "cleanup_items", None) else None,
         "weekly_report": __import__("friday_alerts").weekly_enabled(),
@@ -3394,6 +3396,16 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         save_env_value(env, "FRIDAY_EVENT_LEAD", str(lead))
         os.environ["FRIDAY_EVENT_LEAD"] = str(lead)
         done.append(f"日历上的活动开始前 {lead} 分钟提醒你" if lead else "不再提前提醒日历上的活动")
+    if "self_review" in payload:
+        on = bool(payload["self_review"])
+        save_env_value(env, "FRIDAY_SELF_REVIEW", "on" if on else "off")
+        os.environ["FRIDAY_SELF_REVIEW"] = "on" if on else "off"
+        done.append("每周日晚上做一次自我检讨" if on else "不再每周自我检讨(说“自我检讨”还是可以做)")
+    if payload.get("self_review_now"):
+        review = getattr(session, "selfreview", None)
+        if review is None:
+            return {"error": "自我检讨没有开"}
+        done.append(review.start("你叫我做"))
     if "statement_passwords" in payload:  # 月结单密码:只存在 .env,不回传给窗口
         value = "|".join(p.strip() for p in str(payload["statement_passwords"] or "").split("\n") if p.strip())[:500]
         save_env_value(env, "FRIDAY_STATEMENT_PASSWORDS", value)
@@ -3827,6 +3839,10 @@ def _startup_step(session, name: str, step: Callable[[], object]) -> None:
 
         print(f"启动“{name}”时出错:{type(e).__name__}: {e}", flush=True)
         traceback.print_exc()
+        failed = getattr(session, "startup_failures", None)
+        if failed is None:
+            failed = session.startup_failures = []
+        failed.append(f"{name}:{type(e).__name__}: {e}"[:200])  # 每周自我检讨会看
         if not getattr(session, "startup_error", None):
             session.startup_error = f"“{name}”没有开成功({type(e).__name__}),其他功能照常。检查更新通常就能修好。"
 
@@ -4202,6 +4218,49 @@ def start_subscriptions(session, toolbox: Toolbox, data_dir: str, interval: floa
         quick.extra.append(friday_subscriptions.Commands(subs, scan_soon))
     threading.Thread(target=loop, daemon=True, name="friday-subscriptions").start()
     return subs
+
+
+def start_self_review(session, toolbox: Toolbox, data_dir: str, interval: float = 10 * 60):
+    """每周自我检讨:看这周出错和被纠正的地方,提改进、在副本上测试,写报告给你决定。"""
+    import friday_security
+    import friday_selfreview
+
+    lab = getattr(session, "lab", None)
+    assistant = getattr(session, "assistant", None)
+    if lab is None or assistant is None:
+        return None
+
+    def gather():
+        stats = session.toolstats.state() if getattr(session, "toolstats", None) is not None else None
+        lessons = session.lessons.items() if getattr(session, "lessons", None) is not None else []
+        since = (stats or {}).get("since", "")
+        return friday_selfreview.evidence(stats, lessons, list(getattr(session, "startup_failures", []) or []), since)
+
+    def done(report: str, file: str) -> None:
+        where = f"(报告存在 {file})" if file else ""
+        session.hub.broadcast({"type": "reminder", "text": f"🧪 这周的自我检讨{where}\n\n{report}"})
+        push_to_phone(session, f"🧪 这周的自我检讨\n\n{report[:1700]}")
+        session.hub.broadcast({"type": "mailscan"})
+
+    review = friday_selfreview.SelfReview(
+        os.path.join(data_dir, "friday_selfreview.json"), os.path.join(data_dir, "friday_lab", "reports"),
+        assistant.client, lab, Path(SCRIPT_DIR), gather, is_secret=friday_security.is_secret_path, on_done=done,
+        on_status=lambda text: session.hub.broadcast({"type": "status", "text": text}),
+        on_usage=getattr(assistant, "on_usage", None))
+    session.selfreview = review
+    quick = getattr(session, "quick", None)
+    if quick is not None:
+        quick.extra.append(friday_selfreview.Commands(review))
+
+    def loop() -> None:
+        time.sleep(300)
+        while True:
+            if review.due() and not session.busy:
+                _quietly(lambda: review.start())
+            time.sleep(interval)
+
+    threading.Thread(target=loop, daemon=True, name="friday-selfreview-week").start()
+    return review
 
 
 def start_lab(session, toolbox: Toolbox, data_dir: str, ctx=None):
@@ -6430,6 +6489,7 @@ def run_web(args) -> None:
     _startup_step(session, "照片按时间地点找", lambda: start_photo_find(session, toolbox, data_dir, ctx))
     _startup_step(session, "下载的账单自动归档", lambda: start_bill_filer(session, toolbox, data_dir))
     _startup_step(session, "月结单导入记账", lambda: start_statements(session, toolbox, data_dir))
+    _startup_step(session, "每周自我检讨", lambda: start_self_review(session, toolbox, data_dir))
     toolbox.meter, toolbox.budget = session.meter, getattr(session, "budget", None)
     import friday_scenes
 

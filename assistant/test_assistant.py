@@ -14079,5 +14079,123 @@ class StatementTest(TempDirTest):
         other = app.WebSession(None, app.default_persona(), hub)
         self.assertEqual(other.recent_uploads, [])  # 不会共用
 
+
+class SelfReviewTest(TempDirTest):
+    def app(self):
+        app_dir = Path(self.tmp, "app")
+        (app_dir / "web").mkdir(parents=True)
+        (app_dir / "calc.py").write_text("def add(a, b):\n    return a - b  # 写错了\n", encoding="utf-8")
+        (app_dir / "web" / "app.js").write_text("console.log(1)\n", encoding="utf-8")
+        (app_dir / ".env").write_text("ANTHROPIC_API_KEY=secret", encoding="utf-8")
+        (app_dir / "friday_memory.json").write_text("{}", encoding="utf-8")
+        (app_dir / "test_assistant.py").write_text(
+            "import unittest\nimport calc\n\nclass T(unittest.TestCase):\n    def test_add(self):\n"
+            "        self.assertEqual(calc.add(1, 2), 3)\n", encoding="utf-8")
+        return app_dir
+
+    def test_evidence(self):
+        import friday_selfreview
+
+        text, worth = friday_selfreview.evidence({"tools": {"weather": {"calls": 9, "errors": 3, "last_error": "超时"},
+                                                            "ledger": {"calls": 20, "errors": 0}}}, [], [], "2026-11-09")
+        self.assertTrue(worth)
+        self.assertIn("weather:3/9;超时", text)
+        self.assertFalse(friday_selfreview.evidence({"tools": {"ledger": {"calls": 2, "errors": 0}}}, [], [], "x")[1])
+        self.assertTrue(friday_selfreview.evidence(None, ["说“记账”就是记到账本"], [], "")[1])
+
+    def test_source_tools_read_only_own_code(self):
+        import friday_security
+        import friday_selfreview
+
+        app_dir = self.app()
+        lab = friday_lab.Lab(os.path.join(self.tmp, "lab"), app_dir=app_dir, is_secret=friday_security.is_secret_path)
+        tools_ = friday_selfreview.SourceTools(app_dir, lab, friday_security.is_secret_path)
+        listing, _ = tools_.run("list_source", {})
+        self.assertIn("calc.py", listing)
+        self.assertIn("web/app.js", listing)
+        self.assertNotIn(".env", listing)
+        self.assertNotIn("friday_memory", listing)
+        self.assertIn("calc.py:2:", tools_.run("search_source", {"text": "a - b"})[0])
+        self.assertIn("2\t    return a - b", tools_.run("read_source", {"file": "calc.py"})[0])
+        for bad in (".env", "../calc.py", "friday_memory.json", "C:/Windows/win.ini"):
+            text, error = tools_.run("read_source", {"file": bad})
+            self.assertTrue(error, bad)
+            self.assertNotIn("secret", text)
+        text, error = tools_.run("self_test", {"title": "改测试", "edits": [
+            {"file": "test_assistant.py", "old": "3)", "new": "-1)"}]})
+        self.assertTrue(error)
+        self.assertIn("不能改测试", text)
+        text, error = tools_.run("self_test", {"title": "修 add", "edits": [
+            {"file": "calc.py", "old": "return a - b  # 写错了", "new": "return a + b"}]})
+        self.assertFalse(error, text)
+        self.assertIn("calc.py", (app_dir / "calc.py").read_text(encoding="utf-8") and "calc.py")
+        self.assertIn("a - b", (app_dir / "calc.py").read_text(encoding="utf-8"))  # 真的没改
+
+    def test_agent_loop_and_report(self):
+        import friday_selfreview
+
+        app_dir = self.app()
+        lab = friday_lab.Lab(os.path.join(self.tmp, "lab"), app_dir=app_dir)
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+                self.messages = self
+
+            def create(self, **kw):
+                self.calls.append(kw)
+                n = len(self.calls)
+                if n == 1:
+                    content = [SimpleNamespace(type="tool_use", id="t1", name="search_source", input={"text": "a - b"})]
+                elif n == 2:
+                    content = [SimpleNamespace(type="tool_use", id="t2", name="self_test", input={
+                        "title": "修 add", "edits": [{"file": "calc.py", "old": "return a - b  # 写错了", "new": "return a + b"}]})]
+                else:
+                    return SimpleNamespace(content=[SimpleNamespace(type="text", text="这周 add 算错了,改成加法。")],
+                                           stop_reason="end_turn", usage=None)
+                return SimpleNamespace(content=content, stop_reason="tool_use", usage=None)
+
+        client = Client()
+        done = []
+        review = friday_selfreview.SelfReview(
+            os.path.join(self.tmp, "r.json"), os.path.join(self.tmp, "lab", "reports"), client, lab, app_dir,
+            lambda: friday_selfreview.evidence({"tools": {"calc": {"calls": 5, "errors": 5, "last_error": "1+2=-1"}}}, [], [], ""),
+            on_done=lambda text, file: done.append((text, file)),
+            clock=lambda: datetime.datetime(2026, 11, 22, 21, 45))
+        self.assertTrue(review.due())  # 星期日 21:45
+        review._run("测试")
+        report, file = done[0]
+        self.assertIn("这周 add 算错了", report)
+        self.assertIn("修 add:✅ 通过", report)  # 照实列出的测试结果
+        self.assertIn("没有被改", report)
+        self.assertTrue(Path(file).is_file())
+        self.assertIn("t1", json.dumps([m["content"] for m in client.calls[1]["messages"] if m["role"] == "user"],
+                                       default=str))
+        self.assertFalse(review.due())  # 这周做过了
+        self.assertEqual(lab.produced_file("reports", Path(file).name), Path(file))
+
+    def test_nothing_wrong_costs_nothing(self):
+        import friday_selfreview
+
+        calls = []
+        client = SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: calls.append(kw)))
+        done = []
+        review = friday_selfreview.SelfReview(
+            os.path.join(self.tmp, "r.json"), os.path.join(self.tmp, "reports"), client, None, Path(self.tmp),
+            lambda: ("", False), on_done=lambda text, file: done.append(text),
+            clock=lambda: datetime.datetime(2026, 11, 18, 10, 0))
+        self.assertFalse(review.due())  # 不是星期日
+        review._run("x")
+        self.assertEqual(calls, [])
+        self.assertIn("没什么要改的", done[0])
+        cmd = friday_selfreview.Commands(review)
+        self.assertIsNone(cmd.handle("检讨报告是什么"))
+        self.assertIn("检讨", cmd.handle("自我检讨"))
+        for _ in range(200):  # 等后台那一次做完,再清理临时文件夹
+            if not review.busy:
+                break
+            time.sleep(0.01)
+        self.assertFalse(review.busy)
+
 if __name__ == "__main__":
     unittest.main()

@@ -1235,6 +1235,13 @@ function fillSettings() {
   if (s.meeting) showMeeting(s.meeting);
   const lb = s.lab;
   $("labGroup").hidden = !lb;
+  const rv = s.selfreview;
+  $("reviewRow").hidden = !rv;
+  $("reviewNote").hidden = !rv || !(rv.busy || rv.last);
+  if (rv) {
+    $("setSelfReview").checked = rv.on;
+    $("reviewNote").textContent = rv.busy ? "🧪 正在做自我检讨……" : rv.last ? `上次检讨:${rv.last.time} —— ${rv.last.head}` : "";
+  }
   if (lb) {
     $("labNote").textContent = lb.busy ? `正在跑:${lb.busy}……` : lb.runs.length ? `最近 ${lb.runs.length} 次:` :
       "叫我“算一下……”“把这个 Excel 整理成……”“画个图”,我会写代码在这里跑;想改我自己的程序时,也会先在副本上跑全部测试。";
@@ -1944,6 +1951,8 @@ function showCleanup(items) {
 }
 $("photoReindex").onclick = () => saveSetting({ photo_reindex: true });
 $("setBillFile").onchange = (e) => saveSetting({ bill_file: e.target.checked });
+$("setSelfReview").onchange = (e) => saveSetting({ self_review: e.target.checked });
+$("reviewNow").onclick = () => saveSetting({ self_review_now: true });
 $("saveStmtPw").onclick = () => {  // 多个密码用 | 分开(输入框只有一行)
   const value = $("setStmtPw").value.split("|").join("\n");
   $("setStmtPw").value = "";
