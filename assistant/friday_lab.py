@@ -487,7 +487,10 @@ class Lab:
                 keys.add("app.")
             elif stem != "test_assistant":
                 keys.add(stem)
-        related = {cls for cls, body in sections.items() if any(k in body for k in keys)}
+        # 只看 class 里面(有缩排的那几行),名字要整个对上(friday_lab 不算 friday_label)
+        patterns = [re.compile(r"^[ \t]+.*" + (re.escape(k) if k.endswith(".") else r"\b" + re.escape(k) + r"\b"), re.M)
+                    for k in keys]
+        related = {cls for cls, body in sections.items() if any(p.search(body) for p in patterns)}
         return sorted(t for t in failed if len(t.split(".")) > 2 and t.split(".")[-2] in related)
 
     def _finish_self_test(self, run_id: str, started: float, title: str, edits: list[dict], changed: list[str],

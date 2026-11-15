@@ -110,7 +110,8 @@ def install(mode: str, workdir: str) -> None:
     def hook(event: str, args: tuple) -> None:
         if event in harmless_events:
             return
-        if event == "subprocess.Popen" and len(args) > 1 and approved(args[1]):
+        # Windows 的 Python 会先把指令拼成一串文字才检查:那就看是谁在开(Popen 自己记着原来的指令)
+        if event == "subprocess.Popen" and len(args) > 1 and (approved(args[1]) or approved_in_stack()):
             return
         if event in process_events and approved_in_stack():
             return

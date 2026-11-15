@@ -13169,6 +13169,11 @@ class CodeLabTest(TempDirTest):
         self.assertIn("没法完全确认", friday_lab.Lab.describe(record))
         self.assertTrue(events[-1]["uncertain"])
         self.assertIn("没法完全确认", Path(record["report"]).read_text(encoding="utf-8"))
+        self.assertEqual(friday_lab.Lab.related_tests(app_dir, ["other.py"], {"test_assistant.CalcTest.test_add"}), [])
+        (app_dir / "test_assistant.py").write_text(
+            "import unittest\n\nclass LabelTest(unittest.TestCase):\n    def test_x(self):\n        calc_label = 1\n\n"
+            "import calc\n", encoding="utf-8")  # calc_label 不算 calc;class 外面的 import 不算
+        self.assertEqual(friday_lab.Lab.related_tests(app_dir, ["calc.py"], {"test_assistant.LabelTest.test_x"}), [])
         record = lab.self_test([{"file": "other.py", "old": "X = 1", "new": "X = 1  # 注解"}], "改 other")
         self.assertEqual(record["blind"], [])  # 改的地方测得到
         self.assertIn("通过了", friday_lab.Lab.describe(record))
@@ -13192,14 +13197,27 @@ class CodeLabTest(TempDirTest):
             "    def test_other_blocked(self):\n"
             "        with self.assertRaises(PermissionError):\n"
             "            subprocess.run([sys.executable, '-c', 'print(1)'])\n"
+            "    def test_windows_style_string_command(self):  # Windows:指令先拼成一串文字才检查\n"
+            "        import fake_subprocess\n"
+            f"        good = [sys.executable, '-E', '-B', os.path.abspath('friday_lab_runner.py'), 'strict', {str(work)!r}, 'x.py']\n"
+            "        fake_subprocess.check(good)  # 不会被挡\n"
+            "        with self.assertRaises(PermissionError):\n"
+            "            fake_subprocess.check([sys.executable, '-c', 'print(1)'])\n"
             "    def test_runner_with_other_python_blocked(self):\n"
             "        with self.assertRaises(PermissionError):\n"
             "            subprocess.run(['python-not-same', os.path.abspath('friday_lab_runner.py'), 'strict', '.', 'x'])\n",
             encoding="utf-8")
+        (app_dir / "fake_subprocess.py").write_text(  # 档名以 subprocess.py 结尾:像 Windows 的 Popen 那样检查
+            "import subprocess, sys\n\n"
+            "def check(args):\n"
+            "    self = subprocess.Popen.__new__(subprocess.Popen)\n"
+            "    self.args = args\n"
+            "    sys.audit('subprocess.Popen', None, subprocess.list2cmdline(args), None, None)\n",
+            encoding="utf-8")
         proc = subprocess.run([sys.executable, "-E", "-B", str(friday_lab.RUNNER), "selftest", str(app_dir)],
                               capture_output=True, timeout=120, stdin=subprocess.DEVNULL, cwd=str(app_dir))
         out = proc.stdout.decode("utf-8", "replace")
-        self.assertIn("@@RESULT ran=3 failures=0 errors=0", out, out + proc.stderr.decode("utf-8", "replace"))
+        self.assertIn("@@RESULT ran=4 failures=0 errors=0", out, out + proc.stderr.decode("utf-8", "replace"))
         (app_dir / "friday_lab_runner.py").write_text("# 被改过的\n", encoding="utf-8")  # 不一样的就不准开
         proc = subprocess.run([sys.executable, "-E", "-B", str(friday_lab.RUNNER), "selftest", str(app_dir)],
                               capture_output=True, timeout=120, stdin=subprocess.DEVNULL, cwd=str(app_dir))
