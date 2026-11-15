@@ -3957,6 +3957,7 @@ def start_care(session, ctx, hub, toolbox: Toolbox, voice_module, data_dir: str 
 
     def game_started(game: str) -> None:
         """开游戏了:游戏优化、灯联动,再自动关掉事先选好的程序(游戏模式)。"""
+        hub.broadcast({"type": "status", "text": f"🎮 认出在玩 {game}。认错了就说“刚才那个不是游戏”"})
         threading.Thread(target=lambda: _quietly(lambda: lights_say(lights.game_start())), daemon=True,
                          name="friday-light-game").start()
         threading.Thread(target=lambda: boost_game(game), daemon=True, name="friday-game-boost").start()
@@ -3994,6 +3995,9 @@ def start_care(session, ctx, hub, toolbox: Toolbox, voice_module, data_dir: str 
     import friday_games
 
     care.known = session.known_games = toolbox.known_games = friday_games.KnownGames(os.path.join(data_dir, "friday_games.json"))
+    if care.known.cleaned:  # 以前记错的“游戏”(吉他、录影软件……)拿掉了
+        print(f"不再当成游戏:{'、'.join(care.known.cleaned)}", flush=True)
+        hub.broadcast({"type": "status", "text": f"🎮 以前记错的“游戏”拿掉了:{'、'.join(care.known.cleaned)}"})
     if os.name == "nt":
         care.app_path = friday_care.foreground_path
     care.start()

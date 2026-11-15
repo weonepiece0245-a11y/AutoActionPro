@@ -2,8 +2,9 @@
 
 怎么认:
   1. 装在 Steam(steamapps\\common)、Epic Games、Xbox(XboxGames)、Riot Games、EA Games、Ubisoft 游戏文件夹里的程序,
-     一开就算游戏,名字用游戏文件夹的名字;
-  2. 不认识的程序全屏 5 分钟以上,记成游戏(右下角会告诉你),以后窗口模式也认得;
+     一开就算游戏,名字用游戏文件夹的名字(吉他 / 音乐 / 剪辑 / 直播 / 桌面壁纸这类软件除外);
+  2. 不认识的程序全屏不会自己当成游戏(以前会,结果吉他软件、看图、文书全屏都被当成游戏);
+     全屏 5 分钟以上会在右下角问一次“是游戏吗”,你说了才记;
   3. 说“刚才那个是游戏”“NTE 是游戏”(用你说的名字)、“刚才那个不是游戏”“XX 不是游戏”来教它。
 存在 friday_games.json。
 """
@@ -33,6 +34,25 @@ SYSTEM_APPS = {  # Windows 自己的小工具:不会是“刚才那个游戏”
     "powershell.exe", "pwsh.exe", "windowsterminal.exe", "notepad.exe", "snippingtool.exe", "screenclippinghost.exe",
     "textinputhost.exe", "claude.exe", "pythonw.exe", "python.exe",
 }
+# 名字里有这些的不是游戏(就算装在 Steam 文件夹、或全屏):乐器、音乐制作、剪辑、直播、聊天、开发工具……
+NOT_GAME_HINTS = re.compile(
+    r"guitar|\bbass\b|\bamp(lifier|litube)?\b|amplitube|bias ?fx|neural ?dsp|archetype|tonex|helix ?native|"
+    r"positive ?grid|rocksmith|yousician|tuner|metronome|\bsynth\b|synthesizer|\bvst|\bdaw\b|reaper|ableton|"
+    r"fl ?studio|\bfl64\b|cubase|studio ?one|bandlab|audacity|musescore|\bobs(64|32)?\b|streamlabs|"
+    r"wallpaper ?engine|wallpaper32|wallpaper64|soundpad|voicemeeter|vtube ?studio|blender|krita|aseprite|davinci|"
+    r"resolve|adobe ?premiere|after ?effects|photoshop|illustrator|lightroom|capcut|unity ?hub|\bunity\b$|"
+    r"unreal ?editor|godot|visual ?studio|\bvs ?code\b|^code$|\bzoom\b|\bteams\b|msteams|whatsapp|telegram|"
+    r"wechat|weixin|skype|slack|winword|\bexcel\b|powerpnt|acrobat|photos?app|photo ?viewer|calculator",
+    re.I)
+
+
+def not_game_hint(exe: str, path: str | None = None) -> bool:
+    """看名字就知道不是游戏(乐器、音乐、剪辑、直播、聊天、办公……)。"""
+    name = os.path.splitext(re.split(r"[\\/]", str(exe or ""))[-1])[0]
+    folder = folder_game(path, hints=False) or ""
+    return bool(NOT_GAME_HINTS.search(name) or (folder and NOT_GAME_HINTS.search(folder)))
+
+
 THIS = ("", "这", "它", "这个", "那个", "刚才", "刚刚", "现在", "刚才的", "刚刚的", "刚才那个", "刚刚那个", "现在这个", "这个程序")
 NAME_OK = re.compile(r"^[\w\-. ()'&:!一-鿿]{1,30}$")
 
@@ -42,8 +62,9 @@ def _exe(name: str) -> str:
     return name if name.endswith(".exe") else (name + ".exe" if name else "")
 
 
-def folder_game(path: str | None) -> str | None:
-    """装在游戏文件夹里的程序 -> 游戏名(那一层文件夹的名字);不是就 None。"""
+def folder_game(path: str | None, hints: bool = True) -> str | None:
+    """装在游戏文件夹里的程序 -> 游戏名(那一层文件夹的名字);不是就 None。
+    Steam 里也有吉他、壁纸、剪辑这类软件:名字看起来不是游戏的不算(hints)。"""
     if not path:
         return None
     lower = str(path).lower()
@@ -54,6 +75,9 @@ def folder_game(path: str | None) -> str | None:
         if at >= 0:
             rest = str(path)[at + len(marker):]
             name = re.split(r"[\\/]", rest, maxsplit=1)[0].strip()
+            if hints and name and (NOT_GAME_HINTS.search(name) or NOT_GAME_HINTS.search(
+                    os.path.splitext(re.split(r"[\\/]", str(path))[-1])[0])):
+                return None
             return name or None
     return None
 
@@ -70,13 +94,23 @@ class KnownGames:
         data = data if isinstance(data, dict) else {}
         self.games: dict[str, str] = {str(k).lower(): str(v) for k, v in (data.get("games") or {}).items()}
         self.not_games: set[str] = {str(x).lower() for x in data.get("not_games") or []}
+        self.asked: set[str] = {str(x).lower() for x in data.get("asked") or []}  # 问过“是游戏吗”的
+        # 以前全屏 5 分钟就自己记成游戏,吉他、录影这类软件也被记了:看名字明显不是游戏的拿掉
+        wrong = [exe for exe, name in self.games.items()
+                 if not_game_hint(exe) or (name.lower() == os.path.splitext(exe)[0] and NOT_GAME_HINTS.search(name))]
+        self.cleaned = [self.games.pop(exe) for exe in wrong]
+        if wrong:
+            try:
+                self._save()
+            except OSError:
+                pass
         self.full_since: dict[str, float] = {}  # 不认识的程序从什么时候开始全屏
         self.recent: list[tuple[str, str | None]] = []  # 最近在最前面的程序(exe, 完整路径),给“刚才那个”用
 
     def _save(self) -> None:
         temp = self.path.with_name(f"{self.path.name}.{threading.get_ident()}.tmp")
-        temp.write_text(json.dumps({"games": self.games, "not_games": sorted(self.not_games)}, ensure_ascii=False,
-                                   indent=1), encoding="utf-8")
+        temp.write_text(json.dumps({"games": self.games, "not_games": sorted(self.not_games),
+                                    "asked": sorted(self.asked)[-300:]}, ensure_ascii=False, indent=1), encoding="utf-8")
         os.replace(temp, self.path)
 
     # ---------- 认 ----------
@@ -93,14 +127,15 @@ class KnownGames:
         return (exe or "").lower() in self.not_games
 
     def seen(self, exe: str, path: str | None, fullscreen: bool, not_games: set[str]) -> str | None:
-        """每 30 秒看一次最前面的程序;不认识的全屏够久了就记成游戏,返回要告诉你的话。"""
+        """每 30 秒看一次最前面的程序;不认识的全屏够久了问一次“是游戏吗”(不会自己记),返回要问你的话。"""
         exe = (exe or "").lower()
         if not exe:
             return None
         if (exe not in not_games and exe not in LAUNCHERS and exe not in SYSTEM_APPS
                 and (not self.recent or self.recent[-1][0] != exe)):
             self.recent = (self.recent + [(exe, path)])[-10:]
-        if not fullscreen or exe in not_games or exe in LAUNCHERS or self.name(exe, path) or exe in self.not_games:
+        if (not fullscreen or exe in not_games or exe in LAUNCHERS or exe in SYSTEM_APPS or self.name(exe, path)
+                or exe in self.not_games or exe in self.asked or not_game_hint(exe, path)):
             self.full_since.pop(exe, None)
             return None
         now = self.clock()
@@ -110,10 +145,10 @@ class KnownGames:
         self.full_since.pop(exe, None)
         name = os.path.splitext(exe)[0]
         with self.lock:
-            self.games[exe] = name
+            self.asked.add(exe)  # 只问一次
             self._save()
-        return (f"记住了:{name} 是游戏,以后不用全屏也认得。不是游戏的话跟我说“{name} 不是游戏”;"
-                f"想换个名字就说“{name} 叫做 新名字”。")
+        return (f"{name} 全屏 5 分钟了,是游戏吗?是的话跟我说“刚才那个是游戏”(也可以说“{name} 是游戏”),"
+                f"我就会自动游戏优化、打游戏时不打扰;不是就不用理。")
 
     # ---------- 教 ----------
     def _pick(self, words: str) -> str | None:

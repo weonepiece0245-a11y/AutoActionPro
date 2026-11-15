@@ -5490,10 +5490,13 @@ class CareTest(unittest.TestCase):
         self.assertIsNone(care.game)
         self.assertEqual(games, ["Apex"])  # 自动游戏模式只在开始时一次
 
-    def test_unknown_fullscreen_program_counts_as_game_and_video_counts_as_present(self):
-        snap = friday_care.look(idle=lambda: 900, app=lambda: "eldenring.exe", fullscreen=lambda: True,
+    def test_unknown_fullscreen_program_is_present_but_not_a_game(self):
+        snap = friday_care.look(idle=lambda: 900, app=lambda: "biasfx2.exe", fullscreen=lambda: True,
                                 display=lambda: False)
-        self.assertEqual((snap["game"], snap["present_idle"]), ("eldenring", 0.0))
+        self.assertEqual((snap["game"], snap["present_idle"]), (None, 0.0))  # 吉他软件全屏:人在,但不是游戏
+        snap = friday_care.look(idle=lambda: 900, app=lambda: "r5apex.exe", fullscreen=lambda: True,
+                                display=lambda: False)
+        self.assertEqual((snap["game"], snap["present_idle"]), ("Apex", 0.0))
         snap = friday_care.look(idle=lambda: 900, app=lambda: "msedge.exe", fullscreen=lambda: False,
                                 display=lambda: True)  # 在浏览器里看视频
         self.assertEqual((snap["game"], snap["watching"], snap["present_idle"]), (None, True, 0.0))
@@ -5944,17 +5947,42 @@ class KnownGamesTest(TempDirTest):
         self.assertEqual(friday_care.game_name("eldenring.exe", False,
                                                r"E:\steamapps\common\Elden Ring\eldenring.exe", self.make()), "Elden Ring")
 
-    def test_learns_fullscreen_game_after_five_minutes(self):
+    def test_asks_once_instead_of_learning_by_itself(self):
         known = self.make()
         self.assertIsNone(known.seen("htgame.exe", r"D:\NTE\HTGame.exe", True, friday_care.NOT_GAMES))
         self.now[0] += friday_games.LEARN_SECONDS - 30
         self.assertIsNone(known.seen("htgame.exe", r"D:\NTE\HTGame.exe", True, friday_care.NOT_GAMES))
         self.now[0] += 60
         text = known.seen("htgame.exe", r"D:\NTE\HTGame.exe", True, friday_care.NOT_GAMES)
-        self.assertIn("记住了:htgame 是游戏", text)
-        again = self.make()  # 重开星期五也记得;窗口模式也认得
-        self.assertEqual(friday_care.game_name("htgame.exe", False, None, again), "htgame")
-        self.assertIsNone(known.seen("chrome.exe", None, True, friday_care.NOT_GAMES))  # 看视频不学
+        self.assertIn("是游戏吗", text)
+        self.assertIsNone(known.name("htgame.exe"))  # 没有自己记成游戏
+        self.now[0] += friday_games.LEARN_SECONDS + 60
+        self.assertIsNone(known.seen("htgame.exe", r"D:\NTE\HTGame.exe", True, friday_care.NOT_GAMES))  # 只问一次
+        self.assertIn("htgame.exe", self.make().asked)  # 重开星期五也不再问
+        self.assertIn("是游戏", known.mark_game("刚才那个"))  # 你说了才记
+        self.assertEqual(friday_care.game_name("htgame.exe", False, None, self.make()), "htgame")
+        self.assertIsNone(known.seen("chrome.exe", None, True, friday_care.NOT_GAMES))  # 看视频不问
+        for exe in ("BIAS FX 2.exe", "GuitarPro8.exe", "obs64.exe"):  # 吉他、录影软件全屏多久都不问
+            known.seen(exe.lower(), None, True, friday_care.NOT_GAMES)
+            self.now[0] += friday_games.LEARN_SECONDS + 60
+            self.assertIsNone(known.seen(exe.lower(), None, True, friday_care.NOT_GAMES), exe)
+
+    def test_old_wrongly_learned_games_are_cleaned(self):
+        Path(self.tmp, "g.json").write_text(json.dumps({"games": {
+            "biasfx2.exe": "biasfx2", "guitarpro8.exe": "GuitarPro8", "htgame.exe": "NTE", "obs64.exe": "obs64"}}),
+            encoding="utf-8")
+        known = self.make()
+        self.assertEqual(sorted(known.cleaned), ["GuitarPro8", "biasfx2", "obs64"])
+        self.assertEqual(known.games, {"htgame.exe": "NTE"})  # 你教过的真游戏留着
+        self.assertEqual(self.make().cleaned, [])  # 存好了,下次不用再清
+
+    def test_not_game_names_even_in_steam_folder(self):
+        self.assertIsNone(friday_games.folder_game(r"D:\SteamLibrary\steamapps\common\Rocksmith2014\Rocksmith2014.exe"))
+        self.assertIsNone(friday_games.folder_game(r"D:\SteamLibrary\steamapps\common\wallpaper_engine\wallpaper64.exe"))
+        self.assertEqual(friday_games.folder_game(r"D:\SteamLibrary\steamapps\common\Swords of Legends\game.exe"),
+                         "Swords of Legends")
+        for real_game in ("Obsidian.exe", "DawnOfWar.exe", "Synthetik.exe", "Teamfight Tactics.exe", "CampFire.exe"):
+            self.assertFalse(friday_games.not_game_hint(real_game), real_game)
 
     def test_teach_and_forget(self):
         known = self.make()
@@ -5990,10 +6018,31 @@ class KnownGamesTest(TempDirTest):
                                 fullscreen=lambda: True, display=lambda: False, clock=lambda: now[0], toast=toasts.append)
         care.known = friday_games.KnownGames(os.path.join(self.tmp, "g.json"), clock=lambda: now[0])
         care.tick()
-        self.assertEqual(care.game, "htgame")  # 全屏:先当游戏
+        self.assertIsNone(care.game)  # 不认识的全屏:不当游戏
         now[0] += friday_games.LEARN_SECONDS + 1
         care.tick()
-        self.assertTrue(any("记住了" in t for t in toasts))
+        self.assertTrue(any("是游戏吗" in t for t in toasts))
+
+    def test_switching_game_to_other_program(self):
+        started, ended, now = [], [], [1000.0]
+        app = ["r5apex.exe"]
+        care = friday_care.Care(lambda t: True, name=lambda: "老板", idle=lambda: 0, app=lambda: app[0],
+                                settings=lambda: {"welcome": False, "break_minutes": 0, "night": False, "game_quiet": True},
+                                fullscreen=lambda: True, display=lambda: False, clock=lambda: now[0],
+                                on_game=started.append, on_game_end=ended.append)
+        care.tick()
+        self.assertEqual((care.game, started), ("Apex", ["Apex"]))
+        app[0] = "dota2.exe"  # 直接换另一个游戏:Apex 算打完
+        now[0] += 30
+        care.tick()
+        self.assertEqual((started, ended), (["Apex", "Dota 2"], ["Apex"]))
+        app[0] = "biasfx2.exe"  # 打完开吉他软件(全屏):不是游戏,一阵子后 Dota 2 算打完
+        for _ in range(4):
+            now[0] += 30
+            care.tick()
+        self.assertEqual(ended, ["Apex", "Dota 2"])
+        self.assertIsNone(care.game)
+        self.assertFalse(care.quiet_now())
 
 
 import friday_gamereport  # noqa: E402

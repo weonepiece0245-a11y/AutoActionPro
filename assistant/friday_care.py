@@ -295,7 +295,8 @@ def keep_game_front(seconds: float = 8.0) -> bool:
 
 
 def game_name(exe: str, fullscreen: bool, path: str | None = None, known=None) -> str | None:
-    """认识的游戏用名字(学过的、装在游戏文件夹里的也算);不认识但全屏的程序也当游戏(用程序名)。"""
+    """认识的游戏用名字(学过的、装在游戏文件夹里的也算)。
+    不认识的程序全屏不当游戏(以前会,吉他软件、看图、文书全屏都被当成游戏);全屏只算“你在电脑前”。"""
     exe = (exe or "").lower()
     if known is not None:
         if known.is_not_game(exe):
@@ -305,8 +306,6 @@ def game_name(exe: str, fullscreen: bool, path: str | None = None, known=None) -
             return name
     if exe in GAMES:
         return GAMES[exe]
-    if fullscreen and exe and exe not in NOT_GAMES:
-        return os.path.splitext(exe)[0]
     return None
 
 
@@ -418,14 +417,18 @@ class Care:
         if game:
             self.game_seen = now
             if self.game != game:
-                started = self.game is None
-                self.game = game
-                _now_playing = game
-                if started:
+                previous = self.game
+                if previous is not None:  # 直接换了另一个游戏:上一个算打完(报告、游戏优化都结束),再开始新的
                     try:
-                        self.on_game(game)
+                        self.on_game_end(previous)
                     except Exception:
                         pass
+                self.game = game
+                _now_playing = game
+                try:
+                    self.on_game(game)
+                except Exception:
+                    pass
             return None
         if self.game is None or now - self.game_seen < GAME_GRACE:
             return None
