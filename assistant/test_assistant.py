@@ -13363,5 +13363,144 @@ class MailDraftTest(TempDirTest):
         self.assertEqual(parsed["In-Reply-To"], "<abc@x>")
         self.assertTrue(str(email.header.make_header(email.header.decode_header(parsed["Subject"]))).startswith("Re:"))
 
+
+class PhotoFindTest(TempDirTest):
+    def photo(self, name, taken=None, gps=None, folder=None):
+        import random
+
+        from PIL import Image, ImageDraw
+
+        image = Image.new("RGB", (320, 240))
+        draw = ImageDraw.Draw(image)
+        rng = random.Random(name)
+        for _ in range(4000):  # 杂点:让文件大过 20KB
+            draw.point((rng.randrange(320), rng.randrange(240)), fill=(rng.randrange(255), rng.randrange(255), 0))
+        exif = Image.Exif()
+        if taken:
+            exif.get_ifd(0x8769)[36867] = taken
+        if gps:
+            g = exif.get_ifd(0x8825)
+            g[1], g[2], g[3], g[4] = "N", (gps[0], 0.0, 0.0), "E", (gps[1], 0.0, 0.0)
+        path = Path(folder or self.pics) / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(path, exif=exif, quality=100)
+        return path
+
+    def setUp(self):
+        super().setUp()
+        import friday_photofind
+
+        self.pics = Path(self.tmp) / "Pictures"
+        self.asked = []
+
+        def fetch(url):
+            self.asked.append(url)
+            zh = "accept-language=zh" in url
+            if "lat=5.40" in url:
+                return {"address": {"city": "乔治市" if zh else "George Town", "state": "槟城" if zh else "Penang",
+                                    "country": "马来西亚" if zh else "Malaysia"}}
+            return {"address": {"city": "吉隆坡" if zh else "Kuala Lumpur", "country": "马来西亚" if zh else "Malaysia"}}
+        self.index = friday_photofind.PhotoIndex(os.path.join(self.tmp, "idx.json"), folders=lambda: [self.pics],
+                                                 fetch=fetch, sleep=lambda s: None,
+                                                 today=lambda: datetime.date(2026, 11, 15))
+
+    def test_parse_when(self):
+        import friday_photofind as pf
+
+        today = datetime.date(2026, 11, 15)
+        self.assertEqual(pf.parse_when("去年在槟城拍的照片", today)[0], (datetime.date(2025, 1, 1), datetime.date(2026, 1, 1)))
+        self.assertEqual(pf.parse_when("2025年3月的照片", today)[0], (datetime.date(2025, 3, 1), datetime.date(2025, 4, 1)))
+        self.assertEqual(pf.parse_when("去年十二月", today)[0], (datetime.date(2025, 12, 1), datetime.date(2026, 1, 1)))
+        self.assertEqual(pf.parse_when("上个月的照片", today)[0], (datetime.date(2026, 10, 1), datetime.date(2026, 11, 1)))
+        self.assertEqual(pf.parse_when("12月的照片", today)[0][0], datetime.date(2025, 12, 1))  # 还没到:去年
+        self.assertEqual(pf.parse_when("昨天的照片", today)[0], (datetime.date(2026, 11, 14), datetime.date(2026, 11, 15)))
+        self.assertEqual(pf.parse_when("最近7天", today)[0][0], datetime.date(2026, 11, 9))
+        self.assertIsNone(pf.parse_when("槟城的照片", today)[0])
+        self.assertIn("penang", pf.place_words(pf.parse_when("去年在槟城拍的照片", today)[1]))
+        self.assertEqual(pf.place_words("帮我找 的照片"), [])
+
+    def test_scan_name_places_and_search(self):
+        self.photo("a.jpg", "2025:03:14 10:20:00", (5.4, 100.3))  # 槟城
+        self.photo("b.jpg", "2025:08:01 09:00:00", (3.15, 101.7))  # 吉隆坡
+        self.photo("IMG_20261102_183000.jpg", folder=self.pics / "手机")  # 没有 EXIF:看文件名
+        (self.pics / "tiny.jpg").write_bytes(b"x" * 100)  # 太小:不算
+        result = self.index.scan()
+        self.assertEqual(result["photos"], 3)
+        self.assertEqual(result["places"], 2)
+        self.assertEqual(sum("reverse" in u for u in self.asked), 4)  # 两个地方 × 中英文
+        found, understood = self.index.ask("去年在槟城拍的照片")
+        self.assertEqual(found["total"], 1)
+        self.assertEqual(found["items"][0]["name"], "a.jpg")
+        self.assertIn("乔治市", found["items"][0]["place"])
+        self.assertEqual(self.index.search(places=["Kuala Lumpur"])["total"], 1)
+        self.assertEqual(self.index.ask("上个月的照片")[0]["total"], 0)
+        self.assertEqual(self.index.ask("这个月的照片")[0]["total"], 1)
+        nowhere, understood = self.index.ask("在东京拍的照片")
+        self.assertFalse(nowhere["known_place"])
+        self.assertIn("GPS", self.index.describe(nowhere, understood))
+        self.asked.clear()
+        self.assertEqual(self.index.scan()["new"], 0)  # 没改过的不再读
+        self.assertEqual(self.asked, [])
+        pid = found["items"][0]["id"]
+        self.assertTrue(self.index.thumb(pid).startswith(b"\xff\xd8"))
+        self.assertIsNone(self.index.thumb("0" * 16))
+        (self.pics / "a.jpg").unlink()
+        self.assertEqual(self.index.scan()["photos"], 2)
+
+    def test_quick_and_tool(self):
+        self.photo("a.jpg", "2025:03:14 10:20:00", (5.4, 100.3))
+        self.index.scan()
+        hub = friday_web.Hub()
+        client, _ = hub.subscribe()
+        session = app.WebSession(None, app.default_persona(), hub)
+        handler = app.PhotoCommands(session, self.index)
+        self.assertIn("找到 1 张", handler.handle("找去年在槟城拍的照片"))
+        events = [e for e in iter(lambda: None if client.empty() else client.get_nowait(), None)]
+        self.assertEqual([e for e in events if e["type"] == "photos"][0]["total"], 1)
+        self.assertIsNone(handler.handle("帮我整理去年的照片"))
+        self.assertIsNone(handler.handle("这张照片是什么"))
+        toolbox = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m.json")), lambda a: True)
+        toolbox.photofind = self.index
+        shown = []
+        toolbox.photo_show = lambda result, understood: shown.append(understood)
+        self.assertIn("photo_search", [t["name"] for t in toolbox.definitions()])
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+        out = toolbox.run(SimpleNamespace(id="c", name="photo_search",
+                                          input={"start": "2025-03-01", "end": "2025-04-01", "places": ["Penang"]}),
+                          lambda s: None)
+        self.assertIn("找到 1 张", out["content"])
+        self.assertEqual(shown, ["2025-03-01 ~ 2025-04-01 · Penang"])
+        bad = toolbox.run(SimpleNamespace(id="c", name="photo_search", input={"start": "去年"}), lambda s: None)
+        self.assertTrue(bad["is_error"])
+
+    def test_web_thumb_only_by_id(self):
+        self.photo("a.jpg", "2025:03:14 10:20:00")
+        self.index.scan()
+        pid = next(iter(self.index.items))
+        ctx = friday_web.WebContext(friday_web.Hub(), queue.Queue(), friday_web.WebApprover(friday_web.Hub()),
+                                    "tok", 0, state=lambda: {})
+        ctx.photos = self.index
+        server = friday_web.start_server(ctx)
+        try:
+            port = ctx.port = server.server_address[1]
+
+            def get(path):
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                conn.request("GET", path)
+                response = conn.getresponse()
+                return response.status, response.read()
+
+            status, body = get(f"/api/photo_thumb?id={pid}&t=tok")
+            self.assertEqual((status, body[:2]), (200, b"\xff\xd8"))
+            self.assertEqual(get(f"/api/photo_thumb?id={pid}&t=wrong")[0], 403)
+            self.assertEqual(get("/api/photo_thumb?id=../../.env&t=tok")[0], 404)
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("POST", "/api/photo_open", json.dumps({"id": "f" * 16}),
+                         {"X-Friday-Token": "tok", "Content-Type": "application/json"})
+            self.assertEqual(conn.getresponse().status, 404)
+        finally:
+            server.shutdown()
+            server.server_close()
+
 if __name__ == "__main__":
     unittest.main()

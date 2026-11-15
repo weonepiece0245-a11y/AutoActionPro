@@ -2670,6 +2670,7 @@ def settings_state(session, meter=None) -> dict:
         "rain_alert": __import__("friday_alerts").rain_time(),
         "event_lead": __import__("friday_events").lead_minutes() if google_ready(session) else None,
         "departure": departure_state(session),
+        "photofind": session.photofind.stats() if getattr(session, "photofind", None) is not None else None,
         "mail_alert": mail_alert_state(session),
         "memtidy": memtidy_state(session),
         "vocab": vocab_state(session),
@@ -3297,6 +3298,14 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         save_env_value(env, "FRIDAY_EVENT_LEAD", str(lead))
         os.environ["FRIDAY_EVENT_LEAD"] = str(lead)
         done.append(f"日历上的活动开始前 {lead} 分钟提醒你" if lead else "不再提前提醒日历上的活动")
+    if payload.get("photo_reindex"):
+        index = getattr(session, "photofind", None)
+        if index is None:
+            return {"error": "照片搜索没有开"}
+        if index.busy:
+            return {"error": "正在整理了,等一下"}
+        threading.Thread(target=lambda: _quietly(index.scan), daemon=True, name="friday-photofind-now").start()
+        done.append("开始整理照片目录(照片多的话要几分钟)")
     if "depart_home" in payload:
         home = " ".join(str(payload["depart_home"] or "").split())[:200]
         save_env_value(env, "FRIDAY_HOME_ADDRESS", home)
@@ -4105,6 +4114,68 @@ def start_toolstats(session, toolbox: Toolbox, data_dir: str):
         quick.extra.append(friday_toolstats.Commands(stats, lambda: [t["name"] for t in toolbox.definitions()]))
         quick.stats = stats
     return stats
+
+
+def show_photos(session, result: dict, understood: str) -> None:
+    """把找到的照片(缩图)显示在窗口里。"""
+    session.hub.broadcast({"type": "photos", "title": understood, "total": result["total"], "items": result["items"]})
+
+
+class PhotoCommands:
+    """“去年在槟城拍的照片”“上个月的照片”:在照片目录里找(不问 Claude)。"""
+
+    ASK = re.compile(r"(照片|相片|photos?|pictures?)", re.I)
+    VERB = re.compile(r"(找|看|有|哪|show|find|拍)", re.I)
+
+    def __init__(self, session, index) -> None:
+        self.session, self.index = session, index
+
+    def handle(self, text: str) -> str | None:
+        import friday_photofind
+
+        text = str(text or "").strip()
+        if len(text) > 40 or not self.ASK.search(text) or not self.VERB.search(text):
+            return None
+        if re.search(r"(整理|分类|删|备份|传|发给|寄|上传|编辑|修|改|这张|这些|截图)", text):
+            return None  # 不是找照片:交给 Claude
+        when, rest = friday_photofind.parse_when(text, self.index.today())
+        places = friday_photofind.place_words(rest)
+        if when is None and not places:
+            return None
+        if places and not any(re.search(r"[\u4e00-\u9fff]{2,}|[a-z]{3,}", p) for p in places[:1]):
+            return None
+        result, understood = self.index.ask(text)
+        if result["total"]:
+            show_photos(self.session, result, understood)
+        return self.index.describe(result, understood)
+
+
+def start_photo_find(session, toolbox: Toolbox, data_dir: str, ctx=None, interval: float = 6 * 3600) -> None:
+    """照片按时间地点找:背景做照片目录(开机 3 分钟后一次,之后每 6 小时看一次新照片)。"""
+    import friday_photofind
+
+    index = friday_photofind.PhotoIndex(os.path.join(data_dir, "friday_photo_index.json"))
+    session.photofind = index
+    toolbox.photofind = index
+    toolbox.photo_show = lambda result, understood: show_photos(session, result, understood)
+    toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+    if getattr(session, "quick", None) is not None:
+        session.quick.extra.append(PhotoCommands(session, index))
+    if ctx is not None:
+        ctx.photos = index
+
+    def loop() -> None:
+        time.sleep(180)
+        while True:
+            try:
+                result = index.scan()
+                if result.get("new"):
+                    print(f"照片目录:{result['photos']} 张(新加 {result['new']} 张)", flush=True)
+            except Exception as e:
+                print(f"照片目录没做好:{e}", flush=True)
+            time.sleep(interval)
+
+    threading.Thread(target=loop, daemon=True, name="friday-photofind").start()
 
 
 def start_energy(session, toolbox: Toolbox, data_dir: str, interval: float = 15 * 60, first_wait: float = 120):
@@ -5730,7 +5801,8 @@ def start_departure_reminders(session, toolbox: Toolbox, state, data_dir: str, i
     geocoder = friday_departure.Geocoder(os.path.join(data_dir, "friday_places.json"))
     session.departure = friday_departure.DepartureReminder(google.raw_events, state, geocoder,
                                                            rain=friday_events.rain_at())
-    session.quick.extra.append(DepartureCommands(session))
+    if getattr(session, "quick", None) is not None:
+        session.quick.extra.append(DepartureCommands(session))
 
     def check() -> None:
         for text in session.departure.check(_call_me(session)):
@@ -6070,7 +6142,6 @@ def run_web(args) -> None:
         events.put(("web", {"text": "📋 " + text, "prefix": friday_desktop.ask_prefix(text), "source": "web"}))
 
     session.snip = lambda minimize=False: take_snip(session, data_dir, minimize)
-    session.quick.extra.append(SnipCommands(session))
     session.snip_hotkey = friday_desktop.GlobalHotkey(lambda: _quietly(lambda: session.snip(False)),
                                                       friday_desktop.SNIP_HOTKEYS, hotkey_id=3)
     if not session.snip_hotkey.start(friday_desktop.snip_hotkey_name()):
@@ -6140,12 +6211,17 @@ def run_web(args) -> None:
     _startup_step(session, "家里用电统计", lambda: start_energy(session, toolbox, data_dir))
     _startup_step(session, "功能使用统计", lambda: start_toolstats(session, toolbox, data_dir))
     _startup_step(session, "代码实验室", lambda: start_lab(session, toolbox, data_dir))
+    _startup_step(session, "照片按时间地点找", lambda: start_photo_find(session, toolbox, data_dir, ctx))
     toolbox.meter, toolbox.budget = session.meter, getattr(session, "budget", None)
     import friday_scenes
 
     toolbox.scenes = session.quick.scenes = friday_scenes.Scenes(os.path.join(data_dir, "friday_scenes.json"))
     session.quick.on_say = lambda text: session.speak(text, interrupt=True) if session.speak_enabled else None
     session.quick.extra.insert(0, SpeechControls(session))
+    session.quick.extra.append(SnipCommands(session))
+    if getattr(session, "departure", None) is not None and \
+            not any(isinstance(h, DepartureCommands) for h in session.quick.extra):
+        session.quick.extra.append(DepartureCommands(session))
     if getattr(session, "care", None) is not None:  # 电脑使用时间(只在 Windows 上有)
         import friday_screentime
 

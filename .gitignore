@@ -86,6 +86,10 @@ assistant/friday_plan.json*
 assistant/friday_energy.json*
 assistant/friday_toolstats.json*
 assistant/friday_lab/
+assistant/friday_places.json*
+assistant/friday_maildraft.json*
+assistant/friday_photo_index.json*
+assistant/friday_snip.png
 
 # 更新前留的旧文件(自动退回上一版用)
 assistant/_update_backup/

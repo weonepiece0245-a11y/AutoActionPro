@@ -1093,6 +1093,26 @@ HOME_ENERGY_TOOL = {
     },
 }
 
+PHOTO_SEARCH_TOOL = {
+    "name": "photo_search",
+    "description": (
+        "在老板电脑的照片(图片文件夹、OneDrive 图片)里按拍摄时间、地点找照片,找到的会以缩图显示在窗口里,点一下就打开。"
+        "老板说“去年在槟城拍的照片”“2025 年 3 月的照片”“上个月云顶的照片”时用这个。start/end 用 YYYY-MM-DD(end 不含);"
+        "places 写地名,中文和英文都写(例如 [\"槟城\", \"Penang\", \"George Town\"]),地点是看照片的 GPS 判断的。"
+        "status 看目录做好了没、有多少张有地点。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["search", "status"], "description": "默认 search"},
+            "start": {"type": "string", "description": "YYYY-MM-DD"},
+            "end": {"type": "string", "description": "YYYY-MM-DD(不含这一天)"},
+            "places": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": [],
+    },
+}
+
 PC_STARTUP_TOOL = {
     "name": "pc_startup",
     "description": (
@@ -1249,6 +1269,8 @@ class Toolbox:
         self.subscription_scan = None  # () -> 话:去邮箱找订阅(在后台)
         self.startup_doctor = None  # 开机变慢优化(friday_startup.StartupDoctor)
         self.energy_report = None  # 家里用电:(today / week / month) -> 话
+        self.photofind = None  # 照片按时间地点找(friday_photofind.PhotoIndex)
+        self.photo_show = None  # 把找到的照片显示在窗口:(结果, 标题)
         self.stats = None  # 功能使用统计(friday_toolstats.ToolStats)
         self.lab = None  # 代码实验室(friday_lab.Lab)
         self.lab_notify = None  # (结果) -> None:跑完告诉老板
@@ -1314,6 +1336,7 @@ class Toolbox:
             "subscriptions": self._subscriptions,
             "pc_startup": self._pc_startup,
             "home_energy": self._home_energy,
+            "photo_search": self._photo_search,
             "code_lab": self._code_lab,
         }
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
@@ -1416,6 +1439,8 @@ class Toolbox:
             tools = tools + [PC_STARTUP_TOOL]
         if self.energy_report is not None:
             tools = tools + [HOME_ENERGY_TOOL]
+        if self.photofind is not None and self.local_tools:
+            tools = tools + [PHOTO_SEARCH_TOOL]
         if self.lab is not None and self.local_tools:
             tools = tools + [CODE_LAB_TOOL]
         return tools
@@ -2175,6 +2200,30 @@ class Toolbox:
         period = {"today": "今天", "week": "这周", "month": "这个月"}.get(str(args.get("period") or "month"), "这个月")
         on_status("读插座的用电")
         return self.energy_report(period), False
+
+    def _photo_search(self, args, on_status):
+        index = self.photofind
+        if index is None:
+            return "照片搜索没有开", True
+        if args.get("action") == "status":
+            s = index.stats()
+            return (f"照片目录:{s['photos']} 张,其中 {s['with_place']} 张有地点({s['places']} 个地方);"
+                    f"上次整理 {s['scanned'] or '还没做'};文件夹:{'、'.join(s['folders']) or '(找不到图片文件夹)'}"), False
+        dates = []
+        for key in ("start", "end"):
+            raw = str(args.get(key) or "").strip()
+            try:
+                dates.append(datetime.date.fromisoformat(raw) if raw else None)
+            except ValueError:
+                return f"{key} 要写成 YYYY-MM-DD", True
+        places = [str(p)[:60] for p in (args.get("places") or []) if str(p).strip()][:8]
+        on_status("在照片目录里找")
+        result = index.search(dates[0], dates[1], places=places)
+        span = " ~ ".join(str(d) for d in dates if d)
+        understood = " · ".join(x for x in (span, places[0] if places else "") if x)
+        if result["total"] and self.photo_show is not None:
+            self.photo_show(result, understood)
+        return index.describe(result, understood) + ("(缩图已经显示在窗口里)" if result["total"] else ""), False
 
     def _pc_startup(self, args, on_status):
         doctor = self.startup_doctor

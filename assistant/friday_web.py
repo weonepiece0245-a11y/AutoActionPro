@@ -374,6 +374,7 @@ class WebContext:
         self.history: Callable[[str, str], dict] | None = None  # 聊天记录(关键词, 日期)
         self.subtitle_state: Callable[[], dict] | None = None  # 游戏字幕小程序来拿现在要显示的字
         self.spotify_callback: Callable[[dict], str] | None = None  # Spotify 登录跳回来
+        self.photos = None  # 照片按时间地点找(friday_photofind.PhotoIndex):缩图、打开
 
     def locked(self) -> bool:
         return self.lock is not None and self.lock.locked
@@ -486,6 +487,12 @@ def make_handler(ctx: WebContext):
                 return self._events()
             if url.path == "/api/state":
                 return self._json(200, {**ctx.state(), "greeting": ctx.greeting, "locked": False})
+            if url.path == "/api/photo_thumb":  # 只给目录里有的照片(用 id,不收路径)
+                photo_id = (query.get("id") or [""])[0]
+                data = ctx.photos.thumb(photo_id) if ctx.photos is not None and re.fullmatch(r"[0-9a-f]{16}", photo_id) else None
+                if data is None:
+                    return self._send(404, b"not found", "text/plain")
+                return self._send(200, data, "image/jpeg")
             if url.path.startswith("/audio/"):
                 data = ctx.audio.get(url.path[len("/audio/"):].split(".")[0])
                 if data is None:
@@ -591,6 +598,19 @@ def make_handler(ctx: WebContext):
                 return self._json(200, {"ok": True})
             if ctx.locked():
                 return self._json(423, {"error": "星期五已上锁,先输入 PIN 解锁"})
+            if url.path == "/api/photo_open":
+                try:
+                    photo_id = str(json.loads(body or b"{}").get("id") or "")
+                except (ValueError, AttributeError):
+                    return self._json(400, {"error": "格式不对"})
+                path = ctx.photos.file_of(photo_id) if ctx.photos is not None else None
+                if path is None:
+                    return self._json(404, {"error": "找不到这张照片(可能搬走或删掉了)"})
+                try:
+                    os.startfile(path)  # type: ignore[attr-defined]  # 用 Windows 的相片程序打开
+                except (AttributeError, OSError) as e:
+                    return self._json(500, {"error": f"打不开:{e}"})
+                return self._json(200, {"ok": True})
             if url.path == "/api/dashboard":
                 if ctx.dashboard is None:
                     return self._json(404, {"error": "没有仪表板"})

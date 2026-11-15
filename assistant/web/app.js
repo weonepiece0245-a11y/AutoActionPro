@@ -322,6 +322,34 @@ function addLine(text, cls = "") {
   scrollDown();
   return el;
 }
+// 找到的照片:缩图排一排,点一下用 Windows 的相片程序打开
+function addPhotos(ev) {
+  const box = document.createElement("div");
+  box.className = "photo-grid";
+  const head = document.createElement("div");
+  head.className = "photo-head";
+  head.textContent = `🖼 ${ev.title || "照片"} · ${ev.total} 张` + (ev.total > ev.items.length ? `(先列 ${ev.items.length} 张)` : "");
+  box.append(head);
+  for (const item of ev.items || []) {
+    const btn = document.createElement("button");
+    btn.type = "button"; btn.className = "photo-cell";
+    btn.title = `${item.time}${item.place ? " · " + item.place : ""}\n${item.name}`;
+    const img = document.createElement("img");
+    img.loading = "lazy"; img.alt = item.name;
+    img.src = `/api/photo_thumb?id=${encodeURIComponent(item.id)}&t=${encodeURIComponent(token)}`;
+    img.onerror = () => { img.replaceWith(Object.assign(document.createElement("span"), { textContent: item.name })); };
+    const cap = document.createElement("small");
+    cap.textContent = item.time.slice(0, 10);
+    btn.append(img, cap);
+    btn.onclick = async () => {
+      const r = await api("/api/photo_open", { id: item.id }).catch(() => ({ error: "星期五没有响应" }));
+      if (r.error) addLine("⚠ " + r.error, "error");
+    };
+    box.append(btn);
+  }
+  if (current) log.insertBefore(box, current); else log.append(box);
+  scrollDown();
+}
 function startAnswer(source, ts) {
   current = addMessage("friday", "", source, ts);
   current.classList.add("typing");
@@ -391,6 +419,8 @@ function handle(ev) {
       break;
     case "snip":
       showSnip(ev); break;
+    case "photos":
+      addPhotos(ev); break;
     case "audio_end":
       audioEndTurns.add(ev.turn);
       maybeFollowUp(); break;
@@ -1376,6 +1406,13 @@ function fillSettings() {
   if (s.brief != null) $("setBrief").checked = s.brief;
   $("eventRow").hidden = s.event_lead === null || s.event_lead === undefined;
   if (s.event_lead != null) $("setEventLead").value = String(s.event_lead);
+  const pf = s.photofind;
+  $("photoFindRow").hidden = !pf;
+  if (pf) {
+    $("photoFindNote").textContent = pf.busy ? "照片按时间地点找:正在整理目录……"
+      : `照片按时间地点找:${pf.photos} 张,${pf.with_place} 张有地点(${pf.places} 个地方)` +
+        (pf.scanned ? `,上次整理 ${pf.scanned}` : ",目录还没做") + "。可以问“去年在槟城拍的照片”";
+  }
   const dp = s.departure;
   $("departGroup").hidden = !dp;
   if (dp) {
@@ -1764,6 +1801,7 @@ function showCleanup(items) {
   $("cleanupActions").hidden = !(items || []).length;
   updatePicked();
 }
+$("photoReindex").onclick = () => saveSetting({ photo_reindex: true });
 $("photoSort").onclick = () => {
   const folder = $("photoFolder").value.trim();
   if (!confirm(`把${folder ? "“" + folder + "”" : "“图片”文件夹"}最上层的照片和视频,按拍摄月份分进“2026-11”这样的子文件夹?整理错了可以撤销。`)) return;
