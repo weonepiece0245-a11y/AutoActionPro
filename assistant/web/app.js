@@ -537,6 +537,8 @@ function handle(ev) {
       addPhotos(ev); break;
     case "lab":
       labCard(ev); break;
+    case "metronome":
+      metronome(ev); break;
     case "audio_end":
       audioEndTurns.add(ev.turn);
       maybeFollowUp(); break;
@@ -1547,6 +1549,16 @@ function fillSettings() {
   if (s.brief != null) $("setBrief").checked = s.brief;
   $("eventRow").hidden = s.event_lead === null || s.event_lead === undefined;
   if (s.event_lead != null) $("setEventLead").value = String(s.event_lead);
+  const pr = s.practice;
+  $("practiceGroup").hidden = !pr;
+  if (pr) {
+    $("setPracticeGoal").value = String(pr.goal);
+    $("setPracticeRemind").value = pr.remind;
+    if (document.activeElement !== $("setPracticeApps")) $("setPracticeApps").value = pr.apps || "";
+    $("practiceNote").textContent = (pr.now ? `🎸 正在练(${pr.now})· ` : "") + `今天 ${pr.today} 分钟`
+      + (pr.goal ? ` / 目标 ${pr.goal}` : "") + ` · 这周 ${pr.week_days} 天共 ${pr.week} 分钟`
+      + (pr.streak >= 2 ? ` · 连续 ${pr.streak} 天` : "");
+  }
   const stm = s.statement;
   $("stmtGroup").hidden = !stm;
   if (stm) $("setStmtPw").placeholder = stm.passwords ? `已存 ${stm.passwords} 个(要改就重新填)` : "只存在这台电脑";
@@ -1961,6 +1973,40 @@ $("photoReindex").onclick = () => saveSetting({ photo_reindex: true });
 $("setBillFile").onchange = (e) => saveSetting({ bill_file: e.target.checked });
 $("setSelfReview").onchange = (e) => saveSetting({ self_review: e.target.checked });
 $("reviewNow").onclick = () => saveSetting({ self_review_now: true });
+$("setPracticeGoal").onchange = (e) => saveSetting({ practice_goal: Number(e.target.value) });
+$("setPracticeRemind").onchange = (e) => saveSetting({ practice_remind: e.target.value });
+$("practiceAppsSave").onclick = () => saveSetting({ practice_apps: $("setPracticeApps").value });
+
+// 节拍器:窗口用声音打拍子(第一拍高一点)
+let metro = null;
+function metronome(ev) {
+  if (metro) { clearInterval(metro.timer); metro.box.remove(); metro = null; }
+  if (!ev.bpm) return;
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const beats = Math.max(1, Math.min(9, ev.beats || 4));
+  let count = 0;
+  const box = document.createElement("div");
+  box.className = "metro-chip";
+  const dots = document.createElement("span");
+  const stop = document.createElement("button");
+  stop.type = "button"; stop.textContent = "停";
+  stop.onclick = () => metronome({ bpm: 0 });
+  box.append(`🥁 ${ev.bpm} BPM `, dots, stop);
+  document.body.append(box);
+  const tick = () => {
+    const first = count % beats === 0;
+    const osc = ctx.createOscillator(), gain = ctx.createGain();
+    osc.frequency.value = first ? 1500 : 1000;
+    gain.gain.setValueAtTime(0.4, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.06);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(); osc.stop(ctx.currentTime + 0.07);
+    dots.textContent = Array.from({ length: beats }, (_, i) => (i === count % beats ? "●" : "○")).join("") + " ";
+    count++;
+  };
+  tick();
+  metro = { timer: setInterval(tick, 60000 / ev.bpm), box };
+}
 $("saveStmtPw").onclick = () => {  // 多个密码用 | 分开(输入框只有一行)
   const value = $("setStmtPw").value.split("|").join("\n");
   $("setStmtPw").value = "";

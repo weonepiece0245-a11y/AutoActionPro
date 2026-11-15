@@ -325,6 +325,18 @@
       <div class="set-note" id="cloudNote"></div>
     </div>
 
+    <div class="set-group" id="practiceGroup" hidden data-cat="life">
+      <h3>练琴记录</h3>
+      <div class="set-note" id="practiceNote"></div>
+      <div class="set-row"><label for="setPracticeGoal">每天练琴目标</label>
+        <select class="mini-select" id="setPracticeGoal"><option value="0">不设</option><option value="10">10 分钟</option><option value="15">15 分钟</option><option value="20">20 分钟</option><option value="30">30 分钟</option><option value="45">45 分钟</option><option value="60">1 小时</option><option value="90">1.5 小时</option><option value="120">2 小时</option></select></div>
+      <div class="set-row"><label for="setPracticeRemind">还没练够的话,几点提醒我</label>
+        <select class="mini-select" id="setPracticeRemind"><option value="off">不提醒</option><option value="19:00">晚上 7 点</option><option value="20:00">晚上 8 点</option><option value="21:00">晚上 9 点</option><option value="22:00">晚上 10 点</option><option value="23:00">晚上 11 点</option></select></div>
+      <div class="set-row"><label for="setPracticeApps">我的练琴软件(内建认得 BIAS FX、Neural DSP、Guitar Pro、Rocksmith、AmpliTube、调音器……;别的写程序名,用逗号分开)</label>
+        <span class="set-ctl"><input class="mini-input wide" id="setPracticeApps" maxlength="300" placeholder="例如 MyAmp.exe"><button type="button" class="mini-btn" id="practiceAppsSave">保存</button></span></div>
+      <div class="set-note">吉他软件开着、在最前面或你 10 分钟内碰过电脑就算在练。不插电练的说“我练了 30 分钟吉他”。说“节拍器 90”打拍子,“节拍器停”停。</div>
+    </div>
+
     <div class="set-group" id="sceneGroup" hidden data-cat="life">
       <h3>场景模式(一句话做好几件事,不花钱)</h3>
       <div class="set-note" id="sceneHelp"></div>

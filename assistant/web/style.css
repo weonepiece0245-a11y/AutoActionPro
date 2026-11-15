@@ -355,6 +355,9 @@ body.locked > *:not(#lockScreen) { visibility: hidden !important; }
 .attach-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); background: rgba(var(--c-rgb), .08); border: 1px solid var(--cyan-line); border-radius: 999px; padding: 3px 4px 3px 10px; }
 .attach-chip button { font: inherit; color: var(--muted, #8aa); background: none; border: 0; cursor: pointer; padding: 0 6px; font-size: 14px; }
 .attach-chip button:hover { color: #fff; }
+.metro-chip { position: fixed; right: 18px; bottom: 96px; z-index: 50; display: flex; align-items: center; gap: 6px; padding: 6px 8px 6px 12px;
+  border: 1px solid var(--cyan-line); border-radius: 999px; background: rgba(0, 0, 0, .7); color: var(--text); font-size: 13px; }
+.metro-chip button { font: inherit; border: 1px solid var(--cyan-line); background: none; color: var(--text); border-radius: 999px; padding: 1px 10px; cursor: pointer; }
 .lab-card { margin: 6px 0 10px; border: 1px solid var(--cyan-line); border-radius: 10px; background: rgba(var(--c-rgb), .04); padding: 8px 10px; font-size: 13px; max-width: 760px; }
 .lab-card.running { border-color: var(--cyan, #22d3ee); box-shadow: 0 0 12px rgba(var(--c-rgb), .18); }
 .lab-card.ok { border-color: rgba(52, 211, 153, .55); }

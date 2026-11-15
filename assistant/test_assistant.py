@@ -14309,5 +14309,85 @@ class SelfReviewTest(TempDirTest):
             time.sleep(0.01)
         self.assertFalse(review.busy)
 
+
+class PracticeTest(TempDirTest):
+    def make(self):
+        import friday_practice
+
+        self.now = [datetime.datetime(2026, 11, 16, 20, 0)]
+        return friday_practice.Practice(os.path.join(self.tmp, "p.json"), clock=lambda: self.now[0])
+
+    def run_minutes(self, p, minutes, running, front, idle):
+        said = None
+        for _ in range(minutes):
+            self.now[0] += datetime.timedelta(minutes=1)
+            said = p.tick(running, front, idle) or said
+        return said
+
+    def test_counts_practice_even_without_touching_keyboard(self):
+        import friday_practice
+
+        self.assertTrue(friday_practice.is_guitar_app("BIAS FX 2.exe"))
+        self.assertTrue(friday_practice.is_guitar_app("Neural DSP Archetype Plini.exe"))
+        self.assertFalse(friday_practice.is_guitar_app("r5apex.exe"))
+        p = self.make()
+        with mock.patch.dict(os.environ, {"FRIDAY_PRACTICE_GOAL": "30"}):
+            # 吉他软件在最前面:手在吉他上(很久没碰电脑)也算在练
+            self.run_minutes(p, 20, ["explorer.exe", "BIAS FX 2.exe"], "bias fx 2.exe", 1500)
+            self.assertEqual(p.minutes(self.now[0].date()), 20)
+            # 软件在背景、人走开很久:不算
+            said = self.run_minutes(p, 10, ["BIAS FX 2.exe"], "chrome.exe", 1500)
+            self.assertEqual(p.minutes(self.now[0].date()), 20)
+            self.assertIn("刚练了 20 分钟", said)  # 走开 5 分钟后算这一次练完
+            self.assertIn("还差 10 分钟", said)
+            self.assertEqual(self.make().minutes(datetime.date(2026, 11, 16)), 20)  # 存起来了
+
+    def test_goal_streak_and_reminder(self):
+        p = self.make()
+        with mock.patch.dict(os.environ, {"FRIDAY_PRACTICE_GOAL": "30", "FRIDAY_PRACTICE_REMIND": "21:00"}):
+            for back in (1, 2, 3):
+                p.days[(datetime.date(2026, 11, 16) - datetime.timedelta(days=back)).isoformat()] = {"seconds": 1900}
+            self.assertEqual(p.streak(), 3)  # 今天还没练不算断
+            self.assertIsNone(p.due_reminder())  # 还没到 21:00
+            self.now[0] = datetime.datetime(2026, 11, 16, 21, 5)
+            text = p.due_reminder()
+            self.assertIn("还差 30 分钟", text)
+            self.assertIn("连续 3 天", text)
+            self.assertIsNone(p.due_reminder())  # 一天只提醒一次
+            self.assertIn("记好了:练了 30 分钟", p.log(30))
+            self.assertEqual(p.streak(), 4)
+            self.assertIn("这周练了", p.report())
+
+    def test_commands_and_metronome(self):
+        import friday_practice
+
+        p = self.make()
+        ticks = []
+        cmd = friday_practice.Commands(p, lambda bpm, beats: ticks.append((bpm, beats)))
+        self.assertIn("练了 30 分钟", cmd.handle("我练了30分钟吉他"))
+        self.assertIn("练了 60 分钟", cmd.handle("今天练了一个小时琴"))
+        self.assertIn("练了 45 分钟", cmd.handle("刚才弹了四十五分钟吉他"))
+        self.assertIsNone(cmd.handle("我练了30分钟跑步"))
+        self.assertIn("节拍器 90 BPM,4 拍", cmd.handle("节拍器 90"))
+        self.assertIn("3 拍", cmd.handle("节拍器120三拍"))
+        self.assertIn("停", cmd.handle("节拍器停"))
+        self.assertEqual(ticks, [(90, 4), (120, 3), (0, 4)])
+        self.assertIn("30 到 300", cmd.handle("节拍器 400"))
+        self.assertIn("今天共 135 分钟", cmd.handle("练琴记录"))
+
+    def test_settings(self):
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.practice = self.make()
+        env = os.path.join(self.tmp, ".env")
+        with mock.patch.dict(os.environ, {}):
+            app.apply_settings({"practice_goal": 45, "practice_remind": "22:00", "practice_apps": "MyAmp.exe, Tuner2"},
+                               session, None, env)
+            import friday_practice
+
+            self.assertEqual(friday_practice.goal_minutes(), 45)
+            self.assertTrue(friday_practice.is_guitar_app("MyAmp.exe"))
+            self.assertIn("error", app.apply_settings({"practice_goal": 7}, session, None, env))
+            self.assertEqual(session.practice.state()["goal"], 45)
+
 if __name__ == "__main__":
     unittest.main()

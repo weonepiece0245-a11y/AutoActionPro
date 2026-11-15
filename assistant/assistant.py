@@ -2787,6 +2787,7 @@ def settings_state(session, meter=None) -> dict:
         "event_lead": __import__("friday_events").lead_minutes() if google_ready(session) else None,
         "departure": departure_state(session),
         "billfile": billfile_state(session),
+        "practice": session.practice.state() if getattr(session, "practice", None) is not None else None,
         "statement": {"passwords": len(__import__("friday_statement").passwords()),
                       "pending": len(session.statements.pending)}
         if getattr(session, "statements", None) is not None else None,
@@ -3461,6 +3462,31 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         os.environ["FRIDAY_STATEMENT_PASSWORDS"] = value
         n = len([p for p in value.split("|") if p])
         done.append(f"月结单密码存好了({n} 个,只存在这台电脑)" if n else "月结单密码清掉了")
+    if "practice_goal" in payload or "practice_remind" in payload or "practice_apps" in payload:
+        import friday_practice
+
+        if "practice_goal" in payload:
+            try:
+                goal = int(payload["practice_goal"])
+            except (TypeError, ValueError):
+                return {"error": "目标不对"}
+            if goal not in friday_practice.GOALS:
+                return {"error": "目标不对"}
+            save_env_value(env, "FRIDAY_PRACTICE_GOAL", str(goal))
+            os.environ["FRIDAY_PRACTICE_GOAL"] = str(goal)
+            done.append(f"练琴目标:每天 {goal} 分钟" if goal else "不设练琴目标")
+        if "practice_remind" in payload:
+            at = str(payload["practice_remind"])
+            if at not in friday_practice.REMIND_TIMES:
+                return {"error": "时间不对"}
+            save_env_value(env, "FRIDAY_PRACTICE_REMIND", at)
+            os.environ["FRIDAY_PRACTICE_REMIND"] = at
+            done.append("没练够也不提醒" if at == "off" else f"{at} 还没练够会提醒你")
+        if "practice_apps" in payload:
+            apps = ",".join(a.strip() for a in re.split(r"[,,、;\n]+", str(payload["practice_apps"] or "")) if a.strip())[:300]
+            save_env_value(env, "FRIDAY_PRACTICE_APPS", apps)
+            os.environ["FRIDAY_PRACTICE_APPS"] = apps
+            done.append(f"这些也算练琴软件:{apps}" if apps else "只用内建的吉他软件名单")
     if "bill_file" in payload:
         on = bool(payload["bill_file"])
         save_env_value(env, "FRIDAY_BILL_FILE", "on" if on else "off")
@@ -4434,6 +4460,47 @@ def start_statements(session, toolbox: Toolbox, data_dir: str):
     if quick is not None:
         quick.extra.append(friday_statement.Commands(statements, start_import))
     return statements
+
+
+def start_practice(session, data_dir: str, interval: float = 60):
+    """练琴记录:开吉他软件练琴自动记时间;目标没达到晚上提醒一次;节拍器。"""
+    import friday_care
+    import friday_practice
+
+    practice = friday_practice.Practice(os.path.join(data_dir, "friday_practice.json"))
+    session.practice = practice
+
+    def metronome(bpm: int, beats: int) -> None:
+        session.hub.broadcast({"type": "metronome", "bpm": bpm, "beats": beats})
+
+    quick = getattr(session, "quick", None)
+    if quick is not None:
+        quick.extra.append(friday_practice.Commands(practice, metronome))
+    if os.name != "nt":
+        return practice
+    import friday_gameboost
+
+    system = friday_gameboost.WindowsSystem()
+
+    def check() -> None:
+        care = getattr(session, "care", None)
+        running = [name for _, name in system.processes()]
+        text = practice.tick(running, getattr(care, "app_now", "") or "", friday_care.idle_seconds(), interval)
+        if text:
+            session.hub.broadcast({"type": "status", "text": text})
+            session.hub.broadcast({"type": "mailscan"})
+        reminder = practice.due_reminder()
+        if reminder:
+            announce(session, "🎸 " + reminder, "🎸", reminder)
+
+    def loop() -> None:
+        time.sleep(90)
+        while True:
+            _quietly(check)
+            time.sleep(interval)
+
+    threading.Thread(target=loop, daemon=True, name="friday-practice").start()
+    return practice
 
 
 def start_bill_filer(session, toolbox: Toolbox, data_dir: str, interval: float = 10 * 60):
@@ -6543,6 +6610,7 @@ def run_web(args) -> None:
     _startup_step(session, "下载的账单自动归档", lambda: start_bill_filer(session, toolbox, data_dir))
     _startup_step(session, "月结单导入记账", lambda: start_statements(session, toolbox, data_dir))
     _startup_step(session, "每周自我检讨", lambda: start_self_review(session, toolbox, data_dir))
+    _startup_step(session, "练琴记录", lambda: start_practice(session, data_dir))
     if os.environ.get("FRIDAY_STT") == "whisper":  # 先在背景载入本机语音模型:第一句话才不会等
         threading.Thread(target=lambda: _quietly(lambda: __import__("friday_whisper").load()), daemon=True,
                          name="friday-whisper-load").start()
