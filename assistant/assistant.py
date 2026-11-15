@@ -2787,6 +2787,8 @@ def settings_state(session, meter=None) -> dict:
         "event_lead": __import__("friday_events").lead_minutes() if google_ready(session) else None,
         "departure": departure_state(session),
         "billfile": billfile_state(session),
+        "spendwatch": ({**session.spendwatch.forecast(), "on": __import__("friday_spendwatch").enabled()}
+                       if getattr(session, "spendwatch", None) is not None else None),
         "practice": session.practice.state() if getattr(session, "practice", None) is not None else None,
         "statement": {"passwords": len(__import__("friday_statement").passwords()),
                       "pending": len(session.statements.pending)}
@@ -2907,6 +2909,19 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         done.append("开机会自动在后台启动" if on else "已关闭开机自动启动")
     budget = getattr(session, "budget", None)
     refresh_console = False
+    if "spend_budget" in payload:
+        try:
+            amount = max(0.0, float(payload["spend_budget"] or 0))
+        except (TypeError, ValueError):
+            return {"error": "金额不对"}
+        save_env_value(env, "FRIDAY_SPEND_BUDGET", f"{amount:g}")
+        os.environ["FRIDAY_SPEND_BUDGET"] = f"{amount:g}"
+        done.append(f"每月生活开销预算 RM{amount:,.0f}" if amount else "不设生活开销预算")
+    if "spend_alerts" in payload:
+        on = bool(payload["spend_alerts"])
+        save_env_value(env, "FRIDAY_SPEND_ALERTS", "on" if on else "off")
+        os.environ["FRIDAY_SPEND_ALERTS"] = "on" if on else "off"
+        done.append("花费有异常会提醒你" if on else "不再提醒花费异常")
     if "budget_myr" in payload:
         try:
             amount = float(payload["budget_myr"] or 0)
@@ -6044,6 +6059,14 @@ def start_daily_checks(session, toolbox: Toolbox, data_dir: str, interval: float
 
     state = friday_alerts.AlertState(os.path.join(data_dir, "friday_alerts.json"))
     session.alert_state = state  # 早安简报也用这一份(同一个文件只能有一份,不然会互相盖掉)
+    spendwatch = None
+    if getattr(toolbox, "ledger", None) is not None:  # 花费异常提醒和月底预测(看账本,不花钱)
+        import friday_spendwatch
+
+        spendwatch = session.spendwatch = friday_spendwatch.SpendWatch(toolbox.ledger, state)
+        quick = getattr(session, "quick", None)
+        if quick is not None:
+            quick.extra.append(friday_spendwatch.Commands(spendwatch))
 
     import friday_health
 
@@ -6084,6 +6107,8 @@ def start_daily_checks(session, toolbox: Toolbox, data_dir: str, interval: float
             _quietly(lambda: month_end_summary(session, toolbox))
             _quietly(lambda: rain_alert(session, state))
             _quietly(lambda: weekly_report(session, toolbox, state))
+            if spendwatch is not None:
+                _quietly(lambda: [announce(session, text, "💸", text) for text in spendwatch.check()])
             _quietly(check_health)
             _quietly(check_memory)
             _quietly(check_key_and_credit)
@@ -6625,6 +6650,11 @@ def run_web(args) -> None:
     if getattr(session, "departure", None) is not None and \
             not any(isinstance(h, DepartureCommands) for h in session.quick.extra):
         session.quick.extra.append(DepartureCommands(session))
+    if getattr(session, "spendwatch", None) is not None:  # 每日检查比“简单指令”早开:这里补上
+        import friday_spendwatch
+
+        if not any(isinstance(h, friday_spendwatch.Commands) for h in session.quick.extra):
+            session.quick.extra.append(friday_spendwatch.Commands(session.spendwatch))
     if getattr(session, "care", None) is not None:  # 电脑使用时间(只在 Windows 上有)
         import friday_screentime
 

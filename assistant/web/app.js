@@ -1549,6 +1549,15 @@ function fillSettings() {
   if (s.brief != null) $("setBrief").checked = s.brief;
   $("eventRow").hidden = s.event_lead === null || s.event_lead === undefined;
   if (s.event_lead != null) $("setEventLead").value = String(s.event_lead);
+  const sw = s.spendwatch;
+  $("spendGroup").hidden = !sw;
+  if (sw) {
+    $("setSpendAlerts").checked = sw.on;
+    if (document.activeElement !== $("setSpendBudget")) $("setSpendBudget").value = sw.budget || 0;
+    $("spendNote").textContent = `这个月到现在 RM${sw.month_to_date.toFixed(0)},照最近的速度月底大概 RM${sw.forecast.toFixed(0)}`
+      + (sw.budget ? `(预算 RM${sw.budget.toFixed(0)},${sw.forecast > sw.budget ? "⚠ 会超" : "来得及"})` : "")
+      + "。也可以问“这个月会花多少”。";
+  }
   const pr = s.practice;
   $("practiceGroup").hidden = !pr;
   if (pr) {
@@ -1973,6 +1982,8 @@ $("photoReindex").onclick = () => saveSetting({ photo_reindex: true });
 $("setBillFile").onchange = (e) => saveSetting({ bill_file: e.target.checked });
 $("setSelfReview").onchange = (e) => saveSetting({ self_review: e.target.checked });
 $("reviewNow").onclick = () => saveSetting({ self_review_now: true });
+$("setSpendAlerts").onchange = (e) => saveSetting({ spend_alerts: e.target.checked });
+$("spendBudgetSave").onclick = () => saveSetting({ spend_budget: Number($("setSpendBudget").value || 0) });
 $("setPracticeGoal").onchange = (e) => saveSetting({ practice_goal: Number(e.target.value) });
 $("setPracticeRemind").onchange = (e) => saveSetting({ practice_remind: e.target.value });
 $("practiceAppsSave").onclick = () => saveSetting({ practice_apps: $("setPracticeApps").value });

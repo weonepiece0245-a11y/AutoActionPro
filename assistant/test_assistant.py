@@ -14389,5 +14389,68 @@ class PracticeTest(TempDirTest):
             self.assertIn("error", app.apply_settings({"practice_goal": 7}, session, None, env))
             self.assertEqual(session.practice.state()["goal"], 45)
 
+
+class SpendWatchTest(TempDirTest):
+    def make(self, today=datetime.date(2026, 11, 16)):
+        import friday_alerts
+        import friday_ledger
+        import friday_spendwatch
+
+        self.ledger = friday_ledger.Ledger(os.path.join(self.tmp, "l.json"),
+                                           clock=lambda: datetime.datetime.combine(today, datetime.time(20)))
+        state = friday_alerts.AlertState(os.path.join(self.tmp, "a.json"))
+        return friday_spendwatch.SpendWatch(self.ledger, state, today=lambda: today)
+
+    def history(self):
+        # 前三个月:每个月 1~16 号餐饮约 RM300、购物约 RM100
+        for month in (8, 9, 10):
+            for day in range(1, 17, 3):
+                self.ledger.add("午餐", 50, "餐饮", f"2026-{month:02d}-{day:02d}")
+            self.ledger.add("网购", 100, "购物", f"2026-{month:02d}-05")
+
+    def test_spike_big_item_duplicate_once(self):
+        watch = self.make()
+        self.history()
+        for day in range(1, 17, 3):
+            self.ledger.add("午餐", 50, "餐饮", f"2026-11-{day:02d}")
+        self.ledger.add("Shopee 网购", 180, "购物", "2026-11-03")
+        self.ledger.add("Shopee 网购", 220, "购物", "2026-11-10")
+        self.ledger.add("新手机", 3200, "购物", "2026-11-15")
+        self.ledger.add("Netflix", 54.9, "娱乐", "2026-11-14")
+        self.ledger.add("netflix", 54.9, "娱乐", "2026-11-15")
+        with mock.patch.dict(os.environ, {"FRIDAY_SPEND_ALERTS": "on", "FRIDAY_SPEND_BUDGET": "0"}):
+            said = watch.check()
+            text = "\n".join(said)
+            self.assertIn("新手机 RM3,200.00", text)
+            self.assertIn("可能重复了:Netflix RM54.90", text)
+            self.assertIn("「购物」", text)
+            self.assertNotIn("「餐饮」", text)  # 和平常一样
+            self.assertEqual(watch.check(), [])  # 说过不再说
+
+    def test_forecast_and_budget(self):
+        watch = self.make()
+        for day in range(1, 17):
+            self.ledger.add("午餐", 40, "餐饮", f"2026-11-{day:02d}")
+        with mock.patch.dict(os.environ, {"FRIDAY_SPEND_BUDGET": "1000", "FRIDAY_SPEND_ALERTS": "on"}):
+            fc = watch.forecast()
+            self.assertEqual(fc["month_to_date"], 640)
+            self.assertEqual(fc["forecast"], 1200)  # 每天 40,还剩 14 天
+            said = watch.check()
+            self.assertTrue(any("会超过预算 RM1,000" in t for t in said))
+            self.assertIn("会超过 RM200", watch.report())
+        with mock.patch.dict(os.environ, {"FRIDAY_SPEND_ALERTS": "off"}):
+            self.assertEqual(watch.check(), [])
+
+    def test_new_ledger_has_no_false_alarms(self):
+        watch = self.make()
+        self.ledger.add("新电脑", 5000, "购物", "2026-11-15")  # 刚开始记账:不知道什么算“平常”
+        with mock.patch.dict(os.environ, {"FRIDAY_SPEND_ALERTS": "on", "FRIDAY_SPEND_BUDGET": "0"}):
+            self.assertEqual(watch.check(), [])
+        import friday_spendwatch
+
+        cmd = friday_spendwatch.Commands(watch)
+        self.assertIn("月底大概", cmd.handle("这个月会花多少"))
+        self.assertIsNone(cmd.handle("这个月花了多少电费"))
+
 if __name__ == "__main__":
     unittest.main()

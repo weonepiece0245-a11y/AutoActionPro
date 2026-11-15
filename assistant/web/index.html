@@ -229,6 +229,14 @@
       <div class="set-note">只有你按“记账”的才会记进账本。每 30 分钟看一次新邮件;读收据正文请最便宜的 Haiku 认,一次大约 RM0.01~0.03。⚠ 是同一天已经有一样金额的账,可能记过了。</div>
     </div>
 
+    <div class="set-group" id="spendGroup" hidden data-cat="money">
+      <h3>花费异常提醒和月底预测</h3>
+      <div class="set-note" id="spendNote"></div>
+      <div class="set-row"><label for="setSpendAlerts">特别大的一笔、可能重复扣款、某一类突然多、快超预算时提醒我(看账本,不花钱)</label><input type="checkbox" class="switch" id="setSpendAlerts"></div>
+      <div class="set-row"><label for="setSpendBudget">每月生活开销预算(马币;不是 Claude 的预算,0 = 不设)</label>
+        <span class="set-ctl"><input class="mini-input" id="setSpendBudget" type="number" min="0" step="50"><button type="button" class="mini-btn" id="spendBudgetSave">保存</button></span></div>
+    </div>
+
     <div class="set-group" id="stmtGroup" hidden data-cat="money">
       <h3>银行月结单导入记账</h3>
       <div class="set-note" id="stmtNote">把银行或信用卡月结单 PDF 拖进窗口说“导入记账”,或说“导入月结单”(找最新的一份)。星期五对一对账本,漏记的列出来等你确认;薪水、转账、还卡费不算花费。</div>
