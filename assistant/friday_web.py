@@ -133,7 +133,7 @@ class SpeechStream:
     """
 
     SENTENCE_END = re.compile(r"[。！？!?；;…\n]|\.(?=\s)")
-    MORE = "后面还有,要我接着读吗?"
+    MORE = "后面还有，要我接着读吗？"
 
     def __init__(self, synthesize: Callable[[str], bytes | None], publish: Callable[[bytes], None],
                  max_chars: int = 2000, batch_chars: int = 200,

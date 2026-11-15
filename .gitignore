@@ -84,6 +84,7 @@ assistant/friday_receipts.json*
 assistant/friday_parcels.json*
 assistant/friday_plan.json*
 assistant/friday_energy.json*
+assistant/friday_toolstats.json*
 
 # 更新前留的旧文件(自动退回上一版用)
 assistant/_update_backup/

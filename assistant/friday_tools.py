@@ -422,20 +422,20 @@ TODO_TOOL = {
     },
 }
 
+# 找文件用独立的 find_files 工具(找得更全、能打开);computer 里不再列出,免得两个都像能用
+_COMPUTER_TOOL_ACTIONS = {k: v for k, v in COMPUTER_ACTIONS.items() if k != "find_files"}
 COMPUTER_TOOL = {
     "name": "computer",
     "description": (
         "一句话就能完成的电脑操作(Windows)。标明“需要用户确认”的会先问用户,其余直接做:"
-        + ";".join(f"{k}={v}" for k, v in COMPUTER_ACTIONS.items())
+        + ";".join(f"{k}={v}" for k, v in _COMPUTER_TOOL_ACTIONS.items())
         + "。这些事优先用这个工具,不要用 run_command,也不要用鼠标键盘去点。"
     ),
     "input_schema": {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": list(COMPUTER_ACTIONS)},
+            "action": {"type": "string", "enum": list(_COMPUTER_TOOL_ACTIONS)},
             "value": {"type": "string", "description": "部分操作需要:百分比、文字、程序名、游戏名、路径、网址或分钟数"},
-            "ext": {"type": "string", "description": "find_files 可选:扩展名,如 pdf"},
-            "days": {"type": "integer", "description": "find_files 可选:只找最近几天修改过的"},
         },
         "required": ["action"],
     },
@@ -996,7 +996,7 @@ PHONE_TOOL = {
     "name": "send_to_phone",
     "description": (
         "把东西发到用户手机的 Discord:screenshot 截电脑屏幕发过去(用户说“截个图给我看”“电脑现在什么画面”);"
-        "file 把电脑上的文件发过去(path 是完整路径,先用 computer 的 find_files 找到;最大 10MB,要用户确认)。"
+        "file 把电脑上的文件发过去(path 是完整路径,先用 find_files 工具找到;最大 10MB,要用户确认)。"
         "用户在手机上找你时发回那段对话,在电脑上叫你时私信到他的手机。钥匙、密码文件一律不发。"
     ),
     "input_schema": {
@@ -1222,6 +1222,7 @@ class Toolbox:
         self.subscription_scan = None  # () -> 话:去邮箱找订阅(在后台)
         self.startup_doctor = None  # 开机变慢优化(friday_startup.StartupDoctor)
         self.energy_report = None  # 家里用电:(today / week / month) -> 话
+        self.stats = None  # 功能使用统计(friday_toolstats.ToolStats)
         self.weather_fetch = None  # 测试时换成假的天气服务
         self._handlers = {
             "remember": self._remember,
@@ -1440,6 +1441,11 @@ class Toolbox:
         result["content"] = content
         if is_error:
             result["is_error"] = True
+        if self.stats is not None:  # 功能使用统计(只记次数,不记内容)
+            try:
+                self.stats.record(block.name, not is_error, str(content)[:120] if is_error else "")
+            except Exception:
+                pass
         return result
 
     # ---- 各个工具 ----
@@ -2057,7 +2063,7 @@ class Toolbox:
             return "截图已经发到手机 Discord", False
         if action == "file":
             if not args.get("path"):
-                return "要给文件的完整路径(可以先用 computer 的 find_files 找)", True
+                return "要给文件的完整路径(可以先用 find_files 工具找)", True
             path = self._resolve(str(args["path"]))
             if friday_security.is_secret_path(path):
                 friday_security.record("secret_send", f"有人想让星期五把钥匙/密码文件发到手机,已拒绝:{path}", "alert")

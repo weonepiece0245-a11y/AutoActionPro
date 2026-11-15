@@ -107,6 +107,8 @@ FRIDAY_PROMPT = """你是“星期五”,{call_me}的私人 AI 助手。
 - “我记得的事”里【教训】是你以前做错、被{call_me}纠正过的事:一定照着做,不要再犯。
 - {call_me}在吉隆坡,说话常夹英文和马来文(例如 book、lunch、tapau、mamak、Grab、Mid Valley、Shopee)。
   用说的问题是语音识别转出来的,可能把这些词写成发音相近的中文字或奇怪的词:按发音去猜真正的意思,真的猜不到再问。
+- 搜索网页时服务端可能会用 code_execution / bash 筛选结果:那是 Anthropic 云端的沙盒,不是{call_me}的电脑,
+  在里面做的事不会改到{call_me}电脑上的任何东西;要在{call_me}电脑上做事,只能用 computer、run_command、read_file、write_file 这些工具。
 - 用说的问题如果句子不通、像是听错了,而你要做的是会改东西或留下东西的事(写文件、发讯息或邮件、改设定、排日历、买东西),
   先用一句话问清楚是不是这个意思,{call_me}说对了再做;只是聊天、查资料就按最可能的意思回答。
 
@@ -1203,6 +1205,22 @@ class SpeechControls:
         return reply
 
 
+CJK = "一-鿿"
+
+
+def cjk_punct(text: str) -> str:
+    """电脑直接回的话:标点改成中文的(和 Claude 回答的样子一样);数字、时间、网址里的不动。"""
+    if not text:
+        return text
+    text = re.sub(rf"\(([^()\n]*[{CJK}][^()\n]*)\)", r"（\1）", text)
+    text = re.sub(rf"(?<=[{CJK}）”])\s*,\s*|\s*,\s*(?=[{CJK}“（])", "，", text)
+    text = re.sub(rf"(?<=[{CJK}）”]);\s*", "；", text)
+    text = re.sub(rf"(?<=[{CJK}）”]):(?!\d)\s*|:(?=[{CJK}“])", "：", text)
+    text = re.sub(rf"(?<=[{CJK}）”])\?", "？", text)
+    text = re.sub(rf"(?<=[{CJK}）”])!", "！", text)
+    return text
+
+
 CONTINUE_READING = re.compile(r"^(星期五)?[,，\s]*(要|好|好的|可以|继续|接着读|继续读|读下去|继续念|接着念|读完|要的|嗯|对)(吧|啊|呀)?[。!！]?$")
 SPEAK_CHOICES = (800, 1500, 2000, 3000, 5000, 0)  # 0:不限
 UNLIMITED = 10 ** 9
@@ -1328,6 +1346,7 @@ class WebSession:
             self._leftover = ""
         quick = self._quick_reply(text) if source != "task" and not prefix and not blocks else None
         if quick:
+            quick = cjk_punct(quick)
             hub.broadcast({"type": "status", "text": "⚡ 电脑上直接办好了,没有问 Claude(不花钱)"})
             hub.broadcast({"type": "delta", "text": quick})
             already_spoken = getattr(self.quick, "silent", False)
@@ -3632,6 +3651,7 @@ def announce(session, text: str, icon: str, short: str, urgent: bool = False, ti
 
     urgent:不管推送设定一律推到手机。timely:到点就要说的(日历活动),专注时也照常说;其他的专注时先压着。
     """
+    text = cjk_punct(text)
     session.hub.broadcast({"type": "reminder", "text": f"{icon} {text}"})
     if urgent:
         phone_alert(session, f"{icon} {text}")
@@ -3843,6 +3863,19 @@ def start_subscriptions(session, toolbox: Toolbox, data_dir: str, interval: floa
         quick.extra.append(friday_subscriptions.Commands(subs, scan_soon))
     threading.Thread(target=loop, daemon=True, name="friday-subscriptions").start()
     return subs
+
+
+def start_toolstats(session, toolbox: Toolbox, data_dir: str):
+    """功能使用统计:Claude 用的工具、电脑直接办的说法,各用了几次、错几次。"""
+    import friday_toolstats
+
+    stats = friday_toolstats.ToolStats(os.path.join(data_dir, "friday_toolstats.json"))
+    session.toolstats = toolbox.stats = stats
+    quick = getattr(session, "quick", None)
+    if quick is not None:
+        quick.extra.append(friday_toolstats.Commands(stats, lambda: [t["name"] for t in toolbox.definitions()]))
+        quick.stats = stats
+    return stats
 
 
 def start_energy(session, toolbox: Toolbox, data_dir: str, interval: float = 15 * 60, first_wait: float = 120):
@@ -5786,6 +5819,7 @@ def run_web(args) -> None:
     _startup_step(session, "邮件收据和包裹", lambda: start_mail_scanners(session, toolbox, data_dir))
     _startup_step(session, "待办排进日历", lambda: start_planner(session, toolbox, data_dir))
     _startup_step(session, "家里用电统计", lambda: start_energy(session, toolbox, data_dir))
+    _startup_step(session, "功能使用统计", lambda: start_toolstats(session, toolbox, data_dir))
     toolbox.meter, toolbox.budget = session.meter, getattr(session, "budget", None)
     import friday_scenes
 

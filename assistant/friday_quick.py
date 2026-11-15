@@ -161,7 +161,19 @@ class QuickCommands:
             return notes.add(found.group("text"))
         return None
 
+    stats = None  # 功能使用统计:电脑直接办的说法也记一下(按是哪一类)
+
     def handle(self, text: str) -> str | None:
+        reply = self._handle(text)
+        if reply and self.stats is not None:
+            try:
+                self.stats.record("本地:" + self._kind)
+            except Exception:
+                pass
+        return reply
+
+    def _handle(self, text: str) -> str | None:
+        self._kind = "其他"
         self.silent = False
         if not quick_enabled() or not text:
             return None
@@ -197,8 +209,10 @@ class QuickCommands:
                 except Exception:
                     reply = None
                 if reply:
+                    self._kind = type(helper).__module__.replace("friday_", "") + "." + type(helper).__name__
                     return reply
         if len(text) <= 80:
+            self._kind = "天气提醒待办"
             try:
                 reply = self._local_ask(text)
             except ValueError as e:
@@ -225,6 +239,7 @@ class QuickCommands:
                 return reply
         for check in (self._reader_control, self._interpret, self._clipboard, self._shopping_done, self._habits, self._network, self._money,
                       self._timer, self._games, self._diary, self._shopping, self._home, self._apps):
+            self._kind = check.__name__.lstrip("_")
             try:
                 reply = check(sentence)
             except ValueError as e:
@@ -236,6 +251,7 @@ class QuickCommands:
         for pattern, action in self.rules:
             found = pattern.match(sentence)
             if found:
+                self._kind = getattr(action, "__name__", "规则").lstrip("_")
                 try:
                     return action(found)
                 except Exception:

@@ -12674,7 +12674,7 @@ class LongSpeechTest(TempDirTest):
         stream.finish()
         self.wait(stream)
         joined = "".join(said)
-        self.assertTrue(joined.endswith("后面还有,要我接着读吗?"))
+        self.assertTrue(joined.endswith("后面还有，要我接着读吗？"))
         self.assertIn("第19句话", stream.leftover)  # 没读的部分留着
         self.assertNotIn("第0句话", stream.leftover)
         self.assertTrue(any("上限 100 字" in line for line in logs))
@@ -12828,6 +12828,52 @@ class LongSpeechTest(TempDirTest):
             self.assertEqual(app.speak_max_chars(), 3000)
             os.environ["FRIDAY_SPEAK_MAX"] = "abc"
             self.assertEqual(app.speak_max_chars(), 2000)
+
+
+import friday_toolstats  # noqa: E402
+
+
+class ToolStatsTest(TempDirTest):
+    def test_records_and_describes(self):
+        stats = friday_toolstats.ToolStats(os.path.join(self.tmp, "s.json"))
+        toolbox = self.make_toolbox()
+        toolbox.stats = stats
+        toolbox.weather_fetch = lambda url: fake_weather_data()
+        toolbox.run(SimpleNamespace(id="1", name="weather", input={}), lambda s: None)
+        toolbox.run(SimpleNamespace(id="2", name="weather", input={}), lambda s: None)
+        toolbox.run(SimpleNamespace(id="3", name="read_file", input={"path": "不存在.txt"}), lambda s: None)
+        text = stats.describe(["weather", "read_file", "notes"])
+        self.assertIn("最常用:weather(2 次)", text)
+        self.assertIn("read_file 错 1/1 次", text)
+        self.assertIn("还没用过(1 个):notes", text)
+        stats.flush()
+        self.assertEqual(friday_toolstats.ToolStats(os.path.join(self.tmp, "s.json")).state()["tools"]["weather"]["calls"], 2)
+        commands = friday_toolstats.Commands(stats, lambda: ["weather"])
+        self.assertIn("最常用", commands.handle("功能使用统计"))
+        self.assertIn("最常用", commands.handle("哪些功能常用"))
+        self.assertIsNone(commands.handle("今天天气怎么样"))
+
+    def test_quick_commands_counted(self):
+        stats = friday_toolstats.ToolStats(os.path.join(self.tmp, "s.json"))
+        quick = friday_quick.QuickCommands(SimpleNamespace(), clock=lambda: datetime.datetime(2026, 11, 15, 9, 0))
+        quick.stats = stats
+        quick.handle("现在几点")
+        quick.handle("几点了")
+        quick.handle("帮我写一首诗")  # 交给 Claude:不算
+        self.assertEqual(stats.state()["tools"], {"本地:time": {"calls": 2, "errors": 0, "last": stats.state()["tools"]["本地:time"]["last"]}})
+
+
+class LocalReplyStyleTest(unittest.TestCase):
+    def test_cjk_punct(self):
+        self.assertEqual(app.cjk_punct("好,速度改成 1.15 倍。"), "好，速度改成 1.15 倍。")
+        self.assertEqual(app.cjk_punct("好,今天 14:15 提醒你:喝水。"), "好，今天 14:15 提醒你：喝水。")
+        self.assertEqual(app.cjk_punct("RM1,850.00(下次 12-05)"), "RM1,850.00（下次 12-05）")
+        self.assertEqual(app.cjk_punct("https://a.com/x?y=1,2"), "https://a.com/x?y=1,2")
+        self.assertEqual(app.cjk_punct("后面还有,要我接着读吗?"), "后面还有，要我接着读吗？")
+
+    def test_computer_tool_no_duplicate_find_files(self):
+        self.assertNotIn("find_files", tools.COMPUTER_TOOL["input_schema"]["properties"]["action"]["enum"])
+        self.assertIn("find_files", tools.COMPUTER_ACTIONS)  # 电脑这边还能用(内部)
 
 if __name__ == "__main__":
     unittest.main()
