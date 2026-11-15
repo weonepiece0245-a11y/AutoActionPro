@@ -4469,6 +4469,20 @@ def start_self_review(session, toolbox: Toolbox, data_dir: str, interval: float 
     return review
 
 
+def note_to_chat(session, question: str, answer: str, wait: float = 600.0, sleep=time.sleep) -> None:
+    """后台的事(例如自我测试跑完)记进星期五的对话;她正在回答就等她答完再记(最多等 wait 秒)。"""
+    def run() -> None:
+        waited = 0.0
+        while getattr(session, "busy", False) and waited < wait:
+            sleep(2)
+            waited += 2
+        assistant = getattr(session, "assistant", None)
+        if assistant is not None and hasattr(assistant, "remember_local"):
+            _quietly(lambda: assistant.remember_local(question, answer))
+
+    threading.Thread(target=run, daemon=True, name="friday-note-chat").start()
+
+
 def start_lab(session, toolbox: Toolbox, data_dir: str, ctx=None):
     """代码实验室:星期五自己写代码在隔离的文件夹里跑;自我测试在副本上跑全部测试。"""
     import friday_lab
@@ -4478,6 +4492,9 @@ def start_lab(session, toolbox: Toolbox, data_dir: str, ctx=None):
         text = friday_lab.Lab.describe(record)
         if record["kind"] == "self_test":
             announce(session, text, "🧪", text[:120])  # 要几分钟:跑完推到手机
+            # 结果也记进星期五的对话:老板接着问“测试怎么样”“哪个坏了”,她自己看得到(星期五提的)
+            note_to_chat(session, f"[系统通知] 自我测试「{record.get('title', '')}」跑完了",
+                         friday_lab.Lab.brief(record))
         session.hub.broadcast({"type": "mailscan"})  # 设定里的记录更新(跑代码的结果在聊天的实验窗口里)
 
     lab = friday_lab.Lab(os.path.join(data_dir, "friday_lab"), is_secret=friday_security.is_secret_path, on_done=done)

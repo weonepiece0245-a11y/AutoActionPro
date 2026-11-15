@@ -670,7 +670,27 @@ class Lab:
         if not items:
             return "老板,实验室还空着呢,一次都没开过工~想算贷款、整理 Excel,直接跟我说“帮我算一下……”就好,我写好代码在这里跑给你看。"
         lines = [f"- {r['time']} {'✅' if r['ok'] else '❌'} {r['title']}" for r in items]
-        return ("正在跑:" + self.busy + "\n" if self.busy else "") + "代码实验室最近:\n" + "\n".join(lines)
+        text = ("正在跑:" + self.busy + "\n" if self.busy else "") + "代码实验室最近:\n" + "\n".join(lines)
+        latest = next((r for r in items if r.get("kind") == "self_test"), None)
+        if latest is not None:  # 老板问“测试结果怎么样”:星期五要看得到结论、改坏了什么、为什么(星期五提的)
+            text += f"\n\n最近一次自我测试({latest.get('time', '')}):\n" + self.brief(latest)
+        return text
+
+    @classmethod
+    def brief(cls, record: dict) -> str:
+        """一句话结论 + 被改坏的测试(附原因)+ 测不到的测试。给星期五自己看的。"""
+        try:
+            text = cls.describe(record)
+        except KeyError:  # 很旧的记录少了栏位
+            return f"{record.get('title', '')}:记录不完整"
+        if record.get("kind") != "self_test":
+            return text
+        why = record.get("new_why") or {}
+        for test in (record.get("new_failures") or [])[:10]:
+            text += f"\n- 被改坏:{test}" + (f" —— {str(why[test])[:200]}" if why.get(test) else "")
+        for test in (record.get("blind") or [])[:10]:
+            text += f"\n- 测不到:{test}"
+        return text
 
     # ---------- 在后台跑 ----------
     def start(self, label: str, job: Callable[[], dict]) -> str:

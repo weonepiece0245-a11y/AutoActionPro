@@ -13573,6 +13573,32 @@ class CodeLabTest(TempDirTest):
         self.assertIn("你没有批准", friday_lab.Lab.describe(record))
         self.assertIn("你没有批准", Path(record["report"]).read_text(encoding="utf-8"))
 
+    def test_self_test_result_reaches_friday(self):
+        record = {"kind": "self_test", "time": "2026-11-16 08:00", "title": "改坏", "ok": False, "ran": 5,
+                  "new_failures": ["test_assistant.A.test_x"], "new_why": {"test_assistant.A.test_x": "AssertionError: 1 != 2"},
+                  "fixed": [], "error": "", "report": "r.txt", "blind": ["test_assistant.B.test_y"]}
+        text = friday_lab.Lab.brief(record)
+        self.assertIn("被改坏:test_assistant.A.test_x —— AssertionError: 1 != 2", text)
+        self.assertIn("测不到:test_assistant.B.test_y", text)
+        old = {k: v for k, v in record.items() if k not in ("new_why", "blind")}  # 以前的记录没有这些栏位
+        self.assertIn("被改坏:test_assistant.A.test_x", friday_lab.Lab.brief(old))
+        self.assertIn("记录不完整", friday_lab.Lab.brief({"kind": "self_test", "title": "旧的"}))
+        lab = self.make()
+        lab._record({"kind": "run", "time": "2026-11-16 08:05", "title": "算贷款", "ok": True})
+        lab._record(record)
+        summary = lab.summary()
+        self.assertIn("最近一次自我测试(2026-11-16 08:00)", summary)
+        self.assertIn("AssertionError: 1 != 2", summary)
+        # 跑完记进星期五的对话:她在回答就等她答完
+        notes = []
+        session = SimpleNamespace(busy=True, assistant=SimpleNamespace(remember_local=lambda q, a: notes.append((q, a))))
+        app.note_to_chat(session, "[系统通知] 自我测试跑完了", text, sleep=lambda s: setattr(session, "busy", False))
+        for _ in range(100):
+            if notes:
+                break
+            time.sleep(0.02)
+        self.assertEqual(notes, [("[系统通知] 自我测试跑完了", text)])
+
     def test_related_tests_know_module_aliases(self):
         app_dir = Path(self.tmp, "app5")
         app_dir.mkdir()

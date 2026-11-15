@@ -1079,7 +1079,8 @@ CODE_LAB_TOOL = {
         "失败了:看 error 改好代码,用同一个 title 再 run(同一件事最多 3 次;第 3 次还失败就停下来,告诉老板卡在哪、建议怎么做)。"
         "缺库(ModuleNotFoundError)且结果里有 installable:用 install 装(会先问老板),装好再 run;不在名单里的库就换写法。"
         "export:把跑出来的文件 open(打开)或 save(存到老板的下载文件夹),run 和 name 用结果里的。"
-        "recent:最近跑过什么。跑完把结果用一两句话告诉老板。"
+        "recent:最近跑过什么,包括最近一次自我测试的结论、被改坏的测试和原因(老板问测试结果时先用它)。"
+        "跑完把结果用一两句话告诉老板。"
     ),
     "input_schema": {
         "type": "object",
