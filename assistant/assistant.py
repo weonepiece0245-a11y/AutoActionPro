@@ -1479,6 +1479,13 @@ class WebSession:
         hub = self.hub
         if speak and source == "web" and __import__("friday_callguard").speak_mode() == "voice":
             speak = False  # 设定:打字问的只显示文字
+        tutor = getattr(self, "tutor", None)
+        if tutor is not None and source in ("web", "voice", "ptt") and not blocks and not prefix:
+            import friday_tutor
+
+            start = friday_tutor.parse_start(text) if not tutor.active else None
+            if start is not None or tutor.active:
+                return self._tutor(text, source, start)
         interpreter = getattr(self, "interpreter", None)
         if interpreter is not None and interpreter.active and source in ("web", "voice") and not blocks and not prefix:
             return self._interpret(text, source)
@@ -1607,6 +1614,46 @@ class WebSession:
         if stream is not None:
             stream.finish()
         return translation
+
+    tutor = None  # 口说陪练(friday_tutor.Tutor)
+
+    def _tutor(self, text: str, source: str, start) -> str | None:
+        """口说陪练:开始、对话(用那个语言回、用那个语言的声音读)、结束给评语。"""
+        import friday_tutor
+
+        hub, tutor = self.hub, self.tutor
+        budget = getattr(self, "budget", None)
+        if budget is not None:
+            try:
+                budget.before_ask()
+            except BudgetExceeded as e:
+                hub.broadcast({"type": "error", "text": str(e)})
+                return None
+        if source in ("web", "voice", "ptt"):
+            self.pause_speech()
+        hub.broadcast({"type": "thinking", "source": source})
+        try:
+            if start is not None:
+                info, line = tutor.start(*start)
+                shown, spoken, voice = (info + ("\n\n" + line if line else "")), line, tutor.voice()
+            elif friday_tutor.STOP.match(re.sub(r"\s+", " ", text.strip())):
+                review = tutor.stop()
+                shown, spoken, voice = review, "练习结束,评语在窗口里。", None
+            else:
+                line = tutor.reply(text)
+                shown, spoken, voice = line, line, tutor.voice()
+        except Exception as e:  # noqa: BLE001
+            hub.broadcast({"type": "error", "text": f"练习这句没成功:{type(e).__name__},再说一次?"})
+            return None
+        hub.broadcast({"type": "delta", "text": shown})
+        stream = self._new_stream(voice) if spoken else None
+        if stream is not None:
+            stream.feed(spoken)
+        hub.broadcast({"type": "done", "text": shown, "source": source,
+                       "turn": self._turn if stream is not None else None})
+        if stream is not None:
+            stream.finish()
+        return shown
 
     interpreter = None  # 口译模式(friday_interpret.Interpreter)
     reader = None  # 读给我听(friday_reader.Reader)
@@ -5425,6 +5472,29 @@ def start_fx(session, toolbox, data_dir: str, interval: float = 3600) -> None:
     threading.Thread(target=loop, daemon=True, name="friday-fx").start()
 
 
+def start_tutor(session, ctx, data_dir: str) -> None:
+    """英文 / 马来文口说陪练;练习时用那个语言听你说话。"""
+    import friday_tutor
+
+    assistant = session.assistant
+    if assistant is None or getattr(assistant, "client", None) is None:
+        return
+    session.tutor = friday_tutor.Tutor(assistant.client, os.path.join(data_dir, "friday_tutor"),
+                                       on_usage=getattr(assistant, "on_usage", None))
+    base = ctx.transcribe
+    if base is not None:
+        def transcribe(audio: bytes, **kw):
+            tutor = session.tutor
+            if not tutor.active:
+                return base(audio, **kw)
+            try:
+                return base(audio, language=tutor.stt_language())
+            except TypeError:  # 旧的识别函数不认 language
+                return base(audio)
+
+        ctx.transcribe = transcribe
+
+
 def start_interpreter(session, ctx) -> None:
     """口译模式:翻译用 Haiku;听声音时先试预计的那个语言。"""
     import friday_interpret
@@ -5437,10 +5507,10 @@ def start_interpreter(session, ctx) -> None:
         assistant.client, friday_router.HAIKU, getattr(assistant, "on_usage", None)))
     base = ctx.transcribe
     if base is not None:
-        def transcribe(audio: bytes):
+        def transcribe(audio: bytes, **kw):
             interp = session.interpreter
             if not interp.active:
-                return base(audio)
+                return base(audio, **kw)  # 口说陪练会指定用哪个语言听
             for language in interp.stt_order():
                 try:
                     heard = base(audio, language=language)
@@ -6761,6 +6831,7 @@ def run_web(args) -> None:
     for name, step in (("网络", lambda: start_network(session, toolbox, data_dir)),
                        ("汇率", lambda: start_fx(session, toolbox, data_dir)),
                        ("口译", lambda: start_interpreter(session, ctx)),
+                       ("口说陪练", lambda: start_tutor(session, ctx, data_dir)),
                        ("读给我听", lambda: start_reader(session, ctx)),
                        ("文件夹备份", lambda: start_folder_backup(session, toolbox, data_dir)),
                        ("连接的应用", lambda: start_connected_apps(session, toolbox, ctx, data_dir, ctx.port))):

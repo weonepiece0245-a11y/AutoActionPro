@@ -14565,5 +14565,73 @@ class HomeRulesTest(TempDirTest):
         quick.handle("关插座")
         self.assertEqual(switched, [("插座", False)])  # 平常的说法照样马上做
 
+
+class TutorTest(TempDirTest):
+    class Client:
+        def __init__(self):
+            self.calls = []
+            self.messages = self
+
+        def create(self, **kw):
+            self.calls.append(kw)
+            if kw["model"] == "claude-sonnet-5-5":
+                text = "总评:7/10。\n「I want eat nasi lemak」→「I'd like nasi lemak, please」—— want 后面要 to,点餐用 I'd like 比较客气。"
+            elif len(self.calls) == 1:
+                text = "Hi! Welcome to Restoran Ali. What would you like to order?"
+            else:
+                text = "Sure! Anything to drink with that?"
+            return SimpleNamespace(content=[SimpleNamespace(type="text", text=text)], usage=None)
+
+    def test_parse_start_and_stop(self):
+        import friday_tutor as t
+
+        self.assertEqual(t.parse_start("陪我练英文 点餐"), ("en", "点餐"))
+        self.assertEqual(t.parse_start("练马来文口语面试"), ("ms", "面试"))
+        self.assertEqual(t.parse_start("开始英文会话练习"), ("en", None))
+        self.assertIsNone(t.parse_start("英文怎么说苹果"))
+        self.assertIsNone(t.parse_start("帮我练一下吉他"))
+        self.assertEqual(t.scene_of("mamak"), "点餐")
+        self.assertEqual(t.scene_of(None), "闲聊")
+        for stop in ("结束练习", "stop practice", "OK, end the session.", "tamat latihan"):
+            self.assertTrue(t.STOP.match(stop), stop)
+
+    def test_session_in_window(self):
+        import friday_tutor
+
+        client = self.Client()
+        hub = friday_web.Hub()
+        events, _ = hub.subscribe()
+        voices = []
+        session = app.WebSession(None, app.default_persona(), hub,
+                                 synthesize=lambda text, voice=None: voices.append(voice) or b"mp3")
+        session.hub_audio = friday_web.AudioStore()
+        session.tutor = friday_tutor.Tutor(client, os.path.join(self.tmp, "tutor"))
+        first = session._answer("陪我练英文 点餐", "voice", True, "", [])
+        self.assertIn("场景:点餐", first)
+        self.assertIn("Welcome to Restoran Ali", first)
+        self.assertEqual(session.tutor.stt_language(), "en-MY")
+        reply = session._answer("I want eat nasi lemak", "voice", True, "", [])
+        self.assertEqual(reply, "Sure! Anything to drink with that?")
+        self.assertIn("Restoran Ali", json.dumps(client.calls[1]["messages"], ensure_ascii=False))
+        self.assertIn("English", client.calls[1]["system"])
+        review = session._answer("stop practice", "voice", True, "", [])
+        self.assertIn("I'd like nasi lemak", review)
+        self.assertIn("I want eat nasi lemak", client.calls[-1]["messages"][0]["content"])
+        self.assertFalse(session.tutor.active)
+        self.assertEqual(len(list(Path(self.tmp, "tutor").glob("*.md"))), 1)
+        self.assertIn("en-US-AvaNeural", voices)  # 用英文的声音读
+
+    def test_listens_in_practice_language(self):
+        import friday_tutor
+
+        heard = []
+        ctx = SimpleNamespace(transcribe=lambda audio, language="zh-CN": heard.append(language) or "hi")
+        session = SimpleNamespace(assistant=SimpleNamespace(client=self.Client()))
+        app.start_tutor(session, ctx, self.tmp)
+        ctx.transcribe(b"x")
+        session.tutor.lang = "ms"
+        ctx.transcribe(b"x")
+        self.assertEqual(heard, ["zh-CN", "ms-MY"])
+
 if __name__ == "__main__":
     unittest.main()
