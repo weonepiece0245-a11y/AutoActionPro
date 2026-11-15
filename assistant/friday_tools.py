@@ -1061,12 +1061,20 @@ CODE_LAB_TOOL = {
         "限制:不能上网、不能开别的程序、只能读写实验室文件夹,最多跑 2 分钟;只有电脑上装了的库能用(没装的会报 ImportError,就换个写法)。"
         "self_test:你想改星期五自己的程序时,用 edits [{file: 例如 friday_web.py, old: 原来的一段(要刚好出现一次), new: 改成}]"
         " 在一份副本上改、跑全部测试,和没改的比;要几分钟,跑完会告诉老板,还会存一份报告。真正的星期五不会被改。"
-        "recent:最近跑过什么。跑完把结果用一两句话告诉老板;失败了说为什么、要不要再试。"
+        "跑的时候老板在窗口里看得到代码和输出,画的图、做好的文件也会显示(可以打开、存到下载)。"
+        "失败了:看 error 改好代码,用同一个 title 再 run(同一件事最多 3 次;第 3 次还失败就停下来,告诉老板卡在哪、建议怎么做)。"
+        "缺库(ModuleNotFoundError)且结果里有 installable:用 install 装(会先问老板),装好再 run;不在名单里的库就换写法。"
+        "export:把跑出来的文件 open(打开)或 save(存到老板的下载文件夹),run 和 name 用结果里的。"
+        "recent:最近跑过什么。跑完把结果用一两句话告诉老板。"
     ),
     "input_schema": {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["run", "self_test", "recent"]},
+            "action": {"type": "string", "enum": ["run", "self_test", "recent", "install", "export"]},
+            "packages": {"type": "array", "items": {"type": "string"}, "description": "install 用:例如 [\"pandas\", \"openpyxl\"]"},
+            "run": {"type": "string", "description": "export 用:结果里的 run"},
+            "name": {"type": "string", "description": "export 用:跑出来的文件名"},
+            "how": {"type": "string", "enum": ["open", "save"], "description": "export 用"},
             "title": {"type": "string", "description": "这次在做什么(几个字)"},
             "code": {"type": "string", "description": "run 用:完整的 Python 代码,用 print 输出结果"},
             "files": {"type": "array", "items": {"type": "string"}, "description": "run 用:要复制进实验室的老板文件(完整路径,最多 5 个)"},
@@ -2182,8 +2190,34 @@ class Toolbox:
             if self.lab_notify is not None:
                 self.lab_notify(record)
             result = {"ok": record["ok"], "seconds": record["seconds"], "output": record["output"],
-                      "error": record["error"], "produced_files": record["produced"], "folder": record["folder"]}
+                      "error": record["error"], "produced_files": record["produced"], "run": record.get("run", ""),
+                      "attempt": f"{record.get('attempt', 1)}/{friday_lab.MAX_ATTEMPTS}"}
+            if record["ok"]:
+                result["next"] = "成功了:用一两句话告诉老板结果(图和文件老板在窗口里看得到)"
+            elif record.get("installable"):
+                result["installable"] = record["installable"]
+                result["next"] = f"缺 {record['missing']}:用 install 装 {record['installable']}(会先问老板),装好再 run"
+            elif record.get("attempt", 1) >= friday_lab.MAX_ATTEMPTS:
+                result["next"] = "已经试了 3 次:停下来,告诉老板卡在哪里、建议怎么做"
+            else:
+                result["next"] = "看 error 改好代码,用同一个 title 再 run 一次"
             return json.dumps(result, ensure_ascii=False), not record["ok"]
+        if action == "install":
+            if lab.busy:
+                return f"实验室正在跑「{lab.busy}」,等一下再装", True
+            on_status("🧪 安装 Python 库:" + "、".join(str(p) for p in args.get("packages") or []))
+            lab.busy = "安装库"
+            try:
+                return lab.install(args.get("packages") or [], self.confirm), False
+            except ValueError as e:
+                return str(e), True
+            finally:
+                lab.busy = None
+        if action == "export":
+            try:
+                return lab.export(str(args.get("run") or ""), str(args.get("name") or ""), str(args.get("how") or "save")), False
+            except (ValueError, OSError, AttributeError) as e:
+                return f"没办好:{e}", True
         if action == "self_test":
             edits = args.get("edits") or []
             if not isinstance(edits, list) or not edits:

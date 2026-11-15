@@ -7,6 +7,10 @@
    在副本上改,跑全部测试,和没改的副本比一比:改了以后有没有多坏掉的、修好了哪些。你真正的星期五一个字都不会动。
    结果和改了什么存成报告(friday_lab\\reports),你可以把报告发给帮你升级的人。
 
+聊天里会出现一个“实验窗口”:看得到她写的代码、边跑边显示输出,跑完标 ✅ 或 ❌;画的图直接显示,
+做好的文件可以“打开”或“存到下载”。失败了她会看错误、改好再跑(同一件事最多 3 次);
+缺 pandas、openpyxl、matplotlib 这类常用库时,先问你要不要装(只装固定名单里的)。
+
 安全:跑的代码碰不到你的钥匙、密码(.env 不会复制进去,也读不到外面的文件);这是防写错的安全网,不是防坏人的铁笼子。
 """
 
@@ -34,6 +38,21 @@ MAX_FILE_MB = 20
 RUNNER = Path(__file__).with_name("friday_lab_runner.py")
 APP_DIR = Path(__file__).resolve().parent
 COPY_SUFFIXES = {".py", ".md", ".txt", ".html", ".js", ".css", ".json"}
+MAX_ATTEMPTS = 3  # 同一件事最多试几次(失败了改代码再跑)
+ATTEMPT_WINDOW = 20 * 60  # 秒:这段时间内同一个标题算同一件事
+RUN_ID = re.compile(r"^\d{8}-\d{6}(-\d+)?$")
+IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+# 跑出来的文件:只有这些类型可以帮你打开 / 存到下载(不会打开 .py、.bat、.exe 这类会执行的)
+OPENABLE = set(IMAGE_TYPES) | {".csv", ".xlsx", ".xls", ".pdf", ".txt", ".docx", ".pptx", ".json", ".md", ".svg", ".zip"}
+# 可以帮你装的库:import 的名字 -> pip 的名字
+INSTALLABLE = {
+    "pandas": "pandas", "numpy": "numpy", "openpyxl": "openpyxl", "xlrd": "xlrd", "xlsxwriter": "XlsxWriter",
+    "matplotlib": "matplotlib", "seaborn": "seaborn", "scipy": "scipy", "docx": "python-docx", "pptx": "python-pptx",
+    "pypdf": "pypdf", "PIL": "pillow", "tabulate": "tabulate", "dateutil": "python-dateutil", "pytz": "pytz",
+    "statsmodels": "statsmodels", "sympy": "sympy", "qrcode": "qrcode", "chardet": "chardet", "lxml": "lxml",
+    "bs4": "beautifulsoup4", "yaml": "PyYAML", "reportlab": "reportlab", "fpdf": "fpdf2", "networkx": "networkx",
+}
+MISSING = re.compile(r"No module named '([A-Za-z0-9_]+)")
 NEVER_COPY = re.compile(r"^(\.env.*|friday_[a-z_]*\.json|.*token.*|credentials.*|google_.*\.json|.*\.pem|.*\.key|friday\.lock|"
                         r"friday_library\.db.*|friday_archive\.jsonl|friday_memory\.json.*)$", re.I)
 
@@ -60,19 +79,49 @@ def safe_env() -> dict:
     env = {k: v for k, v in os.environ.items() if k.upper() in keep}
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PYTHONUNBUFFERED"] = "1"  # 边跑边看输出
+    env["MPLBACKEND"] = "Agg"  # matplotlib 不开窗口,直接存图
     return env
+
+
+def clean_error(error: str, work: Path) -> str:
+    """错误信息里去掉实验室自己的那几行和长长的文件夹路径,只留跟代码有关的。"""
+    lines = (error or "").splitlines()
+    out, skip = [], False
+    for line in lines:
+        if skip:
+            skip = False
+            if line.startswith("    "):
+                continue
+        if "friday_lab_runner.py" in line:
+            skip = True
+            continue
+        out.append(line)
+    text = "\n".join(out)
+    for prefix in (str(work) + os.sep, str(work) + "/", str(work)):  # 先拿掉带斜线的
+        text = text.replace(prefix, "")
+    return text
+
+
+def missing_module(error: str) -> str | None:
+    match = MISSING.search(error or "")
+    return match.group(1) if match else None
 
 
 class Lab:
     def __init__(self, folder: str | os.PathLike, python: str = sys.executable, app_dir: Path = APP_DIR,
-                 is_secret: Callable[[Path], bool] = lambda p: False, run=subprocess.run,
+                 is_secret: Callable[[Path], bool] = lambda p: False, run=None, popen=subprocess.Popen,
                  on_done: Callable[[dict], None] = lambda record: None,
                  clock: Callable[[], datetime.datetime] = datetime.datetime.now) -> None:
         self.folder = Path(folder)
         self.python = python
         self.app_dir = Path(app_dir)
         self.is_secret = is_secret
-        self.run_process = run
+        self.run_process = run or subprocess.run
+        self.custom_run = run is not None  # 测试用:一次跑完,不边跑边看
+        self.popen = popen
+        self.on_event: Callable[[dict], None] | None = None  # 实验窗口:开始 / 输出 / 结束
+        self.attempts: dict[str, tuple[int, float, bool]] = {}  # 标题 -> (第几次, 时间, 成功了没)
         self.on_done = on_done
         self.clock = clock
         self.lock = threading.Lock()
@@ -101,6 +150,11 @@ class Lab:
             raise ValueError("没有代码")
         if len(code) > 60000:
             raise ValueError("代码太长了")
+        key = re.sub(r"\s+", "", str(title or "跑代码"))[:60].lower()
+        count, last, last_ok = self.attempts.get(key, (0, 0.0, True))
+        attempt = count + 1 if (not last_ok and time.monotonic() - last < ATTEMPT_WINDOW) else 1
+        if attempt > MAX_ATTEMPTS:
+            raise ValueError(f"「{title}」已经试了 {MAX_ATTEMPTS} 次都失败,先停下来告诉老板卡在哪里、要不要换个做法")
         stamp = self.clock().strftime("%Y%m%d-%H%M%S")
         work = self.folder / "runs" / stamp
         n = 1
@@ -124,20 +178,170 @@ class Lab:
         before = {p.name for p in work.iterdir()}
         started = time.monotonic()
         timeout = max(5, min(int(timeout or 60), RUN_TIMEOUT))
+        title = str(title or "跑代码")[:60]
+        self._emit({"phase": "start", "run": work.name, "title": title, "attempt": attempt, "max": MAX_ATTEMPTS,
+                    "code": code[:20000], "files": copied})
+        cmd = [self.python, "-E", "-B", str(RUNNER), "strict", str(work), str(script)]
         try:
-            proc = self.run_process([self.python, "-E", "-B", str(RUNNER), "strict", str(work), str(script)],
-                                    cwd=str(work), capture_output=True, timeout=timeout, env=safe_env(),
-                                    stdin=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            out, err, code_ = _decode(proc.stdout), _decode(proc.stderr), proc.returncode
-        except subprocess.TimeoutExpired:
-            out, err, code_ = "", f"超过 {timeout} 秒还没跑完,停掉了。", -1
-        produced = sorted(p.name for p in work.iterdir() if p.name not in before)
-        record = {"kind": "run", "time": self.clock().strftime("%Y-%m-%d %H:%M"), "title": str(title or "跑代码")[:60],
+            out, err, code_ = self._execute(cmd, work, timeout, work.name)
+        except OSError as e:  # 开不了 Python:窗口里的实验卡片也要结束
+            out, err, code_ = "", f"开不了 Python:{e}", -1
+        produced = sorted(p.name for p in work.iterdir()
+                          if p.name not in before and not p.name.startswith(".") and p.name != "__pycache__")
+        err = clean_error(err, work)
+        missing = missing_module(err) if code_ != 0 else None
+        record = {"kind": "run", "time": self.clock().strftime("%Y-%m-%d %H:%M"), "title": title,
                   "ok": code_ == 0, "seconds": round(time.monotonic() - started, 1), "code": code[:4000],
                   "output": _clip(out), "error": _clip(err, 3000), "files": copied, "produced": produced,
-                  "folder": str(work)}
+                  "folder": str(work), "run": work.name, "attempt": attempt}
+        if missing:
+            record["missing"] = missing
+            if missing in INSTALLABLE:
+                record["installable"] = INSTALLABLE[missing]
+        self.attempts[key] = (attempt, time.monotonic(), record["ok"])
+        self._emit({"phase": "end", "run": work.name, "ok": record["ok"], "seconds": record["seconds"],
+                    "error": record["error"][-3000:], "attempt": attempt, "max": MAX_ATTEMPTS,
+                    "produced": [{"name": n, "image": Path(n).suffix.lower() in IMAGE_TYPES,
+                                  "openable": Path(n).suffix.lower() in OPENABLE} for n in produced[:20]],
+                    "missing": missing, "installable": record.get("installable")})
         self._prune()
         return self._record(record)
+
+    def _emit(self, event: dict) -> None:
+        if self.on_event is not None:
+            try:
+                self.on_event({"type": "lab", **event})
+            except Exception:
+                pass
+
+    def _execute(self, cmd: list[str], work: Path, timeout: int, run_id: str) -> tuple[str, str, int]:
+        """跑代码;边跑边把输出送到实验窗口(每 0.3 秒送一次)。返回 (输出, 错误, 结束码)。"""
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        env = safe_env()
+        env["MPLCONFIGDIR"] = str(work / ".matplotlib")  # matplotlib 的缓存放在实验室里
+        if self.custom_run:
+            try:
+                proc = self.run_process(cmd, cwd=str(work), capture_output=True, timeout=timeout, env=env,
+                                        stdin=subprocess.DEVNULL, creationflags=flags)
+                out, err = _decode(proc.stdout), _decode(proc.stderr)
+                if out:
+                    self._emit({"phase": "out", "run": run_id, "text": _clip(out)})
+                return out, err, proc.returncode
+            except subprocess.TimeoutExpired:
+                return "", f"超过 {timeout} 秒还没跑完,停掉了。", -1
+        proc = self.popen(cmd, cwd=str(work), stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+                          stdin=subprocess.DEVNULL, creationflags=flags)
+        errors: list[bytes] = []
+        reader = threading.Thread(target=lambda: errors.append(proc.stderr.read()), daemon=True)
+        reader.start()
+        killed = threading.Event()
+
+        def kill() -> None:
+            killed.set()
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+        timer = threading.Timer(timeout, kill)
+        timer.start()
+        lines: list[str] = []
+        pending: list[str] = []
+        size, last = 0, 0.0  # 第一行马上送
+        try:
+            for raw in iter(proc.stdout.readline, b""):
+                line = _decode(raw)
+                if size < MAX_OUTPUT * 4:  # 太多就不再收(免得把记忆体塞满)
+                    lines.append(line)
+                    size += len(line)
+                    if size <= MAX_OUTPUT:
+                        pending.append(line)
+                if pending and time.monotonic() - last > 0.3:
+                    self._emit({"phase": "out", "run": run_id, "text": "".join(pending)})
+                    pending, last = [], time.monotonic()
+            proc.wait()
+        finally:
+            timer.cancel()
+            reader.join(timeout=5)
+            for stream in (proc.stdout, proc.stderr):
+                try:
+                    stream.close()
+                except (OSError, AttributeError):
+                    pass
+        if pending:
+            self._emit({"phase": "out", "run": run_id, "text": "".join(pending)})
+        err = _decode(b"".join(errors))
+        if killed.is_set():
+            return "".join(lines), (err + "\n" if err else "") + f"超过 {timeout} 秒还没跑完,停掉了。", -1
+        return "".join(lines), err, proc.returncode
+
+    # ---------- 跑出来的文件 ----------
+    def produced_file(self, run_id: str, name: str) -> Path | None:
+        """实验室跑出来的文件(只认记录里有的,不收路径)。"""
+        run_id, name = str(run_id or ""), str(name or "")
+        if not RUN_ID.match(run_id) or not name or "/" in name or "\\" in name or name.startswith("."):
+            return None
+        with self.lock:
+            known = any(r.get("kind") == "run" and Path(r.get("folder", "")).name == run_id and name in r.get("produced", [])
+                        for r in self.history)
+        if not known:
+            return None
+        path = self.folder / "runs" / run_id / name
+        try:
+            if not path.resolve().is_relative_to((self.folder / "runs" / run_id).resolve()) or not path.is_file():
+                return None
+        except OSError:
+            return None
+        return path
+
+    def export(self, run_id: str, name: str, action: str, downloads: Path | None = None, opener=None) -> str:
+        """打开(open)或存到下载(save)跑出来的文件;返回给你看的话。"""
+        path = self.produced_file(run_id, name)
+        if path is None:
+            raise ValueError("找不到这个文件(可能太旧被清掉了)")
+        if path.suffix.lower() not in OPENABLE:
+            raise ValueError(f"{path.suffix} 这种文件不帮你打开(可能会执行程序)")
+        if action == "save":
+            target_dir = Path(downloads or Path.home() / "Downloads")
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / path.name
+            n = 1
+            while target.exists():
+                n += 1
+                target = target_dir / f"{path.stem} ({n}){path.suffix}"
+            shutil.copy2(path, target)
+            return f"存好了:{target}"
+        if action == "open":
+            (opener or getattr(os, "startfile"))(str(path))
+            return f"打开了 {path.name}"
+        raise ValueError("不支持的动作")
+
+    # ---------- 装库 ----------
+    def install(self, packages: list[str], confirm: Callable[[str], bool]) -> str:
+        wanted = []
+        allowed = {v.lower(): v for v in INSTALLABLE.values()} | {k.lower(): v for k, v in INSTALLABLE.items()}
+        for raw in packages or []:
+            name = allowed.get(str(raw).strip().lower())
+            if name is None:
+                raise ValueError(f"{raw} 不在可以装的名单里(只装常用的数据、表格、画图库)")
+            if name not in wanted:
+                wanted.append(name)
+        if not wanted:
+            raise ValueError("要说装哪个库")
+        if not confirm(f"给代码实验室安装 Python 库:{'、'.join(wanted)}(从 PyPI 下载,大约 1–3 分钟)"):
+            return "老板没有允许安装。可以换个不用这个库的写法。"
+        self._emit({"phase": "install", "packages": wanted})
+        try:
+            proc = self.run_process([self.python, "-m", "pip", "install", "-q", "--disable-pip-version-check", *wanted],
+                                    capture_output=True, timeout=600, stdin=subprocess.DEVNULL,
+                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except subprocess.TimeoutExpired:
+            return "装了 10 分钟还没装好,停掉了(可能网络太慢)。"
+        if proc.returncode != 0:
+            return "没装成功:" + _decode(proc.stderr or b"").strip()[-600:]
+        for key in list(self.attempts):  # 装好了:重新算次数
+            self.attempts[key] = (0, 0.0, True)
+        return f"装好了:{'、'.join(wanted)}。现在可以再跑一次。"
 
     def _prune(self) -> None:
         runs = sorted((self.folder / "runs").glob("*"))

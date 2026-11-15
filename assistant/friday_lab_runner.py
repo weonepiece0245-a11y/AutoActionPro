@@ -43,6 +43,13 @@ def install(mode: str, workdir: str) -> None:
         pass
     # 只读得到实验室文件夹和 Python 自己的库(星期五自己的文件夹、.env、你的文件都读不到)
     read_roots = write_roots + [_norm(p) for p in libs if p]
+    # 系统字体(画图要用中文字):只读
+    windir = os.environ.get("WINDIR") or os.environ.get("SYSTEMROOT")
+    fonts = [os.path.join(windir, "Fonts")] if windir else []
+    if os.environ.get("LOCALAPPDATA"):
+        fonts.append(os.path.join(os.environ["LOCALAPPDATA"], "Microsoft", "Windows", "Fonts"))
+    fonts += ["/usr/share/fonts", "/usr/local/share/fonts", "/System/Library/Fonts", "/Library/Fonts"]
+    read_roots += [_norm(p) for p in fonts]
     blocked_events = ("subprocess.Popen", "os.system", "os.exec", "os.spawn", "os.posix_spawn", "os.startfile", "os.fork",
                       "os.forkpty", "ctypes.", "_winapi.", "msvcrt.", "os.kill", "signal.pthread_kill",
                       # 注册表:读可以(Python 自己会读,例如文件类型),改不行

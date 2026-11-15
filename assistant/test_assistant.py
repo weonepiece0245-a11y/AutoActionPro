@@ -13021,7 +13021,7 @@ class CodeLabTest(TempDirTest):
                             (f"open({str(Path(self.tmp, 'new.txt'))!r}, 'w').write('x')", "只能在自己的文件夹里写"),
                             (f"import os; os.remove({str(outside)!r})", "只能改自己文件夹里的"),
                             ("import urllib.request; urllib.request.urlopen('http://example.com', timeout=3)", "不能上网")):
-            record = lab.run_code(code, "坏的")
+            record = lab.run_code(code, "坏的 " + words)  # 每次不同的事(同一件事最多试 3 次)
             self.assertFalse(record["ok"], code)
             self.assertIn(words, record["error"], code)
         self.assertTrue(outside.exists())
@@ -13033,6 +13033,105 @@ class CodeLabTest(TempDirTest):
             lab.run_code("print(1)", files=[str(Path(self.tmp, ".env"))])
         record = lab.run_code("import time; time.sleep(30)", "太久", timeout=5)
         self.assertIn("停掉了", record["error"])
+
+    def test_live_card_events_and_image(self):
+        lab = self.make()
+        events = []
+        lab.on_event = events.append
+        code = ("import time\nfor i in range(3):\n    print('第', i)\n    time.sleep(0.4)\n"
+                "from PIL import Image\nImage.new('RGB', (40, 30), 'red').save('图.png')\n"
+                "open('run.py', 'w').write('x')\n")
+        record = lab.run_code(code, "画图")
+        self.assertTrue(record["ok"], record["error"])
+        phases = [e["phase"] for e in events]
+        self.assertEqual(phases[0], "start")
+        self.assertEqual(phases[-1], "end")
+        self.assertGreaterEqual(phases.count("out"), 2)  # 边跑边送
+        self.assertEqual(events[0]["code"], code)
+        self.assertEqual("".join(e["text"] for e in events if e["phase"] == "out").count("第"), 3)
+        produced = {f["name"]: f for f in events[-1]["produced"]}
+        self.assertTrue(produced["图.png"]["image"])
+        self.assertFalse(produced["run.py"]["openable"])
+        self.assertNotIn(".matplotlib", produced)
+        run_id = record["run"]
+        self.assertEqual(lab.produced_file(run_id, "图.png").name, "图.png")
+        for bad in (("../x", "图.png"), (run_id, "../history.json"), (run_id, "main.py"), ("20200101-000000", "图.png")):
+            self.assertIsNone(lab.produced_file(*bad), bad)
+        downloads = Path(self.tmp, "Downloads")
+        self.assertIn("存好了", lab.export(run_id, "图.png", "save", downloads=downloads))
+        lab.export(run_id, "图.png", "save", downloads=downloads)
+        self.assertEqual(sorted(p.name for p in downloads.iterdir()), ["图 (2).png", "图.png"])
+        opened = []
+        lab.export(run_id, "图.png", "open", opener=opened.append)
+        self.assertTrue(opened[0].endswith("图.png"))
+        with self.assertRaises(ValueError):
+            lab.export(run_id, "run.py", "open", opener=opened.append)  # 会执行的不打开
+        self.assertEqual(len(opened), 1)
+
+    def test_retry_limit_and_missing_library(self):
+        lab = self.make()
+        for i in range(friday_lab.MAX_ATTEMPTS):
+            record = lab.run_code("raise SystemExit(1)", "算利息")
+            self.assertEqual(record["attempt"], i + 1)
+        with self.assertRaises(ValueError) as caught:
+            lab.run_code("print(1)", "算利息")
+        self.assertIn("3 次", str(caught.exception))
+        self.assertTrue(lab.run_code("print(1)", "别的事")["ok"])
+        with mock.patch.dict(friday_lab.INSTALLABLE, {"zzfakelib": "zzfakelib"}):
+            record = lab.run_code("import zzfakelib", "用库")
+        self.assertEqual((record["missing"], record["installable"]), ("zzfakelib", "zzfakelib"))
+        self.assertNotIn("friday_lab_runner", record["error"])
+        self.assertIn('File "main.py", line 1', record["error"])
+        record = lab.run_code("import notonthelist", "用库2")
+        self.assertEqual(record["missing"], "notonthelist")
+        self.assertNotIn("installable", record)
+
+    def test_install_only_allowed_and_asks(self):
+        calls = []
+        lab = self.make(run=lambda cmd, **kw: calls.append(cmd) or SimpleNamespace(returncode=0, stdout=b"", stderr=b""))
+        with self.assertRaises(ValueError):
+            lab.install(["requests-evil"], lambda q: True)
+        self.assertIn("没有允许", lab.install(["pandas"], lambda q: False))
+        self.assertEqual(calls, [])
+        asked = []
+        self.assertIn("装好了", lab.install(["docx", "openpyxl"], lambda q: asked.append(q) or True))
+        self.assertEqual(calls[0][-2:], ["python-docx", "openpyxl"])
+        self.assertIn("python-docx", asked[0])
+
+    def test_tool_guides_retry_and_web_file(self):
+        lab = self.make()
+        toolbox = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m.json")), lambda a: True)
+        toolbox.lab = lab
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+        out = toolbox.run(SimpleNamespace(id="c", name="code_lab", input={"action": "run", "title": "t", "code": "1/0"}),
+                          lambda s: None)
+        self.assertTrue(out["is_error"])
+        self.assertIn("同一个 title 再 run", json.loads(out["content"])["next"])
+        out = toolbox.run(SimpleNamespace(id="c", name="code_lab", input={
+            "action": "run", "title": "图", "code": "from PIL import Image\nImage.new('RGB',(9,9)).save('a.png')"}),
+            lambda s: None)
+        run_id = json.loads(out["content"])["run"]
+        ctx = friday_web.WebContext(friday_web.Hub(), queue.Queue(), friday_web.WebApprover(friday_web.Hub()),
+                                    "tok", 0, state=lambda: {})
+        ctx.lab = lab
+        server = friday_web.start_server(ctx)
+        try:
+            port = ctx.port = server.server_address[1]
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("GET", f"/api/lab_file?run={run_id}&name=a.png&t=tok")
+            response = conn.getresponse()
+            self.assertEqual((response.status, response.getheader("Content-Type")), (200, "image/png"))
+            self.assertEqual(response.read()[:4], b"\x89PNG")
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("GET", f"/api/lab_file?run={run_id}&name=main.py&t=tok")
+            self.assertEqual(conn.getresponse().status, 404)
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("POST", "/api/lab_file", json.dumps({"run": run_id, "name": "main.py", "how": "open"}),
+                         {"X-Friday-Token": "tok", "Content-Type": "application/json"})
+            self.assertEqual(conn.getresponse().status, 400)
+        finally:
+            server.shutdown()
+            server.server_close()
 
     def test_env_has_no_keys(self):
         with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-secret", "FRIDAY_DISCORD_TOKEN": "x"}):

@@ -374,6 +374,7 @@ class WebContext:
         self.history: Callable[[str, str], dict] | None = None  # 聊天记录(关键词, 日期)
         self.subtitle_state: Callable[[], dict] | None = None  # 游戏字幕小程序来拿现在要显示的字
         self.spotify_callback: Callable[[dict], str] | None = None  # Spotify 登录跳回来
+        self.lab = None  # 代码实验室(friday_lab.Lab):跑出来的图、文件
         self.photos = None  # 照片按时间地点找(friday_photofind.PhotoIndex):缩图、打开
 
     def locked(self) -> bool:
@@ -487,6 +488,15 @@ def make_handler(ctx: WebContext):
                 return self._events()
             if url.path == "/api/state":
                 return self._json(200, {**ctx.state(), "greeting": ctx.greeting, "locked": False})
+            if url.path == "/api/lab_file":  # 实验室画的图(只给记录里有的图片)
+                import friday_lab
+
+                path = ctx.lab.produced_file((query.get("run") or [""])[0], (query.get("name") or [""])[0]) \
+                    if ctx.lab is not None else None
+                kind = friday_lab.IMAGE_TYPES.get(path.suffix.lower()) if path is not None else None
+                if path is None or kind is None or path.stat().st_size > 15 * 1024 * 1024:
+                    return self._send(404, b"not found", "text/plain")
+                return self._send(200, path.read_bytes(), kind)
             if url.path == "/api/photo_thumb":  # 只给目录里有的照片(用 id,不收路径)
                 photo_id = (query.get("id") or [""])[0]
                 data = ctx.photos.thumb(photo_id) if ctx.photos is not None and re.fullmatch(r"[0-9a-f]{16}", photo_id) else None
@@ -598,6 +608,18 @@ def make_handler(ctx: WebContext):
                 return self._json(200, {"ok": True})
             if ctx.locked():
                 return self._json(423, {"error": "星期五已上锁,先输入 PIN 解锁"})
+            if url.path == "/api/lab_file":  # 实验室跑出来的文件:打开 / 存到下载
+                try:
+                    payload = json.loads(body or b"{}")
+                    run_id, name, how = str(payload.get("run") or ""), str(payload.get("name") or ""), str(payload.get("how") or "")
+                except (ValueError, AttributeError):
+                    return self._json(400, {"error": "格式不对"})
+                if ctx.lab is None or how not in ("open", "save"):
+                    return self._json(400, {"error": "不支持"})
+                try:
+                    return self._json(200, {"ok": True, "message": ctx.lab.export(run_id, name, how)})
+                except (ValueError, OSError, AttributeError) as e:
+                    return self._json(400, {"error": str(e)})
             if url.path == "/api/photo_open":
                 try:
                     photo_id = str(json.loads(body or b"{}").get("id") or "")

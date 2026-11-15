@@ -350,6 +350,108 @@ function addPhotos(ev) {
   if (current) log.insertBefore(box, current); else log.append(box);
   scrollDown();
 }
+// 代码实验室的实验窗口:代码、边跑边看输出、结果、跑出来的图和文件
+const labCards = new Map();
+function labCard(ev) {
+  if (ev.phase === "install") {
+    addLine(`🧪 正在安装 Python 库:${(ev.packages || []).join("、")}……`);
+    return;
+  }
+  let card = labCards.get(ev.run);
+  if (ev.phase === "start" || !card) {
+    card = document.createElement("div");
+    card.className = "lab-card running";
+    const head = document.createElement("div");
+    head.className = "lab-head";
+    const title = document.createElement("span");
+    title.className = "lab-title";
+    title.textContent = `🧪 ${ev.title || "代码实验室"}`;
+    const attempt = document.createElement("span");
+    attempt.className = "lab-attempt";
+    attempt.textContent = ev.attempt > 1 ? `第 ${ev.attempt}/${ev.max} 次` : "";
+    const state = document.createElement("span");
+    state.className = "lab-state";
+    state.textContent = "运行中…";
+    head.append(title, attempt, state);
+    const code = document.createElement("details");
+    code.className = "lab-code";
+    const summary = document.createElement("summary");
+    const lines = (ev.code || "").split("\n").length;
+    summary.textContent = `代码(${lines} 行)` + (ev.files && ev.files.length ? ` · 用了 ${ev.files.join("、")}` : "");
+    const pre = document.createElement("pre");
+    pre.textContent = ev.code || "";
+    code.append(summary, pre);
+    const out = document.createElement("pre");
+    out.className = "lab-out";
+    out.hidden = true;
+    const files = document.createElement("div");
+    files.className = "lab-files";
+    card.append(head, code, out, files);
+    if (current) log.insertBefore(card, current); else log.append(card);
+    labCards.set(ev.run, card);
+    if (labCards.size > 40) labCards.delete(labCards.keys().next().value);
+    scrollDown();
+    if (ev.phase === "start") return;
+  }
+  const out = card.querySelector(".lab-out");
+  if (ev.phase === "out") {
+    out.hidden = false;
+    out.textContent = (out.textContent + ev.text).slice(-20000);
+    out.scrollTop = out.scrollHeight;
+    scrollDown();
+    return;
+  }
+  if (ev.phase !== "end") return;
+  card.classList.remove("running");
+  card.classList.add(ev.ok ? "ok" : "fail");
+  card.querySelector(".lab-state").textContent = ev.ok ? `✅ 成功 · ${ev.seconds} 秒` : `❌ 失败 · ${ev.seconds} 秒`;
+  if (!ev.ok && ev.error) {
+    out.hidden = false;
+    const err = document.createElement("span");
+    err.className = "lab-err";
+    err.textContent = (out.textContent ? "\n" : "") + ev.error.trim().split("\n").slice(-12).join("\n");
+    out.append(err);
+  }
+  if (!ev.ok) {
+    const note = document.createElement("div");
+    note.className = "lab-note";
+    note.textContent = ev.installable ? `缺 ${ev.missing}:星期五会问你要不要装 ${ev.installable}`
+      : ev.missing ? `缺 ${ev.missing},这个库不在可以装的名单里,星期五会换个写法`
+      : ev.attempt >= ev.max ? "已经试了 3 次,星期五会告诉你卡在哪里" : "星期五会看错误、改好再试";
+    card.append(note);
+  }
+  const files = card.querySelector(".lab-files");
+  for (const f of ev.produced || []) {
+    const item = document.createElement("div");
+    item.className = "lab-file";
+    if (f.image) {
+      const img = document.createElement("img");
+      img.alt = f.name; img.loading = "lazy";
+      img.src = `/api/lab_file?run=${encodeURIComponent(ev.run)}&name=${encodeURIComponent(f.name)}&t=${encodeURIComponent(token)}`;
+      img.onload = scrollDown;
+      item.append(img);
+    }
+    const row = document.createElement("div");
+    row.className = "lab-file-row";
+    const label = document.createElement("span");
+    label.textContent = "📄 " + f.name;
+    row.append(label);
+    if (f.openable) {
+      for (const [how, text] of [["open", "打开"], ["save", "存到下载"]]) {
+        const b = document.createElement("button");
+        b.type = "button"; b.className = "mini-btn"; b.textContent = text;
+        b.onclick = async () => {
+          const r = await api("/api/lab_file", { run: ev.run, name: f.name, how }).catch(() => ({ error: "星期五没有响应" }));
+          addLine(r.error ? "⚠ " + r.error : "🧪 " + r.message, r.error ? "error" : "");
+        };
+        row.append(b);
+      }
+    }
+    item.append(row);
+    files.append(item);
+  }
+  scrollDown();
+}
 function startAnswer(source, ts) {
   current = addMessage("friday", "", source, ts);
   current.classList.add("typing");
@@ -421,6 +523,8 @@ function handle(ev) {
       showSnip(ev); break;
     case "photos":
       addPhotos(ev); break;
+    case "lab":
+      labCard(ev); break;
     case "audio_end":
       audioEndTurns.add(ev.turn);
       maybeFollowUp(); break;

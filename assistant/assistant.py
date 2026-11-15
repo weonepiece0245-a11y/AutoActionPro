@@ -4080,7 +4080,7 @@ def start_subscriptions(session, toolbox: Toolbox, data_dir: str, interval: floa
     return subs
 
 
-def start_lab(session, toolbox: Toolbox, data_dir: str):
+def start_lab(session, toolbox: Toolbox, data_dir: str, ctx=None):
     """代码实验室:星期五自己写代码在隔离的文件夹里跑;自我测试在副本上跑全部测试。"""
     import friday_lab
     import friday_security
@@ -4089,12 +4089,13 @@ def start_lab(session, toolbox: Toolbox, data_dir: str):
         text = friday_lab.Lab.describe(record)
         if record["kind"] == "self_test":
             announce(session, text, "🧪", text[:120])  # 要几分钟:跑完推到手机
-        else:
-            session.hub.broadcast({"type": "status", "text": "🧪 " + text.splitlines()[0]})
-        session.hub.broadcast({"type": "mailscan"})
+        session.hub.broadcast({"type": "mailscan"})  # 设定里的记录更新(跑代码的结果在聊天的实验窗口里)
 
     lab = friday_lab.Lab(os.path.join(data_dir, "friday_lab"), is_secret=friday_security.is_secret_path, on_done=done)
     session.lab = toolbox.lab = lab
+    lab.on_event = session.hub.broadcast  # 聊天里的实验窗口:代码、边跑边看输出、结果
+    if ctx is not None:
+        ctx.lab = lab
     toolbox.lab_notify = done
     toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
     quick = getattr(session, "quick", None)
@@ -6210,7 +6211,7 @@ def run_web(args) -> None:
     _startup_step(session, "待办排进日历", lambda: start_planner(session, toolbox, data_dir))
     _startup_step(session, "家里用电统计", lambda: start_energy(session, toolbox, data_dir))
     _startup_step(session, "功能使用统计", lambda: start_toolstats(session, toolbox, data_dir))
-    _startup_step(session, "代码实验室", lambda: start_lab(session, toolbox, data_dir))
+    _startup_step(session, "代码实验室", lambda: start_lab(session, toolbox, data_dir, ctx))
     _startup_step(session, "照片按时间地点找", lambda: start_photo_find(session, toolbox, data_dir, ctx))
     toolbox.meter, toolbox.budget = session.meter, getattr(session, "budget", None)
     import friday_scenes
