@@ -1549,6 +1549,29 @@ function fillSettings() {
   if (s.brief != null) $("setBrief").checked = s.brief;
   $("eventRow").hidden = s.event_lead === null || s.event_lead === undefined;
   if (s.event_lead != null) $("setEventLead").value = String(s.event_lead);
+  const hr = s.homerules;
+  $("ruleGroup").hidden = !hr;
+  if (hr) {
+    const list = $("ruleList");
+    list.replaceChildren();
+    for (const r of hr) {
+      const row = document.createElement("div");
+      row.className = "set-row sub";
+      const label = document.createElement("span");
+      label.textContent = `${r.id}. ${r.text}${r.enabled ? "" : "(暂停中)"}`;
+      const ctl = document.createElement("span");
+      ctl.className = "set-ctl";
+      const pause = document.createElement("button");
+      pause.type = "button"; pause.className = "mini-btn"; pause.textContent = r.enabled ? "暂停" : "恢复";
+      pause.onclick = () => saveSetting({ homerule_toggle: r.id });
+      const del = document.createElement("button");
+      del.type = "button"; del.className = "mini-btn"; del.textContent = "删掉";
+      del.onclick = () => saveSetting({ homerule_remove: r.id });
+      ctl.append(pause, del);
+      row.append(label, ctl);
+      list.append(row);
+    }
+  }
   const sw = s.spendwatch;
   $("spendGroup").hidden = !sw;
   if (sw) {
@@ -1982,6 +2005,7 @@ $("photoReindex").onclick = () => saveSetting({ photo_reindex: true });
 $("setBillFile").onchange = (e) => saveSetting({ bill_file: e.target.checked });
 $("setSelfReview").onchange = (e) => saveSetting({ self_review: e.target.checked });
 $("reviewNow").onclick = () => saveSetting({ self_review_now: true });
+$("ruleAdd").onclick = () => { const t = $("ruleText").value.trim(); if (t) { $("ruleText").value = ""; saveSetting({ homerule_add: t }); } };
 $("setSpendAlerts").onchange = (e) => saveSetting({ spend_alerts: e.target.checked });
 $("spendBudgetSave").onclick = () => saveSetting({ spend_budget: Number($("setSpendBudget").value || 0) });
 $("setPracticeGoal").onchange = (e) => saveSetting({ practice_goal: Number(e.target.value) });

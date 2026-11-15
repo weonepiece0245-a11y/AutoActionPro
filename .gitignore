@@ -94,6 +94,7 @@ assistant/friday_statement.json*
 assistant/friday_selfreview.json*
 assistant/whisper_models/
 assistant/friday_practice.json*
+assistant/friday_homerules.json*
 assistant/friday_snip.png
 
 # 更新前留的旧文件(自动退回上一版用)

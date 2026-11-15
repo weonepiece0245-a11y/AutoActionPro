@@ -14452,5 +14452,118 @@ class SpendWatchTest(TempDirTest):
         self.assertIn("月底大概", cmd.handle("这个月会花多少"))
         self.assertIsNone(cmd.handle("这个月花了多少电费"))
 
+
+class HomeRulesTest(TempDirTest):
+    def make(self):
+        import friday_homerules
+
+        self.now = [datetime.datetime(2026, 11, 16, 18, 0)]  # 星期一
+        self.idle = [0.0]
+        self.calls = []
+
+        def switch(what, on):
+            self.calls.append((what, on))
+            return f"已{'打开' if on else '关掉'}:{what}。"
+        sun = lambda day: (datetime.datetime.combine(day, datetime.time(7, 10)),  # noqa: E731
+                           datetime.datetime.combine(day, datetime.time(19, 20)))
+        return friday_homerules.HomeRules(os.path.join(self.tmp, "r.json"), switch, sun=sun,
+                                          idle=lambda: self.idle[0], clock=lambda: self.now[0])
+
+    def test_parse(self):
+        import friday_homerules as h
+
+        cases = {
+            "每天晚上12点关所有插座": "每天 00:00 关所有插座", "平日早上7点开卧室灯": "平日 07:00 开卧室灯",
+            "周末下午三点半关客厅灯": "周末 15:30 关客厅灯", "太阳下山开客厅灯": "每天日落 开客厅灯",
+            "日落前半小时开灯": "每天日落前 30 分钟 开灯", "天亮关灯": "每天日出 关灯",
+            "我离开电脑30分钟就关桌灯": "离开电脑 30 分钟 关桌灯", "离开电脑一个小时关掉所有插座": "离开电脑 60 分钟 关所有插座",
+            "回到电脑前开桌灯": "回到电脑前 开桌灯", "每周五晚上9点关插座": "每周五 21:00 关插座",
+            "设一个规则:每天23:30关所有灯": "每天 23:30 关所有灯",
+        }
+        for text, want in cases.items():
+            rule = h.parse(text)
+            self.assertIsNotNone(rule, text)
+            self.assertEqual(h.describe_rule(rule), want, text)
+        for not_rule in ("下午三点关灯", "我回来了,开灯", "关灯", "开客厅灯", "帮我打开电脑"):
+            self.assertIsNone(h.parse(not_rule), not_rule)
+
+    def test_time_and_sunset_fire_once(self):
+        import friday_homerules as h
+
+        rules = self.make()
+        rules.add(h.parse("太阳下山开客厅灯"))
+        rules.add(h.parse("平日晚上8点关插座"))
+        self.assertIn("已经有这条规则", rules.add(h.parse("太阳下山开客厅灯")))
+        self.assertEqual(rules.tick(), [])
+        self.now[0] = datetime.datetime(2026, 11, 16, 19, 21)
+        said = rules.tick()
+        self.assertEqual(self.calls, [("客厅灯", True)])
+        self.assertIn("规则 1", said[0])
+        self.assertEqual(rules.tick(), [])  # 一天一次
+        self.now[0] = datetime.datetime(2026, 11, 16, 21, 0)  # 晚开电脑超过 30 分钟:不补做
+        rules.tick()
+        self.assertNotIn(("插座", False), self.calls)
+        self.now[0] = datetime.datetime(2026, 11, 21, 20, 5)  # 星期六:平日规则不做
+        rules.tick()
+        self.assertNotIn(("插座", False), self.calls)
+        self.assertIn("暂停了", rules.set_enabled(1, False))
+        self.now[0] = datetime.datetime(2026, 11, 22, 19, 25)
+        rules.tick()
+        self.assertEqual(self.calls.count(("客厅灯", True)), 1)
+        self.assertEqual(len(self.make().rules), 2)  # 存起来了
+
+    def test_away_and_back(self):
+        import friday_homerules as h
+
+        rules = self.make()
+        rules.add(h.parse("我离开电脑30分钟就关桌灯"))
+        rules.add(h.parse("回到电脑前开桌灯"))
+        self.idle[0] = 20 * 60
+        rules.tick()
+        self.assertEqual(self.calls, [])
+        self.now[0] += datetime.timedelta(minutes=11)
+        self.idle[0] = 31 * 60
+        rules.tick()
+        self.assertEqual(self.calls, [("桌灯", False)])
+        self.now[0] += datetime.timedelta(minutes=5)
+        self.idle[0] = 36 * 60
+        rules.tick()
+        self.assertEqual(self.calls, [("桌灯", False)])  # 同一次离开只关一次
+        self.idle[0] = 5
+        rules.tick()
+        self.assertEqual(self.calls, [("桌灯", False), ("桌灯", True)])
+        rules.tick()
+        self.assertEqual(len(self.calls), 2)
+
+    def test_commands(self):
+        import friday_homerules as h
+
+        rules = self.make()
+        cmd = h.Commands(rules)
+        self.assertIn("规则 1", cmd.handle("每天晚上12点关所有插座"))
+        self.assertIn("1. 每天 00:00 关所有插座", cmd.handle("家里的规则"))
+        self.assertIn("暂停了", cmd.handle("暂停规则1"))
+        self.assertIn("恢复了", cmd.handle("恢复第1个规则"))
+        self.assertIn("删掉了规则 1", cmd.handle("删掉规则1"))
+        self.assertIn("还没有", cmd.handle("家里的规则"))
+        self.assertIsNone(cmd.handle("关灯"))
+
+    def test_rule_sentences_do_not_switch_devices_now(self):
+        import friday_homerules as h
+
+        rules = self.make()
+        switched = []
+        quick = friday_quick.QuickCommands(SimpleNamespace())
+        quick.home = SimpleNamespace(switch=lambda what, on: switched.append((what, on)) or "已切换",
+                                     describe=lambda: "", brightness=lambda *a, **k: None, color=lambda *a: None,
+                                     warmth=lambda *a, **k: None)
+        quick.extra.append(h.Commands(rules))
+        for text in ("每天晚上12点关所有插座", "太阳下山开客厅灯", "我离开电脑30分钟就关桌灯", "回到电脑前开桌灯"):
+            self.assertIn("规则", quick.handle(text), text)
+        self.assertEqual(switched, [])  # 只是设规则,现在不开关
+        self.assertEqual(len(rules.rules), 4)
+        quick.handle("关插座")
+        self.assertEqual(switched, [("插座", False)])  # 平常的说法照样马上做
+
 if __name__ == "__main__":
     unittest.main()

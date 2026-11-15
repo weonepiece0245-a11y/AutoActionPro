@@ -2789,6 +2789,9 @@ def settings_state(session, meter=None) -> dict:
         "billfile": billfile_state(session),
         "spendwatch": ({**session.spendwatch.forecast(), "on": __import__("friday_spendwatch").enabled()}
                        if getattr(session, "spendwatch", None) is not None else None),
+        "homerules": ([{"id": r["id"], "text": __import__("friday_homerules").describe_rule(r),
+                        "enabled": r.get("enabled", True)} for r in session.homerules.rules]
+                      if getattr(session, "homerules", None) is not None else None),
         "practice": session.practice.state() if getattr(session, "practice", None) is not None else None,
         "statement": {"passwords": len(__import__("friday_statement").passwords()),
                       "pending": len(session.statements.pending)}
@@ -3477,6 +3480,28 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         os.environ["FRIDAY_STATEMENT_PASSWORDS"] = value
         n = len([p for p in value.split("|") if p])
         done.append(f"月结单密码存好了({n} 个,只存在这台电脑)" if n else "月结单密码清掉了")
+    if "homerule_add" in payload or "homerule_remove" in payload or "homerule_toggle" in payload:
+        import friday_homerules
+
+        rules = getattr(session, "homerules", None)
+        if rules is None:
+            return {"error": "自动规则没有开"}
+        if "homerule_add" in payload:
+            rule = friday_homerules.parse(str(payload["homerule_add"] or ""))
+            if rule is None:
+                return {"error": "看不懂这条规则。例如:每天晚上 12 点关所有插座、太阳下山开客厅灯、我离开电脑 30 分钟就关桌灯"}
+            try:
+                done.append(rules.add(rule))
+            except ValueError as e:
+                return {"error": str(e)}
+        if "homerule_remove" in payload:
+            done.append(rules.remove(int(payload["homerule_remove"])))
+        if "homerule_toggle" in payload:
+            number = int(payload["homerule_toggle"])
+            rule = rules.find(number)
+            if rule is None:
+                return {"error": f"没有规则 {number}"}
+            done.append(rules.set_enabled(number, not rule.get("enabled", True)))
     if "practice_goal" in payload or "practice_remind" in payload or "practice_apps" in payload:
         import friday_practice
 
@@ -4475,6 +4500,39 @@ def start_statements(session, toolbox: Toolbox, data_dir: str):
     if quick is not None:
         quick.extra.append(friday_statement.Commands(statements, start_import))
     return statements
+
+
+def start_home_rules(session, toolbox: Toolbox, data_dir: str, interval: float = 30):
+    """智能家居自动规则:到时间、日落日出、离开 / 回到电脑时开关 Tapo 设备。"""
+    import friday_care
+    import friday_homerules
+
+    def switch(what: str, on: bool) -> str | None:
+        home = getattr(toolbox, "home", None)
+        if home is None:
+            return "还没连上 Tapo(齿轮设定 → 账号 填 Tapo 账号)"
+        return home.switch(what, on)
+
+    rules = friday_homerules.HomeRules(os.path.join(data_dir, "friday_homerules.json"), switch,
+                                       sun=friday_homerules.sun_times(), idle=friday_care.idle_seconds)
+    session.homerules = rules
+    quick = getattr(session, "quick", None)
+    if quick is not None:
+        quick.extra.append(friday_homerules.Commands(rules))
+
+    def loop() -> None:
+        time.sleep(20)
+        while True:
+            try:
+                for text in rules.tick():
+                    session.hub.broadcast({"type": "status", "text": text})
+                    print(text, flush=True)
+            except Exception as e:
+                print(f"家里的规则出错:{e}", flush=True)
+            time.sleep(interval)
+
+    threading.Thread(target=loop, daemon=True, name="friday-homerules").start()
+    return rules
 
 
 def start_practice(session, data_dir: str, interval: float = 60):
@@ -6636,6 +6694,7 @@ def run_web(args) -> None:
     _startup_step(session, "月结单导入记账", lambda: start_statements(session, toolbox, data_dir))
     _startup_step(session, "每周自我检讨", lambda: start_self_review(session, toolbox, data_dir))
     _startup_step(session, "练琴记录", lambda: start_practice(session, data_dir))
+    _startup_step(session, "智能家居自动规则", lambda: start_home_rules(session, toolbox, data_dir))
     if os.environ.get("FRIDAY_STT") == "whisper":  # 先在背景载入本机语音模型:第一句话才不会等
         threading.Thread(target=lambda: _quietly(lambda: __import__("friday_whisper").load()), daemon=True,
                          name="friday-whisper-load").start()

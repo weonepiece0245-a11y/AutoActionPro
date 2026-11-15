@@ -496,6 +496,12 @@
       <div class="set-row"><label for="tapoUser">Tapo 智能家居(Tapo App 的邮箱和密码)</label>
         <span class="set-ctl"><input class="mini-input" id="tapoUser" autocomplete="off" placeholder="邮箱"><input class="mini-input" id="tapoPass" type="password" autocomplete="off" placeholder="密码"><button type="button" class="mini-btn" id="tapoSave">保存</button></span></div>
       <div class="set-note" id="tapoNote">Tapo 设备要用你的 Tapo 账号在家里网络里验证。先在 Tapo App 里打开 我 → 第三方服务 → 第三方兼容(Third-Party Compatibility),电脑和设备要连同一个 Wi-Fi。密码只存在你的电脑,不要发给任何人。</div>
+      <div id="ruleGroup" hidden>
+        <div class="set-row"><label for="ruleText">家里的自动规则(电脑开着时照做)</label>
+          <span class="set-ctl"><input class="mini-input wide" id="ruleText" maxlength="80" placeholder="例如 每天晚上 12 点关所有插座 / 太阳下山开客厅灯"><button type="button" class="mini-btn" id="ruleAdd">加</button></span></div>
+        <div id="ruleList"></div>
+        <div class="set-note">也可以直接跟星期五说;“我离开电脑 30 分钟就关桌灯”“回到电脑前开桌灯”也行。只有时间、没说“每天 / 平日 / 周末”的当成一次性的,不会变成规则。</div>
+      </div>
       <div class="set-note" id="nvidiaNote" hidden>✓ 认得到 NVIDIA 显卡:可以说“显卡温度”“刚才那段存下来”“开始录像”“游戏截图”。</div>
     </div>
 
