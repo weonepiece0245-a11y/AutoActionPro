@@ -1039,6 +1039,27 @@ function fillSettings() {
     for (const scene of sc.list) list.append(sceneCard(scene));
   }
   if (s.meeting) showMeeting(s.meeting);
+  const lb = s.lab;
+  $("labGroup").hidden = !lb;
+  if (lb) {
+    $("labNote").textContent = lb.busy ? `正在跑:${lb.busy}……` : lb.runs.length ? `最近 ${lb.runs.length} 次:` :
+      "叫我“算一下……”“把这个 Excel 整理成……”“画个图”,我会写代码在这里跑;想改我自己的程序时,也会先在副本上跑全部测试。";
+    const list = $("labList");
+    list.replaceChildren();
+    for (const r of lb.runs) {
+      const box = document.createElement("details");
+      box.className = "lab-run";
+      const sum = document.createElement("summary");
+      sum.textContent = `${r.ok ? "✅" : "❌"} ${r.time} ${r.kind === "self_test" ? "自我测试" : "跑代码"}「${r.title}」`
+        + (r.kind === "self_test" ? `(${r.ran} 个测试${r.new_failures && r.new_failures.length ? `,改坏 ${r.new_failures.length} 个` : ""})` : ` ${r.seconds} 秒`);
+      const pre = document.createElement("pre");
+      pre.textContent = r.kind === "self_test"
+        ? [r.error, (r.new_failures || []).join("\n"), r.report ? "报告:" + r.report : ""].filter(Boolean).join("\n\n")
+        : [r.code, "—— 输出 ——", r.output, r.error ? "—— 错误 ——\n" + r.error : "", (r.produced || []).length ? "产生的文件:" + r.produced.join("、") : ""].filter(Boolean).join("\n");
+      box.append(sum, pre);
+      list.append(box);
+    }
+  }
   const st = s.startup;
   $("startGroup").hidden = !st || !st.windows;
   if (st && st.windows) {
@@ -1854,6 +1875,7 @@ $("subSize").onchange = (e) => saveSetting({ sub_size: e.target.value });
 $("subTime").onchange = (e) => saveSetting({ sub_time: e.target.value });
 $("duckTo").onchange = (e) => saveSetting({ duck_to: e.target.value });
 $("subPreview").onclick = () => saveSetting({ subtitle_preview: true });
+$("labOpen").onclick = () => saveSetting({ lab_open: true });
 $("startCheck").onclick = () => saveSetting({ startup_check: true });
 $("startClean").onclick = () => { if (confirm("清掉临时文件夹里超过 7 天没用的临时文件?(正在用的不会动)")) saveSetting({ startup_clean: true }, 4500); };
 $("setReceipts").onchange = (e) => saveSetting({ receipts_on: e.target.checked });

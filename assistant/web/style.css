@@ -556,6 +556,9 @@ button:focus-visible, .switch:focus-visible, select:focus-visible, input:focus-v
 body.hide-right .orb-tools { right: 26px; }
 @media (max-width: 1000px) { .orb-tools { right: 14px; top: 34%; } }
 body.locked .orb-tools { display: none; }
+.lab-run { margin: 4px 0; border: 1px solid var(--cyan-line); border-radius: 8px; padding: 6px 10px; background: rgba(var(--c-rgb), .03); font-size: 13px; }
+.lab-run summary { cursor: pointer; }
+.lab-run pre { margin: 8px 0 2px; max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 12px; color: var(--muted); }
 .set-row.locked-row > label { opacity: .55; }
 .set-row.muted > span:first-child { opacity: .5; text-decoration: line-through; }
 .rec-chip { font: inherit; cursor: pointer; color: #fecaca; border-color: rgba(239,68,68,.6); background: rgba(239,68,68,.12); animation: blink 2s ease-in-out infinite; }

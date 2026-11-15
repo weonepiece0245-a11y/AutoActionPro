@@ -12987,5 +12987,104 @@ class AuditNov15Test(TempDirTest):
         self.assertEqual(sent[0]["text"], "[这条回答会读出来]")  # Claude 看得到
         self.assertEqual(bot.exchanges[-1]["q"], "介绍吉隆坡")  # 聊天记录里没有
 
+
+import friday_lab  # noqa: E402
+
+
+class CodeLabTest(TempDirTest):
+    def make(self, **kw):
+        import friday_security
+        return friday_lab.Lab(os.path.join(self.tmp, "lab"), is_secret=friday_security.is_secret_path, **kw)
+
+    def test_runs_code_and_reports(self):
+        lab = self.make()
+        data = Path(self.tmp, "账单.csv")
+        data.write_text("项目,金额\n电费,120\n网费,129\n", encoding="utf-8")
+        code = ("import csv\nrows = list(csv.DictReader(open('账单.csv', encoding='utf-8')))\n"
+                "total = sum(float(r['金额']) for r in rows)\nopen('结果.txt', 'w', encoding='utf-8').write(str(total))\n"
+                "print('总共', total)")
+        record = lab.run_code(code, "算账单", [str(data)])
+        self.assertTrue(record["ok"], record["error"])
+        self.assertIn("总共 249.0", record["output"])
+        self.assertEqual(record["produced"], ["结果.txt"])
+        self.assertIn("✅ 代码实验室「算账单」跑成功了", friday_lab.Lab.describe(record))
+        self.assertEqual(friday_lab.Commands(lab).handle("代码实验室").splitlines()[-1][-3:], "算账单")
+
+    def test_sandbox_blocks_dangerous_things(self):
+        lab = self.make()
+        outside = Path(self.tmp, "外面.txt")
+        outside.write_text("秘密", encoding="utf-8")
+        for code, words in (("import subprocess; subprocess.run(['echo', 'hi'])", "不允许"),
+                            (f"open({str(outside)!r}).read()", "不能读"),
+                            (f"open({str(Path(self.tmp, 'new.txt'))!r}, 'w').write('x')", "只能在自己的文件夹里写"),
+                            (f"import os; os.remove({str(outside)!r})", "只能改自己文件夹里的"),
+                            ("import urllib.request; urllib.request.urlopen('http://example.com', timeout=3)", "不能上网")):
+            record = lab.run_code(code, "坏的")
+            self.assertFalse(record["ok"], code)
+            self.assertIn(words, record["error"], code)
+        self.assertTrue(outside.exists())
+        self.assertFalse(Path(self.tmp, "new.txt").exists())
+        with self.assertRaises(ValueError):
+            lab.run_code("print(1)", files=[str(Path(self.tmp, ".env"))])
+        Path(self.tmp, ".env").write_text("KEY=1", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            lab.run_code("print(1)", files=[str(Path(self.tmp, ".env"))])
+        record = lab.run_code("import time; time.sleep(30)", "太久", timeout=5)
+        self.assertIn("停掉了", record["error"])
+
+    def test_env_has_no_keys(self):
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-secret", "FRIDAY_DISCORD_TOKEN": "x"}):
+            env = friday_lab.safe_env()
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
+        self.assertNotIn("FRIDAY_DISCORD_TOKEN", env)
+
+    def test_apply_edits(self):
+        root = Path(self.tmp, "copy")
+        root.mkdir()
+        (root / "a.py").write_text("x = 1\ny = 2\n", encoding="utf-8")
+        self.assertEqual(friday_lab.Lab.apply_edits(root, [{"file": "a.py", "old": "y = 2", "new": "y = 3"},
+                                                           {"file": "b.py", "old": "", "new": "z = 0"}]), ["a.py", "b.py"])
+        self.assertIn("y = 3", (root / "a.py").read_text(encoding="utf-8"))
+        for bad in ({"file": "../a.py", "old": "x", "new": "y"}, {"file": "a.py", "old": "不存在", "new": "y"},
+                    {"file": ".env", "old": "", "new": "KEY=2"}, {"file": "a.py", "old": "", "new": "覆盖"}):
+            with self.assertRaises(ValueError):
+                friday_lab.Lab.apply_edits(root, [bad])
+
+    def test_self_test_compares_with_baseline(self):
+        app_dir = Path(self.tmp, "app")
+        app_dir.mkdir()
+        (app_dir / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+        (app_dir / ".env").write_text("ANTHROPIC_API_KEY=secret", encoding="utf-8")
+        (app_dir / "test_assistant.py").write_text(
+            "import unittest\nimport calc\n\nclass T(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(calc.add(1, 2), 3)\n"
+            "    def test_env_not_copied(self):\n        import os\n        self.assertFalse(os.path.exists('.env'))\n",
+            encoding="utf-8")
+        lab = self.make(app_dir=app_dir)
+        good = lab.self_test([{"file": "calc.py", "old": "return a + b", "new": "return b + a"}], "换个写法")
+        self.assertTrue(good["ok"], good)
+        self.assertEqual(good["ran"], 2)
+        self.assertIn("✅ 通过", Path(good["report"]).read_text(encoding="utf-8"))
+        bad = lab.self_test([{"file": "calc.py", "old": "return a + b", "new": "return a - b"}], "改坏")
+        self.assertFalse(bad["ok"])
+        self.assertEqual(bad["new_failures"], ["test_assistant.T.test_add"])
+        self.assertIn("有 1 个测试被改坏了", friday_lab.Lab.describe(bad))
+        broken = lab.self_test([{"file": "calc.py", "old": "不存在的", "new": "x"}], "对不上")
+        self.assertIn("出现了 0 次", broken["error"])
+        self.assertIn("def add(a, b):\n    return a + b", (app_dir / "calc.py").read_text(encoding="utf-8"))  # 真的没改
+
+    def test_tool(self):
+        toolbox = self.make_toolbox()
+        toolbox.lab = self.make()
+        notified = []
+        toolbox.lab_notify = notified.append
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+        out = toolbox.run(SimpleNamespace(id="c", name="code_lab", input={"action": "run", "title": "算利息",
+                                                                         "code": "print(round(10000 * 1.035 ** 3, 2))"}), lambda s: None)
+        self.assertIn("11087.18", out["content"])
+        self.assertNotIn("is_error", out)
+        self.assertEqual(notified[0]["title"], "算利息")
+        out = toolbox.run(SimpleNamespace(id="c", name="code_lab", input={"action": "self_test"}), lambda s: None)
+        self.assertTrue(out["is_error"])
+
 if __name__ == "__main__":
     unittest.main()

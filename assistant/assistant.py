@@ -2599,6 +2599,7 @@ def settings_state(session, meter=None) -> dict:
         "parcels": session.parcels.state() if getattr(session, "parcels", None) is not None else None,
         "planner": session.planner.state() if getattr(session, "planner", None) is not None else None,
         "energy": session.energy.state() if getattr(session, "energy", None) is not None else None,
+        "lab": ({"busy": session.lab.busy, "runs": session.lab.recent(10)} if getattr(session, "lab", None) is not None else None),
         "scenes": scenes_state(session),
         "cleanup": getattr(session, "cleanup_items", None) if os.name == "nt" or getattr(session, "cleanup_items", None) else None,
         "weekly_report": __import__("friday_alerts").weekly_enabled(),
@@ -2971,6 +2972,15 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
             save_env_value(env, key, "on" if on else "off")
             os.environ[key] = "on" if on else "off"
             done.append(on_text if on else off_text)
+    if payload.get("lab_open"):
+        lab = getattr(session, "lab", None)
+        if lab is None:
+            return {"error": "代码实验室现在用不了"}
+        if os.name != "nt":
+            return {"error": "只能在 Windows 上打开文件夹"}
+        lab.folder.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(lab.folder))  # noqa: S606
+        done.append("打开了代码实验室文件夹")
     if "electric_rate" in payload:
         try:
             value = round(float(payload["electric_rate"]), 3)
@@ -3927,6 +3937,29 @@ def start_subscriptions(session, toolbox: Toolbox, data_dir: str, interval: floa
         quick.extra.append(friday_subscriptions.Commands(subs, scan_soon))
     threading.Thread(target=loop, daemon=True, name="friday-subscriptions").start()
     return subs
+
+
+def start_lab(session, toolbox: Toolbox, data_dir: str):
+    """代码实验室:星期五自己写代码在隔离的文件夹里跑;自我测试在副本上跑全部测试。"""
+    import friday_lab
+    import friday_security
+
+    def done(record: dict) -> None:
+        text = friday_lab.Lab.describe(record)
+        if record["kind"] == "self_test":
+            announce(session, text, "🧪", text[:120])  # 要几分钟:跑完推到手机
+        else:
+            session.hub.broadcast({"type": "status", "text": "🧪 " + text.splitlines()[0]})
+        session.hub.broadcast({"type": "mailscan"})
+
+    lab = friday_lab.Lab(os.path.join(data_dir, "friday_lab"), is_secret=friday_security.is_secret_path, on_done=done)
+    session.lab = toolbox.lab = lab
+    toolbox.lab_notify = done
+    toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+    quick = getattr(session, "quick", None)
+    if quick is not None:
+        quick.extra.append(friday_lab.Commands(lab))
+    return lab
 
 
 def start_toolstats(session, toolbox: Toolbox, data_dir: str):
@@ -5885,6 +5918,7 @@ def run_web(args) -> None:
     _startup_step(session, "待办排进日历", lambda: start_planner(session, toolbox, data_dir))
     _startup_step(session, "家里用电统计", lambda: start_energy(session, toolbox, data_dir))
     _startup_step(session, "功能使用统计", lambda: start_toolstats(session, toolbox, data_dir))
+    _startup_step(session, "代码实验室", lambda: start_lab(session, toolbox, data_dir))
     toolbox.meter, toolbox.budget = session.meter, getattr(session, "budget", None)
     import friday_scenes
 

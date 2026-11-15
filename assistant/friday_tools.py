@@ -1052,6 +1052,33 @@ UNATTENDED_REFUSAL = (
 SERVER_TOOL_LABELS = {"web_search": ("搜索", "query"), "web_fetch": ("读取网页", "url")}
 
 
+CODE_LAB_TOOL = {
+    "name": "code_lab",
+    "description": (
+        "代码实验室(在老板的电脑上,但是隔离的):写 Python 代码在一个单独的文件夹里跑,马上拿到结果。"
+        "适合:精确计算(贷款、分期、汇率、统计)、整理老板给的 Excel / CSV(files 给完整路径,会先复制进实验室)、"
+        "画图(用 matplotlib 存成 png,会留在实验室文件夹)、转换格式、验证你写的小程序对不对。"
+        "限制:不能上网、不能开别的程序、只能读写实验室文件夹,最多跑 2 分钟;只有电脑上装了的库能用(没装的会报 ImportError,就换个写法)。"
+        "self_test:你想改星期五自己的程序时,用 edits [{file: 例如 friday_web.py, old: 原来的一段(要刚好出现一次), new: 改成}]"
+        " 在一份副本上改、跑全部测试,和没改的比;要几分钟,跑完会告诉老板,还会存一份报告。真正的星期五不会被改。"
+        "recent:最近跑过什么。跑完把结果用一两句话告诉老板;失败了说为什么、要不要再试。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["run", "self_test", "recent"]},
+            "title": {"type": "string", "description": "这次在做什么(几个字)"},
+            "code": {"type": "string", "description": "run 用:完整的 Python 代码,用 print 输出结果"},
+            "files": {"type": "array", "items": {"type": "string"}, "description": "run 用:要复制进实验室的老板文件(完整路径,最多 5 个)"},
+            "timeout": {"type": "integer", "description": "run 用:最多跑几秒(默认 60,最多 120)"},
+            "edits": {"type": "array", "items": {"type": "object", "properties": {
+                "file": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}},
+                "required": ["file", "new"]}, "description": "self_test 用"},
+        },
+        "required": ["action"],
+    },
+}
+
 HOME_ENERGY_TOOL = {
     "name": "home_energy",
     "description": (
@@ -1223,6 +1250,8 @@ class Toolbox:
         self.startup_doctor = None  # 开机变慢优化(friday_startup.StartupDoctor)
         self.energy_report = None  # 家里用电:(today / week / month) -> 话
         self.stats = None  # 功能使用统计(friday_toolstats.ToolStats)
+        self.lab = None  # 代码实验室(friday_lab.Lab)
+        self.lab_notify = None  # (结果) -> None:跑完告诉老板
         self.weather_fetch = None  # 测试时换成假的天气服务
         self._handlers = {
             "remember": self._remember,
@@ -1285,6 +1314,7 @@ class Toolbox:
             "subscriptions": self._subscriptions,
             "pc_startup": self._pc_startup,
             "home_energy": self._home_energy,
+            "code_lab": self._code_lab,
         }
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
 
@@ -1386,6 +1416,8 @@ class Toolbox:
             tools = tools + [PC_STARTUP_TOOL]
         if self.energy_report is not None:
             tools = tools + [HOME_ENERGY_TOOL]
+        if self.lab is not None and self.local_tools:
+            tools = tools + [CODE_LAB_TOOL]
         return tools
 
     def begin_turn(self) -> None:
@@ -2100,6 +2132,41 @@ class Toolbox:
             return str(e), True
         except Exception as e:
             return f"网站暂时打不开:{type(e).__name__}: {e}", True
+        return f"不支持的 action:{action}", True
+
+    def _code_lab(self, args, on_status):
+        import friday_lab
+
+        lab = self.lab
+        if lab is None:
+            return "代码实验室没有开", True
+        action = args.get("action")
+        if action == "run":
+            if lab.busy:
+                return f"实验室正在跑「{lab.busy}」,等一下再试", True
+            title = str(args.get("title") or "跑代码")
+            on_status(f"🧪 在代码实验室里跑:{title}")
+            lab.busy = title
+            try:
+                record = lab.run_code(str(args.get("code") or ""), title, args.get("files") or [],
+                                      int(args.get("timeout") or 60))
+            except (ValueError, OSError) as e:
+                return str(e), True
+            finally:
+                lab.busy = None
+            if self.lab_notify is not None:
+                self.lab_notify(record)
+            result = {"ok": record["ok"], "seconds": record["seconds"], "output": record["output"],
+                      "error": record["error"], "produced_files": record["produced"], "folder": record["folder"]}
+            return json.dumps(result, ensure_ascii=False), not record["ok"]
+        if action == "self_test":
+            edits = args.get("edits") or []
+            if not isinstance(edits, list) or not edits:
+                return "要给 edits:[{file, old, new}]", True
+            title = str(args.get("title") or "自我测试")
+            return lab.start(title, lambda: lab.self_test(edits, title)) + "(要几分钟,跑完我会告诉老板)", False
+        if action == "recent":
+            return lab.summary(), False
         return f"不支持的 action:{action}", True
 
     def _home_energy(self, args, on_status):
