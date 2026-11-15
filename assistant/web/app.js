@@ -377,7 +377,9 @@ function labCard(ev) {
     code.className = "lab-code";
     const summary = document.createElement("summary");
     const lines = (ev.code || "").split("\n").length;
-    summary.textContent = `代码(${lines} 行)` + (ev.files && ev.files.length ? ` · 用了 ${ev.files.join("、")}` : "");
+    summary.textContent = ev.kind === "self_test" ? `改了什么(${lines} 行;- 原来,+ 改成)`
+      : `代码(${lines} 行)` + (ev.files && ev.files.length ? ` · 用了 ${ev.files.join("、")}` : "");
+    if (ev.kind === "self_test") { title.textContent = `🧪 自我测试:${ev.title || ""}`; code.open = true; }
     const pre = document.createElement("pre");
     pre.textContent = ev.code || "";
     code.append(summary, pre);
@@ -404,7 +406,9 @@ function labCard(ev) {
   if (ev.phase !== "end") return;
   card.classList.remove("running");
   card.classList.add(ev.ok ? "ok" : "fail");
-  card.querySelector(".lab-state").textContent = ev.ok ? `✅ 成功 · ${ev.seconds} 秒` : `❌ 失败 · ${ev.seconds} 秒`;
+  card.querySelector(".lab-state").textContent = ev.kind === "self_test"
+    ? (ev.ok ? `✅ 通过 · ${ev.seconds} 秒` : `❌ 没通过 · ${ev.seconds} 秒`)
+    : (ev.ok ? `✅ 成功 · ${ev.seconds} 秒` : `❌ 失败 · ${ev.seconds} 秒`);
   if (!ev.ok && ev.error) {
     out.hidden = false;
     const err = document.createElement("span");
@@ -412,7 +416,12 @@ function labCard(ev) {
     err.textContent = (out.textContent ? "\n" : "") + ev.error.trim().split("\n").slice(-12).join("\n");
     out.append(err);
   }
-  if (!ev.ok) {
+  if (ev.summary) {
+    const note = document.createElement("div");
+    note.className = "lab-note" + (ev.ok ? " good" : "");
+    note.textContent = ev.summary + ((ev.failed || []).length ? "\n被改坏的测试:" + ev.failed.join("、") : "");
+    card.append(note);
+  } else if (!ev.ok) {
     const note = document.createElement("div");
     note.className = "lab-note";
     note.textContent = ev.installable ? `缺 ${ev.missing}:星期五会问你要不要装 ${ev.installable}`
@@ -427,7 +436,7 @@ function labCard(ev) {
     if (f.image) {
       const img = document.createElement("img");
       img.alt = f.name; img.loading = "lazy";
-      img.src = `/api/lab_file?run=${encodeURIComponent(ev.run)}&name=${encodeURIComponent(f.name)}&t=${encodeURIComponent(token)}`;
+      img.src = `/api/lab_file?run=${encodeURIComponent(f.run || ev.run)}&name=${encodeURIComponent(f.name)}&t=${encodeURIComponent(token)}`;
       img.onload = scrollDown;
       item.append(img);
     }
@@ -441,7 +450,7 @@ function labCard(ev) {
         const b = document.createElement("button");
         b.type = "button"; b.className = "mini-btn"; b.textContent = text;
         b.onclick = async () => {
-          const r = await api("/api/lab_file", { run: ev.run, name: f.name, how }).catch(() => ({ error: "星期五没有响应" }));
+          const r = await api("/api/lab_file", { run: f.run || ev.run, name: f.name, how }).catch(() => ({ error: "星期五没有响应" }));
           addLine(r.error ? "⚠ " + r.error : "🧪 " + r.message, r.error ? "error" : "");
         };
         row.append(b);

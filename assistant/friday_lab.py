@@ -279,7 +279,12 @@ class Lab:
     def produced_file(self, run_id: str, name: str) -> Path | None:
         """实验室跑出来的文件(只认记录里有的,不收路径)。"""
         run_id, name = str(run_id or ""), str(name or "")
-        if not RUN_ID.match(run_id) or not name or "/" in name or "\\" in name or name.startswith("."):
+        if not name or "/" in name or "\\" in name or name.startswith("."):
+            return None
+        if run_id == "reports":  # 自我测试的报告
+            path = self.folder / "reports" / name
+            return path if name.endswith("自我测试.txt") and path.is_file() else None
+        if not RUN_ID.match(run_id):
             return None
         with self.lock:
             known = any(r.get("kind") == "run" and Path(r.get("folder", "")).name == run_id and name in r.get("produced", [])
@@ -410,19 +415,46 @@ class Lab:
             result["error"] = "测试没跑起来(程序可能有语法错误)"
         return result
 
+    @staticmethod
+    def edits_text(edits: list[dict]) -> str:
+        """改了什么(给实验窗口看):每个文件 原来 -> 改成。"""
+        parts = []
+        for edit in edits or []:
+            old, new = str(edit.get("old") or ""), str(edit.get("new") or "")
+            lines = [f"### {edit.get('file')}" + ("(新文件)" if not old else "")]
+            lines += ["- " + line for line in old.splitlines()] if old else []
+            lines += ["+ " + line for line in new.splitlines()]
+            parts.append("\n".join(lines))
+        return "\n\n".join(parts)
+
     def self_test(self, edits: list[dict], title: str = "") -> dict:
         """改一份副本、跑全部测试,和没改的比。很慢(几分钟),在后台跑。"""
+        title = str(title or "自我测试")[:60]
+        run_id = "st-" + self.clock().strftime("%Y%m%d-%H%M%S")
+        started = time.monotonic()
+        self._emit({"phase": "start", "run": run_id, "kind": "self_test", "title": title, "attempt": 1,
+                    "max": MAX_ATTEMPTS, "code": self.edits_text(edits)[:20000], "files": []})
+
+        def step(text: str) -> None:
+            self._emit({"phase": "out", "run": run_id, "text": f"[{round(time.monotonic() - started)} 秒] {text}\n"})
+
         version = self._version()
         if self.baseline is None or self.baseline.get("version") != version:
+            step("① 复制一份没改过的星期五,跑全部测试当对照(第一次要几分钟)…")
             base_root = self.folder / "selftest" / "base"
             self._copy_app(base_root)
             self.baseline = {**self._run_tests(base_root), "version": version}
+            step(f"   对照组:跑了 {self.baseline.get('ran', 0)} 个测试,本来就过不了 {len(self.baseline.get('failed') or [])} 个(这台电脑的环境)")
+        else:
+            step("① 对照组用上次的结果(程序没变过)")
         root = self.folder / "selftest" / "changed"
         self._copy_app(root)
         try:
             changed = self.apply_edits(root, edits)
+            step(f"② 在副本上改了:{'、'.join(changed)};③ 跑全部测试…")
             after = self._run_tests(root)
         except ValueError as e:
+            step(f"② 改不进去:{e}")
             changed, after = [], {"ran": 0, "failed": [], "error": str(e), "output": ""}
         before_failed = set(self.baseline.get("failed") or [])
         new_failures = [t for t in after.get("failed", []) if t not in before_failed]
@@ -433,12 +465,25 @@ class Lab:
                   "new_failures": new_failures[:30], "fixed": fixed[:30], "changed": changed,
                   "error": after.get("error", ""), "output": after.get("output", "")}
         record["report"] = self._write_report(record, edits)
+        if after.get("ran"):
+            step(f"   改过的:跑了 {after['ran']} 个测试,用了 {after.get('seconds', 0)} 秒")
+        self._emit({"phase": "end", "run": run_id, "kind": "self_test", "ok": ok,
+                    "seconds": round(time.monotonic() - started, 1), "error": "", "attempt": 1, "max": MAX_ATTEMPTS,
+                    "summary": self.describe(record).split("。报告存在")[0] + "。真正的星期五没有被改。",
+                    "failed": new_failures[:10],
+                    "produced": [{"name": Path(record["report"]).name, "image": False, "openable": True,
+                                  "run": "reports"}]})
         return self._record(record)
 
     def _write_report(self, record: dict, edits: list[dict]) -> str:
         folder = self.folder / "reports"
         folder.mkdir(parents=True, exist_ok=True)
-        path = folder / f"{self.clock():%Y%m%d-%H%M%S} 自我测试.txt"
+        stamp = f"{self.clock():%Y%m%d-%H%M%S}"
+        path = folder / f"{stamp} 自我测试.txt"
+        n = 1
+        while path.exists():  # 同一秒两份:不要盖掉
+            n += 1
+            path = folder / f"{stamp}-{n} 自我测试.txt"
         lines = [f"星期五自我测试报告:{record['title']}", f"时间:{record['time']}", "",
                  f"结果:{'✅ 通过' if record['ok'] else '❌ 没通过'}",
                  f"跑了 {record['ran']} 个测试;没改之前本来就有 {record['baseline_failed']} 个过不了(这台电脑的环境)。"]

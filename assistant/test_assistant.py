@@ -13161,8 +13161,24 @@ class CodeLabTest(TempDirTest):
             "    def test_env_not_copied(self):\n        import os\n        self.assertFalse(os.path.exists('.env'))\n",
             encoding="utf-8")
         lab = self.make(app_dir=app_dir)
+        events = []
+        lab.on_event = events.append
         good = lab.self_test([{"file": "calc.py", "old": "return a + b", "new": "return b + a"}], "换个写法")
         self.assertTrue(good["ok"], good)
+        self.assertEqual(events[0]["kind"], "self_test")
+        self.assertIn("- return a + b\n+ return b + a", events[0]["code"])
+        steps = "".join(e["text"] for e in events if e["phase"] == "out")
+        self.assertIn("对照", steps)
+        self.assertIn("在副本上改了:calc.py", steps)
+        end = events[-1]
+        self.assertTrue(end["ok"])
+        self.assertIn("真正的星期五没有被改", end["summary"])
+        report = end["produced"][0]
+        self.assertEqual(lab.produced_file(report["run"], report["name"]), Path(good["report"]))
+        self.assertIsNone(lab.produced_file("reports", "../history.json"))
+        events.clear()
+        lab.self_test([{"file": "calc.py", "old": "return a + b", "new": "return a * b"}], "再改")
+        self.assertIn("对照组用上次的结果", "".join(e.get("text", "") for e in events))
         self.assertEqual(good["ran"], 2)
         self.assertIn("✅ 通过", Path(good["report"]).read_text(encoding="utf-8"))
         bad = lab.self_test([{"file": "calc.py", "old": "return a + b", "new": "return a - b"}], "改坏")
