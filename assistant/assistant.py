@@ -1310,6 +1310,59 @@ SPEAK_CHOICES = (800, 1500, 2000, 3000, 5000, 0)  # 0:不限
 UNLIMITED = 10 ** 9
 
 
+def call_quiet_state(session) -> dict | None:
+    import friday_callguard
+
+    guard = getattr(session, "callguard", None)
+    if guard is None:
+        return None
+    return {"auto": friday_callguard.auto_enabled(), "mode": friday_callguard.speak_mode(),
+            "now": guard.quiet_reason(), "windows": os.name == "nt"}
+
+
+def start_call_guard(session, ctx=None, interval: float = 2.0):
+    """通话中不出声:有别的程序在用麦克风(或你说了在打电话)就不读回答;正在读也马上停。"""
+    import friday_callguard
+
+    def listening() -> bool:  # 窗口自己正在用(或刚刚用完)麦克风:浏览器在用麦克风是星期五自己
+        if ctx is None:
+            return False
+        activity = ctx.activity
+        return bool(activity.get("mic") or activity.get("listening")) or \
+            time.monotonic() - activity.get("mic_at", -100.0) < 8
+    guard = friday_callguard.CallGuard(friday_listening=listening)
+    session.callguard = guard
+    if ctx is not None:
+        ctx.quiet = lambda: bool(guard.quiet_reason())
+
+    def changed(quiet: bool) -> None:
+        if quiet:
+            stop_now()
+
+    def stop_now() -> None:
+        stream = session._stream
+        if stream is not None and session.still_speaking():
+            stream.cancel("在通话")
+            session.hub.broadcast({"type": "stop_audio"})
+
+    quick = getattr(session, "quick", None)
+    if quick is not None:
+        quick.extra.insert(1, friday_callguard.Commands(guard, changed))
+
+    def loop() -> None:  # 读到一半开始通话:马上停
+        while True:
+            time.sleep(interval)
+            try:
+                if session.still_speaking() and session.quiet_now():
+                    stop_now()
+            except Exception:
+                pass
+
+    if os.name == "nt":
+        threading.Thread(target=loop, daemon=True, name="friday-callguard").start()
+    return guard
+
+
 def speak_max_chars() -> int:
     """一次回答最多读几个字(齿轮设定 → 声音);超过的问要不要接着读。不限:全部读完。"""
     try:
@@ -1421,6 +1474,8 @@ class WebSession:
 
     def _answer(self, text: str, source: str, speak: bool, prefix: str, blocks: list) -> str | None:
         hub = self.hub
+        if speak and source == "web" and __import__("friday_callguard").speak_mode() == "voice":
+            speak = False  # 设定:打字问的只显示文字
         interpreter = getattr(self, "interpreter", None)
         if interpreter is not None and interpreter.active and source in ("web", "voice") and not blocks and not prefix:
             return self._interpret(text, source)
@@ -1597,6 +1652,22 @@ class WebSession:
             stream.feed(text)
             stream.finish()
 
+    callguard = None  # 通话中不出声(friday_callguard.CallGuard)
+    _quiet_said = (0.0, "")
+
+    def quiet_now(self) -> bool:
+        """在通话(或你说了在打电话):不出声。第一次 / 原因变了时在窗口说一声。"""
+        guard = self.callguard
+        if guard is None:
+            return False
+        reason = guard.quiet_reason()
+        if reason and (reason != self._quiet_said[1] or time.time() - self._quiet_said[0] > 600):
+            self._quiet_said = (time.time(), reason)
+            self.hub.broadcast({"type": "status", "text": f"📞 {reason}:先不读出来,只显示文字"})
+        if not reason:
+            self._quiet_said = (0.0, "")
+        return bool(reason)
+
     def still_speaking(self) -> bool:
         """回答还在合成,或者窗口应该还在播(按合成出来的声音长度估算)。"""
         stream = self._stream
@@ -1706,6 +1777,8 @@ class WebSession:
             self._stream.cancel()
             self._stream = None
         if self.synthesize is None or self.hub_audio is None:
+            return None
+        if self.quiet_now():  # 在通话:只显示文字,不读出来
             return None
         synthesize = self.synthesize
         if voice:
@@ -2637,6 +2710,7 @@ def settings_state(session, meter=None) -> dict:
         "call_me": os.environ.get("FRIDAY_CALL_ME") or getattr(session, "call_me", "") or DEFAULT_CALL_ME,
         "voice": voice_key,
         "voices": voices,
+        "call_quiet": call_quiet_state(session),
         "speak_max": int(os.environ.get("FRIDAY_SPEAK_MAX", "2000")) if os.environ.get("FRIDAY_SPEAK_MAX", "2000").isdigit() else 2000,
         "speech_rate": __import__("friday_reader").speech_rate(),
         "speech_rates": list(__import__("friday_reader").RATES),
@@ -2732,6 +2806,20 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
             return {"error": "选项不对"}
         session.env_file = getattr(session, "env_file", None) or env
         done.append(session.set_speech_rate(rate=rate))
+    if "call_quiet" in payload:
+        on = bool(payload["call_quiet"])
+        save_env_value(env, "FRIDAY_CALL_QUIET", "on" if on else "off")
+        os.environ["FRIDAY_CALL_QUIET"] = "on" if on else "off"
+        done.append("在通话(有别的程序用麦克风)时不读出来" if on else "通话中也照样读出来")
+    if "speak_when" in payload:
+        import friday_callguard
+
+        mode = str(payload["speak_when"])
+        if mode not in friday_callguard.SPEAK_MODES:
+            return {"error": "选项不对"}
+        save_env_value(env, "FRIDAY_SPEAK_WHEN", mode)
+        os.environ["FRIDAY_SPEAK_WHEN"] = mode
+        done.append("只有用说的问才读回答,打字问的只显示文字" if mode == "voice" else "打字问的回答也读出来")
     if "speak_max" in payload:
         try:
             value = int(payload["speak_max"])
@@ -6219,6 +6307,7 @@ def run_web(args) -> None:
     toolbox.scenes = session.quick.scenes = friday_scenes.Scenes(os.path.join(data_dir, "friday_scenes.json"))
     session.quick.on_say = lambda text: session.speak(text, interrupt=True) if session.speak_enabled else None
     session.quick.extra.insert(0, SpeechControls(session))
+    _startup_step(session, "通话中不出声", lambda: start_call_guard(session, ctx))
     session.quick.extra.append(SnipCommands(session))
     if getattr(session, "departure", None) is not None and \
             not any(isinstance(h, DepartureCommands) for h in session.quick.extra):

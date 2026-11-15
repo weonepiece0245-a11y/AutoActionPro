@@ -186,6 +186,7 @@ $("miniBtn").onclick = () => {
   else openMini();
 };
 let lastActivity = "";
+let bargeStream = null;  // 读回答时等你开口打断用的麦克风
 // 桌面小光球开着时,把声音大小告诉星期五(大约每秒 8 次),小光球跟着跳
 let levelSentAt = 0, levelSent = -1;
 function sendLevel(level) {
@@ -198,7 +199,8 @@ function sendLevel(level) {
 function refreshMode() {
   // 告诉星期五窗口正在录音/朗读,唤醒功能这时暂停,免得听到自己的声音
   const accent = getComputedStyle(document.body).getPropertyValue("--cyan").trim();  // 桌面小光球跟着主题变色
-  const activity = JSON.stringify({ listening: !!recorder, speaking: !!speaking, accent });
+  // mic:窗口自己在用麦克风(录音或等你开口打断)——不要当成你在通话
+  const activity = JSON.stringify({ listening: !!recorder, speaking: !!speaking, mic: !!(recorder || bargeStream), accent });
   if (activity !== lastActivity) {
     lastActivity = activity;
     api("/api/activity", JSON.parse(activity)).catch(() => {});
@@ -1024,6 +1026,16 @@ function fillSettings() {
   if (!s) return;
   $("setCallMe").value = s.call_me || "";
   if (s.speak_max !== undefined) $("setSpeakMax").value = String(s.speak_max);
+  const cq = s.call_quiet;
+  $("callQuietRow").hidden = !cq || !cq.windows;
+  $("speakWhenRow").hidden = !cq;
+  $("callQuietNote").hidden = !cq;
+  if (cq) {
+    $("setCallQuiet").checked = cq.auto;
+    $("setSpeakWhen").value = cq.mode;
+    $("callQuietNote").textContent = (cq.now ? `📞 现在不出声:${cq.now}。` : "")
+      + "用手机打电话时电脑测不到:跟星期五说“我在打电话”,打完说“打完了”。";
+  }
   if (s.speech_rate) {
     speechRate = s.speech_rate;
     if (!$("setSpeechRate").options.length) for (const r of s.speech_rates || []) $("setSpeechRate").append(new Option(r === 1 ? "正常" : `${r} 倍`, String(r)));
@@ -1806,6 +1818,8 @@ $("saveCallMe").onclick = () => saveSetting({ call_me: $("setCallMe").value.trim
 $("setCallMe").onkeydown = (e) => { if (e.key === "Enter") $("saveCallMe").click(); };
 $("setVoice").onchange = (e) => saveSetting({ voice: e.target.value });
 $("setSpeakMax").onchange = (e) => saveSetting({ speak_max: e.target.value });
+$("setCallQuiet").onchange = (e) => saveSetting({ call_quiet: e.target.checked });
+$("setSpeakWhen").onchange = (e) => saveSetting({ speak_when: e.target.value });
 $("setSpeechRate").onchange = (e) => saveSetting({ speech_rate: e.target.value });
 $("previewVoice").onclick = async () => {
   ensureAudio();
@@ -2502,7 +2516,6 @@ $("micBtn").onclick = () => (recorder ? recorder.stop() : listen());
 
 // ---------- 说话打断她:她在说话时你一开口,她就停下来听你说 ----------
 let bargeOn = loadPrefs("friday-barge", true);
-let bargeStream = null;
 async function startBargeWatch() {
   if (!bargeOn || bargeStream || recorder || !audioCtx) return;
   let stream;
@@ -2511,6 +2524,7 @@ async function startBargeWatch() {
   } catch { return; }
   if (!speaking || recorder || bargeStream) { stream.getTracks().forEach((t) => t.stop()); return; }
   bargeStream = stream;
+  refreshMode();
   const an = audioCtx.createAnalyser();
   an.fftSize = 1024;
   audioCtx.createMediaStreamSource(stream).connect(an);
@@ -2527,6 +2541,7 @@ async function startBargeWatch() {
       if (++loud >= BARGE_FRAMES) {  // 大约 0.2 秒都比她的声音大:是你在说话
         clearInterval(timer);
         bargeStream = null;
+        refreshMode();
         pauseSpeaking();
         listen({ stream, spoke: true });
       }
@@ -2538,7 +2553,7 @@ async function startBargeWatch() {
 // 门槛:开了回声消除和降噪后,正常说话的音量常常只有 0.03~0.1
 const BARGE_MIN = 0.025, BARGE_RATIO = 1.8, BARGE_FRAMES = 6;
 function stopBargeWatch() {
-  if (bargeStream) { bargeStream.getTracks().forEach((t) => t.stop()); bargeStream = null; }
+  if (bargeStream) { bargeStream.getTracks().forEach((t) => t.stop()); bargeStream = null; refreshMode(); }
 }
 
 // ---------- 点光球:开始说话(再点一下结束) ----------

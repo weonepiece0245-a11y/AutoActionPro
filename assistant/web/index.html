@@ -211,6 +211,10 @@
       <div class="set-row"><label for="setFollowUp">连续对话(用语音问时,她说完自动再听几秒)</label><input type="checkbox" class="switch" id="setFollowUp"></div>
       <div class="set-row"><label for="setVoice">朗读声音</label>
         <span class="set-ctl"><select class="mini-select" id="setVoice"></select><button type="button" class="mini-btn" id="previewVoice">试听</button></span></div>
+      <div class="set-row" id="callQuietRow" hidden><label for="setCallQuiet">通话中不出声:有别的程序在用麦克风(WhatsApp、Teams、Zoom、Discord、Meet……)时,回答只显示文字</label><input type="checkbox" class="switch" id="setCallQuiet"></div>
+      <div class="set-row" id="speakWhenRow" hidden><label for="setSpeakWhen">什么时候读回答</label>
+        <select class="mini-select" id="setSpeakWhen"><option value="always">打字、说话问的都读</option><option value="voice">只有用说的问才读</option></select></div>
+      <div class="set-note" id="callQuietNote">用手机打电话时电脑测不到:跟星期五说“我在打电话”,打完说“打完了”。</div>
       <div class="set-row"><label for="setSpeakMax">一次最多读多少字(超过的会问你要不要接着读)</label>
         <select class="mini-select" id="setSpeakMax"><option value="800">800 字</option><option value="1500">1500 字</option><option value="2000">2000 字</option><option value="3000">3000 字</option><option value="5000">5000 字</option><option value="0">不限(全部读完)</option></select></div>
       <div class="set-row"><label for="setSpeechRate">朗读速度(回答和“读给我听”一样;也可以说“读快一点”“读慢一点”“正常速度”)</label>

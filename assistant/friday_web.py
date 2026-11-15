@@ -374,6 +374,7 @@ class WebContext:
         self.history: Callable[[str, str], dict] | None = None  # 聊天记录(关键词, 日期)
         self.subtitle_state: Callable[[], dict] | None = None  # 游戏字幕小程序来拿现在要显示的字
         self.spotify_callback: Callable[[dict], str] | None = None  # Spotify 登录跳回来
+        self.quiet: Callable[[], bool] | None = None  # 在通话:不出声
         self.lab = None  # 代码实验室(friday_lab.Lab):跑出来的图、文件
         self.photos = None  # 照片按时间地点找(friday_photofind.PhotoIndex):缩图、打开
 
@@ -678,9 +679,11 @@ def make_handler(ctx: WebContext):
                 return self._json(202, {"ok": True})
             if url.path == "/api/activity":
                 if isinstance(data, dict):
-                    for key in ("listening", "speaking"):
+                    for key in ("listening", "speaking", "mic"):
                         if key in data:
                             ctx.activity[key] = bool(data[key])
+                    if "mic" in data or "listening" in data:  # 窗口最后一次用麦克风的时间(通话侦测要排除自己)
+                        ctx.activity["mic_at"] = time.monotonic()
                     if isinstance(data.get("accent"), str) and len(data["accent"]) <= 40:
                         ctx.activity["accent"] = data["accent"]  # 主题颜色(桌面小光球跟着变)
                     if isinstance(data.get("level"), (int, float)):
@@ -701,6 +704,8 @@ def make_handler(ctx: WebContext):
                 return self._json(200, ctx.reader.serve(data, ctx.synthesize, ctx.audio))
             if url.path == "/api/speak":
                 text = str(data.get("text") or "").strip()
+                if ctx.quiet is not None and ctx.quiet():
+                    return self._json(200, {"url": None, "quiet": True})  # 在通话:不出声
                 audio = ctx.synthesize(text) if (ctx.synthesize and text) else None
                 return self._json(200, {"url": f"/audio/{ctx.audio.put(audio)}.mp3" if audio else None})
             if url.path == "/api/shutdown":

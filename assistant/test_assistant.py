@@ -13707,5 +13707,84 @@ class PhotoFindTest(TempDirTest):
             server.shutdown()
             server.server_close()
 
+
+class CallGuardTest(unittest.TestCase):
+    def guard(self, users, listening=False):
+        import friday_callguard
+
+        clock = [1000.0]
+        g = friday_callguard.CallGuard(mic_users=lambda: list(users), friday_listening=lambda: listening,
+                                       clock=lambda: clock[0])
+        return g, clock
+
+    def test_detects_call_apps_but_not_friday_itself(self):
+        import friday_callguard
+
+        self.assertEqual(friday_callguard._app_name("C:#Program Files#WindowsApps#WhatsApp.exe"), "whatsapp")
+        self.assertEqual(friday_callguard._app_name("MSTeams_8wekyb3d8bbwe"), "msteams")
+        g, _ = self.guard(["C:#Users#me#AppData#Local#Programs#Python#Python314#python.exe"])
+        self.assertEqual(g.quiet_reason(), "")  # 星期五自己(唤醒词)
+        g, _ = self.guard(["C:#Program Files#Google#Chrome#Application#chrome.exe"], listening=True)
+        self.assertEqual(g.quiet_reason(), "")  # 星期五的窗口自己在听
+        g, _ = self.guard(["C:#Program Files#Google#Chrome#Application#chrome.exe"])
+        self.assertIn("Chrome", g.quiet_reason())  # 浏览器里开 Meet
+        g, _ = self.guard(["5319275A.WhatsAppDesktop_cv1g1gvanyjgm"])
+        self.assertIn("WhatsApp", g.quiet_reason())
+        with mock.patch.dict(os.environ, {"FRIDAY_CALL_QUIET": "off"}):
+            self.assertEqual(g.quiet_reason(), "")
+
+    def test_manual_phrases_and_auto_expire(self):
+        import friday_callguard
+
+        g, clock = self.guard([])
+        changes = []
+        cmd = friday_callguard.Commands(g, changes.append)
+        self.assertIn("先不出声", cmd.handle("我在打电话"))
+        self.assertTrue(g.quiet_reason())
+        self.assertIsNone(cmd.handle("打电话给妈妈要说什么"))
+        self.assertIn("可以说话", cmd.handle("打完了"))
+        self.assertEqual(g.quiet_reason(), "")
+        cmd.handle("开会中,先别出声")
+        clock[0] += friday_callguard.MANUAL_MAX + 1
+        self.assertEqual(g.quiet_reason(), "")  # 最多 2 小时
+        self.assertEqual(changes, [True, False, True])
+
+    def test_session_stays_silent_in_call(self):
+        import friday_callguard
+
+        hub = friday_web.Hub()
+        client, _ = hub.subscribe()
+        session = app.WebSession(None, app.default_persona(), hub, synthesize=lambda text: b"mp3")
+        session.hub_audio = friday_web.AudioStore()
+        g, _ = self.guard([])
+        session.callguard = g
+        self.assertIsNotNone(session._new_stream())
+        g.start_manual()
+        self.assertIsNone(session._new_stream())
+        self.assertIsNone(session._new_stream())
+        events = [e for e in iter(lambda: None if client.empty() else client.get_nowait(), None)]
+        notes = [e["text"] for e in events if e["type"] == "status" and "📞" in e["text"]]
+        self.assertEqual(len(notes), 1)  # 只说一次
+        g.stop_manual()
+        self.assertIsNotNone(session._new_stream())
+
+    def test_typed_questions_not_read_when_voice_only(self):
+        hub = friday_web.Hub()
+        session = app.WebSession(None, app.default_persona(), hub, synthesize=lambda text: b"mp3")
+        session.hub_audio = friday_web.AudioStore()
+        made = []
+        real = session._new_stream
+        session._new_stream = lambda *a, **k: made.append(1) or real(*a, **k)
+        session.quick = SimpleNamespace(handle=lambda text: "现在三点", extra=[], silent=False)
+        session._quick_reply = lambda text: "现在三点"
+        with mock.patch.dict(os.environ, {"FRIDAY_SPEAK_WHEN": "voice"}):
+            session._answer("几点了", "web", True, "", [])
+            self.assertEqual(made, [])
+            session._answer("几点了", "voice", True, "", [])
+            self.assertEqual(made, [1])
+        with mock.patch.dict(os.environ, {"FRIDAY_SPEAK_WHEN": "always"}):
+            session._answer("几点了", "web", True, "", [])
+            self.assertEqual(made, [1, 1])
+
 if __name__ == "__main__":
     unittest.main()
