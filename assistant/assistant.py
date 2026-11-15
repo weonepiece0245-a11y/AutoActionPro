@@ -1152,6 +1152,29 @@ def merge_cloud_changes(changes: dict, toolbox: Toolbox, assistant: Assistant | 
     return summary + ",已经同步回来了"
 
 
+CONTINUE_READING = re.compile(r"^(星期五)?[,，\s]*(要|好|好的|可以|继续|接着读|继续读|读下去|继续念|接着念|读完|要的|嗯|对)(吧|啊|呀)?[。!！]?$")
+SPEAK_CHOICES = (800, 1500, 2000, 3000, 5000)
+
+
+def speak_max_chars() -> int:
+    """一次回答最多读几个字(齿轮设定 → 声音);超过的问要不要接着读。"""
+    try:
+        value = int(os.environ.get("FRIDAY_SPEAK_MAX", "2000"))
+    except ValueError:
+        return 2000
+    return value if value in SPEAK_CHOICES else 2000
+
+
+def voice_clean(text: str) -> str:
+    """真的会读出来的字(去掉“- ”“1. ”“**”这些符号)。"""
+    try:
+        import voice as voice_module
+
+        return voice_module.clean_for_speech(text)
+    except Exception:
+        return text
+
+
 class WebSession:
     """图形界面模式:把回答、状态、语音推给窗口。在主线程里使用。"""
 
@@ -1163,6 +1186,8 @@ class WebSession:
         self.synthesize = synthesize
         self.startup_error = startup_error
         self.speak_enabled = True  # 跟着界面上“朗读回答”开关走
+        self._speak_later: list[str] = []  # 正在读回答时来的通知:读完再说
+        self._speak_lock = threading.Lock()
 
     busy = False  # 正在回答(主动关心这时不插嘴)
 
@@ -1236,6 +1261,12 @@ class WebSession:
         interpreter = getattr(self, "interpreter", None)
         if interpreter is not None and interpreter.active and source in ("web", "voice") and not blocks and not prefix:
             return self._interpret(text, source)
+        if self._leftover and source in ("web", "voice", "ptt") and CONTINUE_READING.match(text.strip()):
+            hub.broadcast({"type": "status", "text": "🔊 接着读"})
+            if self.speak_leftover():
+                return "好,接着读。"
+        if source != "task":
+            self._leftover = ""  # 问了别的:不接着读了
         quick = self._quick_reply(text) if source != "task" and not prefix and not blocks else None
         if quick:
             hub.broadcast({"type": "status", "text": "⚡ 电脑上直接办好了,没有问 Claude(不花钱)"})
@@ -1363,11 +1394,54 @@ class WebSession:
         except Exception:
             return None
 
-    def speak(self, text: str) -> None:
+    def speak(self, text: str, interrupt: bool = False) -> None:
+        """读一句话(提醒、通知……)。正在读回答时先排队,等读完再说,不会把回答切掉;interrupt:马上读。"""
+        if not interrupt and self.still_speaking():
+            with self._speak_lock:
+                self._speak_later.append(text)
+                start = not self._speak_waiting
+                self._speak_waiting = True
+            if start:
+                threading.Thread(target=self._speak_when_quiet, daemon=True, name="friday-speak-later").start()
+            return
         stream = self._new_stream()
         if stream is not None:
             stream.feed(text)
             stream.finish()
+
+    def still_speaking(self) -> bool:
+        """回答还在合成,或者窗口应该还在播(按合成出来的声音长度估算)。"""
+        stream = self._stream
+        if stream is None or stream.cancelled:
+            return False
+        return not stream.done or time.time() < self._speech_until
+
+    def _speak_when_quiet(self) -> None:
+        waited = 0.0
+        while self.still_speaking() and waited < 600:
+            time.sleep(0.5)
+            waited += 0.5
+        time.sleep(0.8)  # 读完停一下再说下一句
+        with self._speak_lock:
+            texts, self._speak_later = self._speak_later, []
+            self._speak_waiting = False
+        if texts:
+            self.speak("\n".join(texts), interrupt=True)
+
+    def speak_leftover(self) -> bool:
+        """“接着读”:把上次超过字数上限没读的部分读出来。"""
+        rest, self._leftover = self._leftover, ""
+        if not rest.strip():
+            return False
+        stream = self._new_stream()
+        if stream is not None:
+            stream.feed(rest)
+            stream.finish()
+        return True
+
+    _speech_until = 0.0
+    _leftover = ""
+    _speak_waiting = False
 
     def _new_stream(self, voice: str | None = None):
         """每次回答一个新的朗读流;上一次还没读完的就不读了。voice:换一个声音读(口译时读外语)。"""
@@ -1386,11 +1460,22 @@ class WebSession:
         turn = self._turn
 
         def publish(audio: bytes) -> None:
+            # 窗口按顺序播:估一下这段要播多久(Edge 语音是 48kbps 的 MP3,一秒大约 6000 字节)
+            self._speech_until = max(self._speech_until, time.time()) + len(audio) / 6000
             self.hub.broadcast({"type": "audio", "url": f"/audio/{self.hub_audio.put(audio)}.mp3", "turn": turn})
 
+        def ended() -> None:
+            stream = self._stream
+            if stream is not None and stream.leftover.strip():
+                self._leftover = stream.leftover
+            self.hub.broadcast({"type": "audio_end", "turn": turn})
+
+        self._speech_until = time.time()
+        self._leftover = ""
         self._stream = friday_web.SpeechStream(
-            synthesize, publish,
-            on_end=lambda: self.hub.broadcast({"type": "audio_end", "turn": turn}))
+            synthesize, publish, max_chars=speak_max_chars(), on_end=ended,
+            measure=lambda text: len(voice_clean(text)),
+            log=lambda text: print(text, flush=True))
         return self._stream
 
     _stream = None
@@ -2289,6 +2374,7 @@ def settings_state(session, meter=None) -> dict:
         "call_me": os.environ.get("FRIDAY_CALL_ME") or getattr(session, "call_me", "") or DEFAULT_CALL_ME,
         "voice": voice_key,
         "voices": voices,
+        "speak_max": speak_max_chars(),
         "rate": meter.rate if meter is not None else None,
         "autostart": friday_app.autostart_enabled(),
         "google": session.google_account.status() if getattr(session, "google_account", None) else None,
@@ -2367,6 +2453,16 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         if ctx is not None:
             ctx.greeting = persona.greeting
         done.append(f"称呼改成“{name}”,点 ↺ 开新话题后生效")
+    if "speak_max" in payload:
+        try:
+            value = int(payload["speak_max"])
+        except (TypeError, ValueError):
+            return {"error": "选项不对"}
+        if value not in SPEAK_CHOICES:
+            return {"error": "选项不对"}
+        save_env_value(env, "FRIDAY_SPEAK_MAX", str(value))
+        os.environ["FRIDAY_SPEAK_MAX"] = str(value)
+        done.append(f"一次最多读 {value} 字,超过的会问你要不要接着读")
     if "voice" in payload:
         key = str(payload["voice"]).strip().lower()
         if key not in voice_module.EDGE_VOICES:
@@ -5576,7 +5672,7 @@ def run_web(args) -> None:
     import friday_scenes
 
     toolbox.scenes = session.quick.scenes = friday_scenes.Scenes(os.path.join(data_dir, "friday_scenes.json"))
-    session.quick.on_say = lambda text: session.speak(text) if session.speak_enabled else None
+    session.quick.on_say = lambda text: session.speak(text, interrupt=True) if session.speak_enabled else None
     if getattr(session, "care", None) is not None:  # 电脑使用时间(只在 Windows 上有)
         import friday_screentime
 

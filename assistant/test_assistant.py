@@ -12640,5 +12640,111 @@ class EnergyTest(TempDirTest):
             self.assertEqual(backend.energy("1.2.3.4"), {"power": 12.5, "today": 0.8, "month": 9.1, "on": True})
             self.assertTrue(backend._info("1.2.3.4", Dev())["energy"])
 
+
+
+class LongSpeechTest(TempDirTest):
+    def wait(self, stream):
+        for _ in range(300):
+            if stream.done:
+                return
+            time.sleep(0.01)
+        self.fail("朗读没结束")
+
+    def test_reads_2000_chars_and_counts_spoken_text(self):
+        said = []
+        stream = friday_web.SpeechStream(lambda text: said.append(text) or b"mp3", lambda audio: None, max_chars=2000,
+                                         measure=lambda t: len(voice.clean_for_speech(t)))
+        sentence = "- 这是一句测试的话,一共有二十个字左右。\n"
+        for _ in range(80):  # 大约 1600 个会读出来的字(加上符号快 1800)
+            stream.feed(sentence)
+        stream.finish()
+        self.wait(stream)
+        joined = "".join(said)
+        self.assertEqual(joined.count("这是一句测试的话"), 80)  # 全部读完,没有中途停
+        self.assertNotIn("接着读", joined)
+        self.assertEqual(stream.leftover, "")
+
+    def test_over_limit_asks_and_keeps_rest(self):
+        said, logs = [], []
+        stream = friday_web.SpeechStream(lambda text: said.append(text) or b"mp3", lambda audio: None, max_chars=100,
+                                         log=logs.append)
+        for i in range(20):
+            stream.feed(f"第{i}句话说了一些东西。")
+        stream.finish()
+        self.wait(stream)
+        joined = "".join(said)
+        self.assertTrue(joined.endswith("后面还有,要我接着读吗?"))
+        self.assertIn("第19句话", stream.leftover)  # 没读的部分留着
+        self.assertNotIn("第0句话", stream.leftover)
+        self.assertTrue(any("上限 100 字" in line for line in logs))
+
+    def test_logs_failures_and_cancel(self):
+        logs = []
+        stream = friday_web.SpeechStream(lambda text: None, lambda audio: None, log=logs.append)
+        stream.feed("第一句。")
+        stream.finish()
+        self.wait(stream)
+        self.assertTrue(any("合成失败" in line for line in logs))
+        logs.clear()
+        gate = threading.Event()
+        slow = friday_web.SpeechStream(lambda text: gate.wait(1) and b"x", lambda audio: None, log=logs.append)
+        slow.feed("一。二。三。")
+        slow.cancel("开始了新的问题")
+        gate.set()
+        self.assertTrue(any("朗读停止:开始了新的问题" in line for line in logs))
+
+    def make_session(self):
+        hub = friday_web.Hub()
+        events = []
+        hub.broadcast = lambda event: events.append(event)
+        session = app.WebSession(None, app.default_persona(), hub, synthesize=lambda text, voice=None: b"x" * 6000)
+        session.hub_audio = SimpleNamespace(put=lambda audio: "a1")
+        return session, events
+
+    def test_notification_waits_for_answer(self):
+        session, events = self.make_session()
+        stream = session._new_stream()
+        stream.feed("这是一个很长的回答。")
+        stream.finish()
+        self.wait(stream)
+        session._speech_until = time.time() + 1.2  # 窗口还在播
+        self.assertTrue(session.still_speaking())
+        session.speak("提醒你:喝水")
+        self.assertIs(session._stream, stream)  # 没有切掉回答
+        self.assertEqual(session._speak_later, ["提醒你:喝水"])
+        for _ in range(400):
+            if session._stream is not stream:
+                break
+            time.sleep(0.01)
+        self.assertIsNot(session._stream, stream)  # 回答播完后才读提醒
+        self.assertEqual(session._speak_later, [])
+
+    def test_continue_reading(self):
+        session, events = self.make_session()
+        with mock.patch.dict(os.environ, {"FRIDAY_SPEAK_MAX": "800"}):
+            stream = session._new_stream()
+            for i in range(60):
+                stream.feed(f"第{i}句,这里写了一些比较长的内容让它超过上限。")
+            stream.finish()
+            self.wait(stream)
+        self.assertIn("第59句", session._leftover)
+        self.assertEqual(session.ask("要", source="voice"), "好,接着读。")
+        self.assertIsNot(session._stream, stream)
+        self.assertTrue(any(e.get("text") == "🔊 接着读" for e in events))
+        session._leftover = "还剩一点"
+        session.ask("今天天气怎么样", source="web")  # 问了别的:不接着读
+        self.assertEqual(session._leftover, "")
+
+    def test_speak_max_setting(self):
+        session, _ = self.make_session()
+        env = os.path.join(self.tmp, ".env9")
+        Path(env).write_text("", encoding="utf-8")
+        with mock.patch.dict(os.environ, {}):
+            self.assertIn("error", app.apply_settings({"speak_max": 999}, session, None, env))
+            app.apply_settings({"speak_max": "3000"}, session, None, env)
+            self.assertEqual(app.speak_max_chars(), 3000)
+            os.environ["FRIDAY_SPEAK_MAX"] = "abc"
+            self.assertEqual(app.speak_max_chars(), 2000)
+
 if __name__ == "__main__":
     unittest.main()

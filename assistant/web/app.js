@@ -843,6 +843,7 @@ function fillSettings() {
   const s = settingsState;
   if (!s) return;
   $("setCallMe").value = s.call_me || "";
+  if (s.speak_max) $("setSpeakMax").value = String(s.speak_max);
   const voice = $("setVoice");
   if (!voice.options.length) {
     for (const [key, desc] of s.voices || []) {
@@ -1559,6 +1560,7 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("sett
 $("saveCallMe").onclick = () => saveSetting({ call_me: $("setCallMe").value.trim() });
 $("setCallMe").onkeydown = (e) => { if (e.key === "Enter") $("saveCallMe").click(); };
 $("setVoice").onchange = (e) => saveSetting({ voice: e.target.value });
+$("setSpeakMax").onchange = (e) => saveSetting({ speak_max: e.target.value });
 $("previewVoice").onclick = async () => {
   ensureAudio();
   const name = ($("setCallMe").value || "老板").trim();

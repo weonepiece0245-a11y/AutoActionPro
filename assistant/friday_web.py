@@ -133,16 +133,22 @@ class SpeechStream:
     """
 
     SENTENCE_END = re.compile(r"[。！？!?；;…\n]|\.(?=\s)")
-    MORE = "其余内容请看文字。"
+    MORE = "后面还有,要我接着读吗?"
 
     def __init__(self, synthesize: Callable[[str], bytes | None], publish: Callable[[bytes], None],
-                 max_chars: int = 800, batch_chars: int = 200,
-                 on_end: Callable[[], None] | None = None) -> None:
+                 max_chars: int = 2000, batch_chars: int = 200,
+                 on_end: Callable[[], None] | None = None, measure: Callable[[str], int] = len,
+                 log: Callable[[str], None] = lambda text: None) -> None:
         self.synthesize = synthesize
         self.publish = publish
         self.on_end = on_end  # 整段话都送出去了(窗口播完就可以接着听你说话)
-        self.max_chars = max_chars  # 一次回答最多读这么多字,太长的看文字
+        self.max_chars = max_chars  # 一次最多读这么多字;超过的问你要不要接着读
         self.batch_chars = batch_chars
+        self.measure = measure  # 怎么算字数:按真的会读出来的字(“- ”“1. ”这些符号不算)
+        self.log = log
+        self.leftover = ""  # 超过上限没读的部分(“接着读”用)
+        self.done = False  # 全部合成、送出去了
+        self.failures = 0
         self.buffer = ""
         self.pending: collections.deque[str] = collections.deque()
         self.spoken = 0
@@ -155,7 +161,10 @@ class SpeechStream:
 
     def feed(self, text: str) -> None:
         """收到回答的一小段文字。"""
-        if self.full or self.cancelled or not text:
+        if self.cancelled or not text:
+            return
+        if self.full:
+            self.leftover += text
             return
         self.buffer += text
         while not self.full:
@@ -176,12 +185,16 @@ class SpeechStream:
         if self.full or not sentence.strip():
             return
         with self.wakeup:
-            if self.spoken + len(sentence) > self.max_chars:
+            size = self.measure(sentence)
+            if self.spoken + size > self.max_chars and self.spoken:
                 self.pending.append(self.MORE)
                 self.full = True
+                self.leftover = sentence + self.buffer
+                self.buffer = ""
+                self.log(f"朗读到上限 {self.max_chars} 字,读了 {self.spoken} 字,后面的问要不要接着读")
             else:
                 self.pending.append(sentence)
-                self.spoken += len(sentence)
+                self.spoken += size
             self.wakeup.notify()
 
     def finish(self) -> None:
@@ -193,9 +206,11 @@ class SpeechStream:
             self.finished = True
             self.wakeup.notify()
 
-    def cancel(self) -> None:
+    def cancel(self, why: str = "开始了新的问题") -> None:
         """开始了新的问题:还没读的就不读了。"""
         with self.wakeup:
+            if not self.done and not self.cancelled and (self.pending or not self.finished):
+                self.log(f"朗读停止:{why}(读了 {self.spoken} 字)")
             self.cancelled = True
             self.pending.clear()
             self.wakeup.notify()
@@ -215,6 +230,7 @@ class SpeechStream:
         while True:
             batch = self._next_batch()
             if batch is None:
+                self.done = True
                 if not self.cancelled and self.on_end is not None:
                     try:
                         self.on_end()
@@ -223,8 +239,12 @@ class SpeechStream:
                 return
             try:
                 audio = self.synthesize(batch)
-            except Exception:
+            except Exception as e:  # noqa: BLE001
                 audio = None
+                self.log(f"朗读合成出错:{type(e).__name__}: {e}")
+            if not audio and not self.cancelled and batch.strip():
+                self.failures += 1
+                self.log(f"朗读合成失败,跳过一段({len(batch)} 字):{batch[:20]}……")
             if audio and not self.cancelled:
                 self.publish(audio)
 

@@ -639,7 +639,7 @@ def _transcribe_raw(pcm: bytes, engine: str, language: str) -> list[tuple[str, f
     return found
 
 
-def synthesize_mp3(text: str, edge_voice: str | None = None, max_chars: int = 800) -> bytes | None:
+def synthesize_mp3(text: str, edge_voice: str | None = None, max_chars: int = 5000) -> bytes | None:
     """用微软 Edge 神经网络语音把文字转成 MP3;失败或没有可读内容时返回 None。"""
     text = clean_for_speech(text)
     if not text:
@@ -659,7 +659,8 @@ def synthesize_mp3(text: str, edge_voice: str | None = None, max_chars: int = 80
         with open(path, "rb") as f:
             data = f.read()
         return data or None
-    except Exception:
+    except Exception as e:  # noqa: BLE001
+        print(f"语音合成失败({len(text)} 字):{type(e).__name__}: {e}", flush=True)
         return None
     finally:
         try:
