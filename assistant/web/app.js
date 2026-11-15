@@ -280,7 +280,7 @@ async function copyText(text) {
   area.remove();
   return ok;
 }
-const LONG_ANSWER = 700;
+const LONG_ANSWER = 900;
 function decorateAnswer(el, text) {
   el.querySelector(".msg-tools")?.remove();
   el.querySelector(".msg-more")?.remove();
@@ -293,7 +293,7 @@ function decorateAnswer(el, text) {
   copy.onclick = async () => { copy.textContent = (await copyText(text)) ? "已复制 ✓" : "复制失败"; setTimeout(() => { copy.textContent = "复制"; }, 1600); };
   tools.append(copy);
   el.append(tools);
-  if (text.length > LONG_ANSWER || text.split("\n").length > 14) {
+  if (text.length > LONG_ANSWER || text.split("\n").length > 22) {
     el.classList.add("long");
     const more = document.createElement("button");
     more.type = "button"; more.className = "msg-more"; more.textContent = "展开全部 ▾";
@@ -301,20 +301,272 @@ function decorateAnswer(el, text) {
     el.append(more);
   }
 }
+// 消息从哪里来(窗口打字的不标)
+const SOURCE_LABELS = { discord: "📱 Discord", "discord-voice": "📱 Discord 语音", telegram: "✈ Telegram", voice: "🎙 语音",
+  ptt: "🎙 按住说话", task: "⏱ 后台任务" };
+function hhmm(ts) {
+  const d = new Date((ts || Date.now() / 1000) * 1000);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
 function addMessage(kind, text, source, ts) {
   maybeDayDivider(ts);
   const el = document.createElement("div");
   el.className = `msg ${kind}${source && source !== "web" ? " source-" + source : ""}`;
   const who = document.createElement("span");
   who.className = "who";
-  who.textContent = kind === "user" ? "YOU" : "FRIDAY";
+  const name = document.createElement("span");
+  name.className = "who-name";
+  name.textContent = kind === "user" ? "YOU" : "FRIDAY";
+  who.append(name);
+  if (source && source !== "web") {
+    const tag = document.createElement("span");
+    tag.className = "who-src";
+    tag.textContent = SOURCE_LABELS[source] || source;
+    who.append(tag);
+  }
+  const time = document.createElement("span");
+  time.className = "who-time";
+  time.textContent = hhmm(ts);
+  who.append(time);
   const body = document.createElement("span");
   body.className = "text";
-  body.textContent = text;
+  if (kind === "friday" && text) setRich(body, text);
+  else body.textContent = text;
   el.append(who, body);
   log.append(el);
   scrollDown();
   return el;
+}
+
+// ---------- 回答排版:分段、列表、粗体、代码、表格(只用安全的 DOM,不塞 HTML) ----------
+function inlineRich(parent, text) {
+  const re = /(\*\*[^*\n]+\*\*|`[^`\n]+`)/g;
+  let last = 0, m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) parent.append(text.slice(last, m.index));
+    const bold = m[0].startsWith("**");
+    const el = document.createElement(bold ? "strong" : "code");
+    el.textContent = bold ? m[0].slice(2, -2) : m[0].slice(1, -1);
+    parent.append(el);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parent.append(text.slice(last));
+}
+const LIST_ITEM = /^(\s*)(?:([-*•·])\s+|(\d{1,2})(?:[.)]\s+|、\s*))(.+)$/;
+function renderRich(text) {
+  const frag = document.createDocumentFragment();
+  const lines = String(text || "").replace(/\r/g, "").split("\n");
+  let para = null, list = null, listKind = "", code = null, table = null;
+  const close = () => { para = null; list = null; listKind = ""; table = null; };
+  for (const raw of lines) {
+    if (code) {
+      if (/^\s*```/.test(raw)) { code = null; continue; }
+      code.textContent += (code.dataset.used ? "\n" : "") + raw;
+      code.dataset.used = "1";
+      continue;
+    }
+    if (/^\s*```/.test(raw)) {
+      close();
+      const pre = document.createElement("pre");
+      pre.className = "md-code";
+      code = document.createElement("code");
+      pre.append(code);
+      frag.append(pre);
+      continue;
+    }
+    const line = raw.trimEnd();
+    if (!line.trim()) { close(); continue; }
+    let m;
+    if ((m = line.match(/^\s{0,3}(#{1,4})\s+(.+)$/))) {
+      close();
+      const h = document.createElement("div");
+      h.className = `md-h md-h${m[1].length}`;
+      inlineRich(h, m[2].replace(/\s+#+$/, ""));
+      frag.append(h);
+      continue;
+    }
+    if (/^\s*\|.*\|$/.test(line)) {
+      if (/^\s*\|[\s:|-]+\|$/.test(line) && line.includes("-")) continue;  // 表头下面那条分隔线
+      if (!table) {
+        close();
+        table = document.createElement("table");
+        table.className = "md-table";
+        frag.append(table);
+      }
+      const tr = document.createElement("tr");
+      for (const cell of line.trim().slice(1, -1).split("|")) {
+        const td = document.createElement(table.rows.length ? "td" : "th");
+        inlineRich(td, cell.trim());
+        tr.append(td);
+      }
+      table.append(tr);
+      continue;
+    }
+    if (/^\s*([-*_])(\s*\1){2,}$/.test(line)) {
+      close();
+      const hr = document.createElement("hr");
+      hr.className = "md-hr";
+      frag.append(hr);
+      continue;
+    }
+    if ((m = line.match(LIST_ITEM))) {
+      const kind = m[3] ? "ol" : "ul";
+      if (!list || listKind !== kind) {
+        close();
+        list = document.createElement(kind);
+        list.className = "md-list";
+        listKind = kind;
+        if (kind === "ol" && Number(m[3]) > 1) list.start = Number(m[3]);
+        frag.append(list);
+      }
+      const li = document.createElement("li");
+      if (m[1].length >= 2) li.className = "md-sub";
+      inlineRich(li, m[4]);
+      list.append(li);
+      continue;
+    }
+    if (list && /^\s{2,}\S/.test(raw) && list.lastElementChild) {  // 上一点的续行
+      list.lastElementChild.append(document.createElement("br"));
+      inlineRich(list.lastElementChild, line.trim());
+      continue;
+    }
+    if (!para) {
+      close();
+      para = document.createElement("p");
+      para.className = "md-p";
+      frag.append(para);
+    } else {
+      para.append(document.createElement("br"));
+    }
+    inlineRich(para, line);
+  }
+  return frag;
+}
+function setRich(body, text) {
+  body.classList.add("rich");
+  body.replaceChildren(renderRich(text));
+}
+
+// ---------- 一次回答里用了哪些工具:收成一行,点开才看 ----------
+let turnOpen = false;    // 问了、还没答完
+let steps = null;        // 这一轮的步骤
+let heldNotices = [];    // 回答到一半来的提醒:答完再放,不插在问答中间
+let heldTimer = null;
+function placeSteps() {
+  if (!steps) return;
+  if (current) current.insertBefore(steps, current.querySelector(".text"));
+  else if (!steps.isConnected) log.append(steps);
+}
+function stepsSummary(items, running) {
+  if (running) return items[items.length - 1] + (items.length > 1 ? `(第 ${items.length} 步)` : "");
+  return items.length === 1 ? items[0] : `${items.length} 个步骤:${items.join(" → ")}`;
+}
+function addStep(text) {
+  if (!steps) {
+    steps = document.createElement("details");
+    steps.className = "msg-steps running";
+    steps.append(document.createElement("summary"), document.createElement("ol"));
+    placeSteps();
+  }
+  const item = document.createElement("li");
+  item.textContent = text;
+  steps.querySelector("ol").append(item);
+  const items = [...steps.querySelectorAll("li")].map((el) => el.textContent);
+  steps.querySelector("summary").textContent = stepsSummary(items, true);
+  scrollDown();
+}
+function closeSteps() {
+  if (!steps) return;
+  const items = [...steps.querySelectorAll("li")].map((el) => el.textContent);
+  steps.classList.remove("running");
+  steps.querySelector("summary").textContent = stepsSummary(items, false);
+  if (items.length === 1) steps.classList.add("single");
+  steps = null;
+}
+function endTurn() {
+  turnOpen = false;
+  closeSteps();
+  clearTimeout(heldTimer);
+  const list = heldNotices;
+  heldNotices = [];
+  for (const ev of list) showNotice(ev);
+}
+
+// ---------- 不在问答里的小状态(游戏、备份、更新……):连着的收成一组,只露最近两条 ----------
+function addBackground(text) {
+  if (/^——.*——$/.test(text.trim())) {
+    const div = document.createElement("div");
+    div.className = "day-divider restart";
+    div.textContent = text.replace(/——/g, "").trim();
+    log.append(div);
+    scrollDown();
+    return;
+  }
+  const lastEl = log.lastElementChild;
+  let group = lastEl && lastEl.classList.contains("bg-group") ? lastEl : null;
+  if (!group) {
+    group = document.createElement("div");
+    group.className = "bg-group";
+    log.append(group);
+  }
+  const el = document.createElement("div");
+  el.className = "status-line";
+  el.textContent = text;
+  group.append(el);
+  const count = group.querySelectorAll(".status-line").length;
+  if (count > 2) {
+    let more = group.querySelector(".bg-more");
+    if (!more) {
+      more = document.createElement("button");
+      more.type = "button";
+      more.className = "bg-more";
+      more.onclick = () => { group.classList.toggle("folded"); foldLabel(group); };
+      group.prepend(more);
+      group.classList.add("folded");
+    }
+    foldLabel(group);
+  }
+  scrollDown();
+}
+function foldLabel(group) {
+  const hidden = group.querySelectorAll(".status-line").length - 2;
+  group.querySelector(".bg-more").textContent = group.classList.contains("folded") ? `还有 ${hidden} 条 ▸` : "收起 ▴";
+}
+
+// ---------- 星期五主动说的事(提醒、报告、警告):独立的小卡片 ----------
+function showNotice(ev) {
+  if (turnOpen) {  // 正在问答:先压着,答完再放;太久(例如跑代码)就先放在回答上面
+    heldNotices.push(ev);
+    clearTimeout(heldTimer);
+    heldTimer = setTimeout(() => {
+      const list = heldNotices;
+      heldNotices = [];
+      for (const held of list) placeNotice(held, true);
+    }, 45000);
+    return;
+  }
+  placeNotice(ev, false);
+}
+function placeNotice(ev, beforeAnswer) {
+  if (!beforeAnswer || !current) maybeDayDivider(ev.ts);
+  const card = document.createElement("div");
+  card.className = "notice-card";
+  const time = document.createElement("span");
+  time.className = "notice-time";
+  time.textContent = hhmm(ev.ts);
+  const body = document.createElement("div");
+  body.className = "notice-text rich";
+  body.append(renderRich(ev.text));
+  card.append(time, body);
+  if (String(ev.text).length > LONG_ANSWER || String(ev.text).split("\n").length > 10) {
+    card.classList.add("long");
+    const more = document.createElement("button");
+    more.type = "button"; more.className = "msg-more"; more.textContent = "展开全部 ▾";
+    more.onclick = () => { const open = card.classList.toggle("open"); more.textContent = open ? "收起 ▴" : "展开全部 ▾"; };
+    card.append(more);
+  }
+  if (beforeAnswer && current) log.insertBefore(card, current); else log.append(card);
+  scrollDown();
 }
 function addLine(text, cls = "") {
   const el = document.createElement("div");
@@ -469,18 +721,27 @@ function startAnswer(source, ts) {
   current.classList.add("typing");
   current.querySelector(".text").innerHTML = '<span class="thinking"><b></b><b></b><b></b></span>';
   current.dataset.empty = "1";
+  current.raw = "";
+  placeSteps();
 }
+let drawPending = false;
 function appendDelta(text) {
   if (!current) startAnswer();
-  const body = current.querySelector(".text");
-  if (current.dataset.empty) { body.textContent = ""; delete current.dataset.empty; }
-  body.textContent += text;
-  scrollDown();
+  if (current.dataset.empty) { current.raw = ""; delete current.dataset.empty; }
+  current.raw = (current.raw || "") + text;
+  if (drawPending) return;
+  drawPending = true;
+  requestAnimationFrame(() => {  // 一帧排一次版,字很多也不卡
+    drawPending = false;
+    if (current && !current.dataset.empty) { setRich(current.querySelector(".text"), current.raw); scrollDown(); }
+  });
 }
-function finishAnswer(text, source) {
-  if (!current) current = addMessage("friday", "", source);
+function finishAnswer(text, source, ts) {
+  if (!current) current = addMessage("friday", "", source, ts);
   current.classList.remove("typing");
-  current.querySelector(".text").textContent = text;
+  placeSteps();
+  closeSteps();
+  setRich(current.querySelector(".text"), text);
   delete current.dataset.empty;
   decorateAnswer(current, text);
   if (text && (!source || source === "web" || source === "voice")) addChips(current);
@@ -519,16 +780,19 @@ function handle(ev) {
   switch (ev.type) {
     case "user":
       removeChips();
+      closeSteps();
       addMessage("user", ev.text, ev.source, ev.ts);
+      turnOpen = true;
       break;
     case "thinking":
-      busy = true; refreshMode(); startAnswer(ev.source, ev.ts); break;
+      busy = true; turnOpen = true; refreshMode(); startAnswer(ev.source, ev.ts); break;
     case "delta":
       appendDelta(ev.text); break;
     case "status":
-      addLine(ev.text); break;
+      if (turnOpen) addStep(ev.text); else addBackground(ev.text);
+      break;
     case "done":
-      busy = false; finishAnswer(ev.text, ev.source); refreshMode(); loadState(); miniLast(ev.text);
+      busy = false; finishAnswer(ev.text, ev.source, ev.ts); endTurn(); refreshMode(); loadState(); miniLast(ev.text);
       if (ev.source === "voice") { followUpTurn = ev.turn ?? "none"; maybeFollowUp(); }
       break;
     case "snip":
@@ -544,12 +808,17 @@ function handle(ev) {
       maybeFollowUp(); break;
     case "error":
       busy = false;
-      if (current) { current.remove(); current = null; }
-      addLine(ev.text, "error"); refreshMode(); break;
+      if (current) {
+        if (steps && steps.parentElement === current) log.insertBefore(steps, current);
+        current.remove(); current = null;
+      }
+      addLine(ev.text, "error"); endTurn(); refreshMode(); break;
     case "audio":
       enqueueAudio(ev.url, ev.turn); break;
     case "reminder":
-      addLine(ev.text, "reminder"); beep(880, 0.15); loadState(); break;
+      showNotice(ev);
+      if (!ev.ts || Date.now() / 1000 - ev.ts < 30) beep(880, 0.15);  // 重新打开窗口补上来的旧提醒不响
+      loadState(); break;
     case "focus":
       showFocus(ev); break;
     case "reader":
@@ -595,6 +864,7 @@ function handle(ev) {
     case "restarting":
       waitForRestart(); break;
     case "ready":
+      if (!busy && turnOpen) endTurn();  // 之前的对话补完了:没答完的那一轮(例如中途重启)不再等
       greet(); scrollDown();
       if (listenOnOpen) { listenOnOpen = false; setTimeout(startListening, 400); }
       break;
@@ -603,7 +873,8 @@ function handle(ev) {
     case "locked":
       showLock(); break;
     case "cleared":
-      log.innerHTML = ""; current = null; lastDay = ""; addLine("已开始新话题"); break;
+      log.innerHTML = ""; current = null; lastDay = ""; steps = null; heldNotices = []; turnOpen = false;
+      addLine("已开始新话题"); break;
   }
   $("sendBtn").disabled = busy;
 }
@@ -613,7 +884,7 @@ function connect() {
   if (source) source.close();
   source = new EventSource(`/events?t=${encodeURIComponent(token)}`);
   // 每次连上都会先收到之前的对话;先清空,断线重连时才不会重复
-  source.onopen = () => { log.innerHTML = ""; current = null; lastDay = ""; };
+  source.onopen = () => { log.innerHTML = ""; current = null; lastDay = ""; steps = null; heldNotices = []; turnOpen = false; };
   source.onmessage = (e) => { try { handle(JSON.parse(e.data)); } catch (err) { console.error(err); } };
   source.onerror = () => { setMode("idle"); };
 }

@@ -798,7 +798,8 @@ class FridayPersonaTest(TempDirTest):
     def test_system_prompt_has_name_memories_and_computer(self):
         system = self.make("队长", facts=["用户喜欢喝美式"]).system()
         self.assertIn("称呼用户为“队长”", system)
-        self.assertIn("Markdown 不会被渲染", system)
+        self.assertIn("会排好版", system)
+        self.assertIn("不要用 # 标题和表格", system)
         self.assertIn("- 用户喜欢喝美式", system)
         self.assertIn(self.tmp, system)
 
