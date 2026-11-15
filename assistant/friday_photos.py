@@ -10,6 +10,7 @@ import datetime
 import json
 import os
 import re
+import tempfile
 import time
 from pathlib import Path
 
@@ -65,7 +66,12 @@ def check_folder(folder: Path) -> Path:
     if inside_friday:
         raise ValueError("这是星期五自己的文件夹,不能整理")
     lowered = str(folder).lower()
-    if any(part in lowered for part in ("\\windows", "\\program files", "\\appdata", "/usr/", "/etc/")):
+    try:  # 临时文件夹(例如解压出来的照片)在 AppData 里面,但不是程序的东西
+        folder.relative_to(Path(tempfile.gettempdir()).resolve())
+        in_temp = True
+    except ValueError:
+        in_temp = False
+    if not in_temp and any(part in lowered for part in ("\\windows", "\\program files", "\\appdata", "/usr/", "/etc/")):
         raise ValueError("这是系统或程序的文件夹,不能整理")
     return folder
 

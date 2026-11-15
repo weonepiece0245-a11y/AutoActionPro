@@ -64,6 +64,35 @@ if "anthropic" not in sys.modules:
 
 import anthropic  # noqa: E402
 
+
+def api_connection_error(message="断网"):
+    """断网的错误。测试用的桩是 APIConnectionError("…");真的 anthropic 要 message=、request=。"""
+    cls = anthropic.APIConnectionError
+    try:
+        return cls(message)
+    except TypeError:
+        import httpx
+
+        return cls(message=message, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+
+
+def api_status_error(message, status_code=500, cls=None):
+    """HTTP 错误(401、400、529……)。桩收 status_code=;真的 anthropic 要 response=、body=。"""
+    cls = cls or anthropic.APIStatusError
+    try:
+        return cls(message, status_code=status_code)
+    except TypeError:
+        import httpx
+
+        request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        return cls(message, response=httpx.Response(status_code, request=request), body=None)
+
+
+def bare_env(values=None):
+    """clear=True 清空环境变量时,留下找“用户文件夹”、临时文件夹要用的几个(Windows 上没有它们 Path.home() 会出错)。"""
+    keep = ("USERPROFILE", "HOMEDRIVE", "HOMEPATH", "HOME", "SYSTEMROOT", "TEMP", "TMP")
+    return {**{k: os.environ[k] for k in keep if k in os.environ}, **(values or {})}
+
 # 按文件路径加载,避免从仓库根目录运行时 "assistant" 被解析成目录
 _spec = importlib.util.spec_from_file_location(
     "assistant_app", os.path.join(os.path.dirname(os.path.abspath(__file__)), "assistant.py")
@@ -203,7 +232,7 @@ class AssistantTest(unittest.TestCase):
         self.assertEqual([m["role"] for m in client.calls[1]["messages"]], ["user", "assistant", "user"])
 
     def test_error_rolls_back_question(self):
-        client = FakeClient(FakeStream(["半句"], error=anthropic.APIConnectionError("断网")))
+        client = FakeClient(FakeStream(["半句"], error=api_connection_error("断网")))
         bot = app.Assistant(client=client)
 
         with self.assertRaises(anthropic.APIConnectionError):
@@ -847,7 +876,7 @@ class FridayPersonaTest(TempDirTest):
 
     def run_main(self, args, env):
         env = {"ANTHROPIC_API_KEY": "sk-test", "FRIDAY_MEMORY_FILE": os.path.join(self.tmp, "m.json"), **env}
-        with mock.patch.dict(os.environ, env, clear=True), \
+        with mock.patch.dict(os.environ, bare_env(env), clear=True), \
                 mock.patch.object(app, "Assistant") as assistant_cls, \
                 mock.patch.object(app, "chat") as chat:
             app.main(args + ["--env-file", os.devnull])
@@ -925,7 +954,7 @@ class ToolLoopTest(TempDirTest):
     def test_error_mid_loop_rolls_back_whole_turn(self):
         client = FakeClient(
             FakeStream([], stop_reason="tool_use", blocks=[tool_use("remember", {"fact": "A"})]),
-            FakeStream([], error=anthropic.APIConnectionError("断网")),
+            FakeStream([], error=api_connection_error("断网")),
         )
         bot = app.Assistant(client=client, toolbox=self.make_toolbox())
         with self.assertRaises(anthropic.APIConnectionError):
@@ -1134,7 +1163,7 @@ class ChatLoopTest(unittest.TestCase):
 
     def test_connection_error_keeps_chatting(self):
         client = FakeClient(
-            FakeStream([], error=anthropic.APIConnectionError("断网")),
+            FakeStream([], error=api_connection_error("断网")),
             FakeStream(["好了"]),
         )
         bot = app.Assistant(client=client)
@@ -1161,32 +1190,32 @@ class LoadEnvFileTest(unittest.TestCase):
             "C=a=b\n"
             "not a pair\n"
         )
-        with mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch.dict(os.environ, bare_env(), clear=True):
             self.load(content)
             self.assertEqual(os.environ["ANTHROPIC_API_KEY"], "sk-test")
             self.assertEqual(os.environ["A"], "single")
             self.assertEqual(os.environ["B"], "double")
             self.assertEqual(os.environ["C"], "a=b")
-            self.assertEqual(len(os.environ), 4)
+            self.assertEqual(len(os.environ), 4 + len(bare_env()))
 
     def test_handles_bom(self):
-        with mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch.dict(os.environ, bare_env(), clear=True):
             self.load("ANTHROPIC_API_KEY=sk-bom\n", encoding="utf-8-sig")
             self.assertEqual(os.environ["ANTHROPIC_API_KEY"], "sk-bom")
 
     def test_environment_wins(self):
-        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "from-env"}, clear=True):
+        with mock.patch.dict(os.environ, bare_env({"ANTHROPIC_API_KEY": "from-env"}), clear=True):
             self.load("ANTHROPIC_API_KEY=from-file\n")
             self.assertEqual(os.environ["ANTHROPIC_API_KEY"], "from-env")
 
     def test_missing_file_is_ignored(self):
-        with mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch.dict(os.environ, bare_env(), clear=True):
             app.load_env_file(os.path.join(tempfile.gettempdir(), "no-such-dir", ".env"))
-            self.assertEqual(dict(os.environ), {})
+            self.assertEqual(dict(os.environ), bare_env())
 
     def test_placeholder_key_exits_with_hint(self):
         example = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env.example")
-        with mock.patch.dict(os.environ, {}, clear=True), mock.patch("builtins.print"):
+        with mock.patch.dict(os.environ, bare_env(), clear=True), mock.patch("builtins.print"):
             with self.assertRaises(SystemExit):
                 app.main(["--env-file", example])
 
@@ -1272,7 +1301,7 @@ class VoiceChatTest(unittest.TestCase):
 
     def test_main_creates_voice(self):
         env = {"ANTHROPIC_API_KEY": "sk-test", "FRIDAY_STT": "vosk"}
-        with mock.patch.dict(os.environ, env, clear=True), \
+        with mock.patch.dict(os.environ, bare_env(env), clear=True), \
                 mock.patch.object(app, "Assistant"), \
                 mock.patch.object(app, "chat") as chat, \
                 mock.patch.object(voice, "create_voice", return_value="VOICE") as create:
@@ -1283,7 +1312,7 @@ class VoiceChatTest(unittest.TestCase):
 
     def test_main_passes_tts_options(self):
         env = {"ANTHROPIC_API_KEY": "sk-test"}
-        with mock.patch.dict(os.environ, env, clear=True), \
+        with mock.patch.dict(os.environ, bare_env(env), clear=True), \
                 mock.patch.object(app, "Assistant"), \
                 mock.patch.object(app, "chat"), \
                 mock.patch.object(voice, "create_voice", return_value="VOICE") as create:
@@ -1292,7 +1321,7 @@ class VoiceChatTest(unittest.TestCase):
 
     def test_main_exits_when_voice_unavailable(self):
         env = {"ANTHROPIC_API_KEY": "sk-test"}
-        with mock.patch.dict(os.environ, env, clear=True), \
+        with mock.patch.dict(os.environ, bare_env(env), clear=True), \
                 mock.patch.object(app, "Assistant"), \
                 mock.patch.object(app, "chat") as chat, \
                 mock.patch("builtins.print"), \
@@ -1418,7 +1447,7 @@ class KeepAliveTest(unittest.TestCase):
     def test_plays_inaudible_sound(self):
         FakeRawOutputStream.instances = []
         with mock.patch.dict(sys.modules, {"sounddevice": fake_sounddevice()}), \
-                mock.patch.dict(os.environ, {}, clear=True):
+                mock.patch.dict(os.environ, bare_env(), clear=True):
             keep_alive = voice.start_keep_alive(lambda t: None)
         stream = FakeRawOutputStream.instances[0]
         self.assertTrue(stream.started)
@@ -1445,7 +1474,7 @@ class KeepAliveTest(unittest.TestCase):
 
         statuses = []
         with mock.patch.dict(sys.modules, {"sounddevice": fake_sounddevice(output_cls=broken)}), \
-                mock.patch.dict(os.environ, {}, clear=True):
+                mock.patch.dict(os.environ, bare_env(), clear=True):
             self.assertIsNone(voice.start_keep_alive(statuses.append))
         self.assertIn("没有输出设备", statuses[0])
 
@@ -2216,9 +2245,9 @@ class ComputerTest(TempDirTest):
         (root / "steamapps" / "libraryfolders.vdf").write_text(
             '"libraryfolders"\n{\n "0" { "path" "%s" }\n "1" { "path" "%s" }\n}' % (
                 str(root).replace("\\", "\\\\"), str(other).replace("\\", "\\\\")), encoding="utf-8")
-        (root / "steamapps" / "appmanifest_570.acf").write_text('"AppState"\n{\n "appid" "570"\n "name" "Dota 2"\n}')
+        (root / "steamapps" / "appmanifest_570.acf").write_text('"AppState"\n{\n "appid" "570"\n "name" "Dota 2"\n}', encoding="utf-8")
         (other / "steamapps" / "appmanifest_1172470.acf").write_text(
-            '"AppState"\n{\n "appid" "1172470"\n "name" "Apex Legends"\n}')
+            '"AppState"\n{\n "appid" "1172470"\n "name" "Apex Legends"\n}', encoding="utf-8")
         return root
 
     def test_steam_games_across_libraries(self):
@@ -2244,9 +2273,9 @@ class ComputerTest(TempDirTest):
         for appid, name in (("228980", "Steamworks Common Redistributables"), ("1493710", "Proton Experimental"),
                             ("431960", "Wallpaper Engine"), ("578080", "PUBG: BATTLEGROUNDS"),
                             ("373300", "Dota 2 Workshop Tools")):
-            (lib / f"appmanifest_{appid}.acf").write_text('"AppState"\n{\n "appid" "%s"\n "name" "%s"\n}' % (appid, name))
+            (lib / f"appmanifest_{appid}.acf").write_text('"AppState"\n{\n "appid" "%s"\n "name" "%s"\n}' % (appid, name), encoding="utf-8")
         (Path(self.tmp) / "Games" / "SteamLibrary" / "steamapps" / "appmanifest_570.acf").write_text(
-            '"AppState"\n{\n "appid" "570"\n "name" "Dota 2"\n}')  # 同一个游戏在两个库
+            '"AppState"\n{\n "appid" "570"\n "name" "Dota 2"\n}', encoding="utf-8")  # 同一个游戏在两个库
         names = [n for _, n in pcmod.steam_games(root)]
         self.assertEqual(names, ["Apex Legends", "Dota 2", "PUBG: BATTLEGROUNDS"])
         pc = self.make(steam=root, outputs={"Get-StartApps": (3, "")})
@@ -2705,7 +2734,7 @@ class ReminderChatTest(DailyToolsTest):
 
     def test_main_sets_up_daily_tools_next_to_memory(self):
         env = {"ANTHROPIC_API_KEY": "sk-test", "FRIDAY_MEMORY_FILE": os.path.join(self.tmp, "m.json")}
-        with mock.patch.dict(os.environ, env, clear=True), \
+        with mock.patch.dict(os.environ, bare_env(env), clear=True), \
                 mock.patch.object(app, "Assistant"), \
                 mock.patch.object(app, "ReminderScheduler") as scheduler, \
                 mock.patch.object(app, "chat") as chat:
@@ -3160,7 +3189,7 @@ class YouTubeTest(unittest.TestCase):
 class GoogleScopesTest(TempDirTest):
     def account(self, scopes):
         token = Path(self.tmp, "token.json")
-        token.write_text(json.dumps({"scopes": scopes}))
+        token.write_text(json.dumps({"scopes": scopes}), encoding="utf-8")
         return gmod.GoogleAccount(Path(self.tmp, "credentials.json"), token)
 
     def test_missing_permission_asks_to_log_in_again(self):
@@ -3215,21 +3244,21 @@ class ClientSecretTest(TempDirTest):
         old = downloads / "client_secret_old.apps.googleusercontent.com.json"
         new = downloads / "client_secret_new.apps.googleusercontent.com.json"
         broken = downloads / "client_secret_broken.json"
-        old.write_text(json.dumps(self.SECRET))
-        new.write_text(json.dumps({"installed": {"client_id": "new"}}))
-        broken.write_text("{坏的")
+        old.write_text(json.dumps(self.SECRET), encoding="utf-8")
+        new.write_text(json.dumps({"installed": {"client_id": "new"}}), encoding="utf-8")
+        broken.write_text("{坏的", encoding="utf-8")
         os.utime(old, (1_600_000_000, 1_600_000_000))
         with mock.patch("builtins.print"):
             self.assertTrue(gmod.ensure_credentials_file(app_dir, [app_dir, downloads]))
-        self.assertEqual(json.loads((app_dir / "credentials.json").read_text())["installed"]["client_id"], "new")
+        self.assertEqual(json.loads((app_dir / "credentials.json").read_text(encoding="utf-8"))["installed"]["client_id"], "new")
 
     def test_existing_credentials_untouched_and_missing(self):
         app_dir = Path(self.tmp)
         self.assertFalse(gmod.ensure_credentials_file(app_dir, [app_dir]))
-        (app_dir / "credentials.json").write_text("mine")
-        (app_dir / "client_secret_x.json").write_text(json.dumps(self.SECRET))
+        (app_dir / "credentials.json").write_text("mine", encoding="utf-8")
+        (app_dir / "client_secret_x.json").write_text(json.dumps(self.SECRET), encoding="utf-8")
         self.assertTrue(gmod.ensure_credentials_file(app_dir, [app_dir]))
-        self.assertEqual((app_dir / "credentials.json").read_text(), "mine")
+        self.assertEqual((app_dir / "credentials.json").read_text(encoding="utf-8"), "mine")
 
     def test_login_without_any_file_explains_what_to_do(self):
         with mock.patch("builtins.print") as fake_print:
@@ -3242,20 +3271,20 @@ class GoogleAccountTest(TempDirTest):
     def test_configured_when_credentials_or_token_exist(self):
         account = gmod.GoogleAccount(os.path.join(self.tmp, "credentials.json"), os.path.join(self.tmp, "token.json"))
         self.assertFalse(account.configured)
-        Path(self.tmp, "credentials.json").write_text("{}")
+        Path(self.tmp, "credentials.json").write_text("{}", encoding="utf-8")
         self.assertTrue(account.configured)
 
     def test_main_enables_google_only_after_setup(self):
         env = {"ANTHROPIC_API_KEY": "sk-test", "FRIDAY_MEMORY_FILE": os.path.join(self.tmp, "m.json")}
 
         def toolbox_after_main():
-            with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(app, "Assistant"), \
+            with mock.patch.dict(os.environ, bare_env(env), clear=True), mock.patch.object(app, "Assistant"), \
                     mock.patch.object(app, "ReminderScheduler"), mock.patch.object(app, "chat") as chat:
                 app.main(["--persona", "friday", "--env-file", os.devnull])
             return chat.call_args.args[1].toolbox
 
         self.assertIsNone(toolbox_after_main().google)
-        Path(self.tmp, "credentials.json").write_text("{}")
+        Path(self.tmp, "credentials.json").write_text("{}", encoding="utf-8")
         toolbox = toolbox_after_main()
         self.assertIsNotNone(toolbox.google)
         self.assertEqual(toolbox.google.account.token_file, Path(self.tmp, "google_token.json"))
@@ -3294,7 +3323,7 @@ class DiscordHelpersTest(TempDirTest):
         self.assertEqual(env.read_text(encoding="utf-8"), "ANTHROPIC_API_KEY=sk-1\nFRIDAY_DISCORD_TOKEN=new\n")
 
     def test_setup_saves_token_and_opens_invite(self):
-        Path(self.tmp, "friday_discord.json").write_text('{"owner_id": 1}')
+        Path(self.tmp, "friday_discord.json").write_text('{"owner_id": 1}', encoding="utf-8")
         opened = []
         with mock.patch("builtins.print"):
             code = dmod.setup(self.tmp, ask=lambda prompt: f'  "{FAKE_TOKEN}" ', open_url=opened.append)
@@ -3320,7 +3349,7 @@ class DiscordGateTest(TempDirTest):
                                 clock=lambda: self.now[0])
 
     def paired(self, *owners):
-        Path(self.tmp, "discord.json").write_text(json.dumps({"owners": [{"id": i, "name": n} for i, n in owners]}))
+        Path(self.tmp, "discord.json").write_text(json.dumps({"owners": [{"id": i, "name": n} for i, n in owners]}), encoding="utf-8")
         return self.make()
 
     def test_first_pairing(self):
@@ -3378,7 +3407,7 @@ class DiscordGateTest(TempDirTest):
         self.assertEqual(self.make().owners, {42: "main"})
 
     def test_reads_old_single_owner_file(self):
-        Path(self.tmp, "discord.json").write_text('{"owner_id": 42, "owner_name": "me"}')
+        Path(self.tmp, "discord.json").write_text('{"owner_id": 42, "owner_name": "me"}', encoding="utf-8")
         self.assertEqual(self.make().owners, {42: "me"})
 
     def test_ask_waits_for_the_same_account(self):
@@ -3654,7 +3683,7 @@ class AudioHelpersTest(unittest.TestCase):
             self.assertEqual(voice.transcribe_detail(b"OGG", language="en-US"), ("hello hello world", None))  # 外语不动
 
     def test_synthesize_mp3(self):
-        with mock.patch.dict(sys.modules, {"edge_tts": fake_edge_tts()}), mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch.dict(sys.modules, {"edge_tts": fake_edge_tts()}), mock.patch.dict(os.environ, bare_env(), clear=True):
             self.assertEqual(voice.synthesize_mp3("**你好**"), b"ID3fake-mp3")
             self.assertEqual(FakeCommunicate.calls[-1], ("你好", "zh-CN-XiaoxiaoNeural"))
             voice.synthesize_mp3("很长。" * 500, max_chars=100)
@@ -3674,7 +3703,7 @@ class DiscordCommandTest(TempDirTest):
         return "\n".join(str(c.args[0]) for c in fake_print.call_args_list if c.args)
 
     def test_discord_commands(self):
-        Path(self.tmp, "d.json").write_text(json.dumps({"owners": [{"id": 42, "name": "main"}, {"id": 77, "name": "alt"}]}))
+        Path(self.tmp, "d.json").write_text(json.dumps({"owners": [{"id": 42, "name": "main"}, {"id": 77, "name": "alt"}]}), encoding="utf-8")
         gate = dmod.DiscordGate(Path(self.tmp, "d.json"), queue.Queue(), lambda c, t: None, lambda t: None)
         printed = self.run_commands(["/discord", "/discord pair", "/discord remove 2", "/discord remove"],
                                     SimpleNamespace(gate=gate))
@@ -3713,7 +3742,7 @@ class DiscordChatTest(TempDirTest):
         self.assertNotIn("做好了", voice_mock.spoken)  # 手机上的问答不在电脑上读出来
 
     def test_errors_are_reported_to_discord(self):
-        client = FakeClient(FakeStream([], error=anthropic.APIConnectionError("断网")))
+        client = FakeClient(FakeStream([], error=api_connection_error("断网")))
         bot = app.Assistant(client=client)
         replies = []
         message = dmod.DiscordMessage("你好", reply=replies.append, ask=lambda q: False)
@@ -3735,7 +3764,7 @@ class DiscordChatTest(TempDirTest):
     def test_main_starts_discord_only_with_token(self):
         env = {"ANTHROPIC_API_KEY": "sk-test", "FRIDAY_MEMORY_FILE": os.path.join(self.tmp, "m.json")}
         for token, expected in (("", 0), (FAKE_TOKEN, 1)):
-            with mock.patch.dict(os.environ, {**env, "FRIDAY_DISCORD_TOKEN": token}, clear=True), \
+            with mock.patch.dict(os.environ, bare_env({**env, "FRIDAY_DISCORD_TOKEN": token}), clear=True), \
                     mock.patch.object(app, "Assistant"), mock.patch.object(app, "ReminderScheduler"), \
                     mock.patch.object(app, "DiscordBridge") as bridge, mock.patch.object(app, "chat") as chat, \
                     mock.patch("builtins.print"):
@@ -3841,7 +3870,7 @@ class ServerModeTest(TempDirTest):
     def test_run_server_wiring(self):
         env = {"ANTHROPIC_API_KEY": "sk-test", "FRIDAY_MEMORY_FILE": os.path.join(self.tmp, "m.json"),
                "FRIDAY_DISCORD_TOKEN": FAKE_TOKEN}
-        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(app, "DiscordBridge") as bridge, \
+        with mock.patch.dict(os.environ, bare_env(env), clear=True), mock.patch.object(app, "DiscordBridge") as bridge, \
                 mock.patch.object(app, "ReminderScheduler") as scheduler, mock.patch.object(app, "serve") as serve:
             app.main(["--server", "--env-file", os.devnull])
         bot, persona, events, discord, transcribe = serve.call_args.args
@@ -3857,7 +3886,7 @@ class ServerModeTest(TempDirTest):
 
     def test_run_server_needs_token(self):
         env = {"ANTHROPIC_API_KEY": "sk-test", "FRIDAY_MEMORY_FILE": os.path.join(self.tmp, "m.json")}
-        with mock.patch.dict(os.environ, env, clear=True), mock.patch("builtins.print"):
+        with mock.patch.dict(os.environ, bare_env(env), clear=True), mock.patch("builtins.print"):
             with self.assertRaises(SystemExit):
                 app.main(["--server", "--env-file", os.devnull])
 
@@ -3868,7 +3897,7 @@ class DiscordEnvSwitchTest(TempDirTest):
         env.write_text(f"ANTHROPIC_API_KEY=sk-1\nFRIDAY_DISCORD_TOKEN={FAKE_TOKEN}\n", encoding="utf-8")
         self.assertTrue(dmod.set_discord_enabled(env, False))
         self.assertIn(f"#FRIDAY_DISCORD_TOKEN={FAKE_TOKEN}", env.read_text(encoding="utf-8"))
-        with mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch.dict(os.environ, bare_env(), clear=True):
             self.assertEqual(dmod.read_token(env), FAKE_TOKEN)  # 云端模式也认注释掉的
         self.assertTrue(dmod.set_discord_enabled(env, True))
         self.assertIn(f"\nFRIDAY_DISCORD_TOKEN={FAKE_TOKEN}", env.read_text(encoding="utf-8"))
@@ -3878,7 +3907,7 @@ class DiscordEnvSwitchTest(TempDirTest):
         env = Path(self.tmp, ".env")
         env.write_text("ANTHROPIC_API_KEY=sk-1\n# FRIDAY_DISCORD_TOKEN=\n", encoding="utf-8")
         self.assertFalse(dmod.set_discord_enabled(env, False))
-        with mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch.dict(os.environ, bare_env(), clear=True):
             self.assertIsNone(dmod.read_token(env))
             self.assertIsNone(dmod.read_token(Path(self.tmp, "none.env")))
         with mock.patch.dict(os.environ, {"FRIDAY_DISCORD_TOKEN": "from-env"}):
@@ -3927,7 +3956,7 @@ class FridayAppInstallTest(TempDirTest):
     def setUp(self):
         super().setUp()
         for bat in ("friday.bat", "friday-app.bat"):
-            Path(self.tmp, bat).write_text("@echo off")
+            Path(self.tmp, bat).write_text("@echo off", encoding="utf-8")
         self.calls = []
 
     def powershell(self, script, env):
@@ -4128,9 +4157,9 @@ class FridayUpdateTest(TempDirTest):
         self.root = Path(self.tmp, "repo")
         self.assistant_dir = self.root / "assistant"
         self.assistant_dir.mkdir(parents=True)
-        (self.assistant_dir / "assistant.py").write_text("old")
-        (self.assistant_dir / ".env").write_text("ANTHROPIC_API_KEY=mine")
-        (self.assistant_dir / "friday_memory.json").write_text("[]")
+        (self.assistant_dir / "assistant.py").write_text("old", encoding="utf-8")
+        (self.assistant_dir / ".env").write_text("ANTHROPIC_API_KEY=mine", encoding="utf-8")
+        (self.assistant_dir / "friday_memory.json").write_text("[]", encoding="utf-8")
 
     def test_applies_changed_files_and_keeps_private_ones(self):
         data = make_archive({
@@ -4143,9 +4172,9 @@ class FridayUpdateTest(TempDirTest):
         result = friday_update.update(self.assistant_dir, fetcher=lambda url: data, installer=lambda d: True)
         self.assertEqual(result["status"], "updated")
         self.assertEqual(sorted(result["changed"]), ["assistant/assistant.py", "assistant/web/app.js"])
-        self.assertEqual((self.assistant_dir / "assistant.py").read_text(), "new")
-        self.assertEqual((self.assistant_dir / ".env").read_text(), "ANTHROPIC_API_KEY=mine")
-        self.assertEqual((self.assistant_dir / "friday_memory.json").read_text(), "[]")
+        self.assertEqual((self.assistant_dir / "assistant.py").read_text(encoding="utf-8"), "new")
+        self.assertEqual((self.assistant_dir / ".env").read_text(encoding="utf-8"), "ANTHROPIC_API_KEY=mine")
+        self.assertEqual((self.assistant_dir / "friday_memory.json").read_text(encoding="utf-8"), "[]")
         self.assertFalse(Path(self.tmp, "evil.txt").exists())
         self.assertEqual(friday_update.current_version(self.assistant_dir), "abc1234def")
         self.assertTrue(friday_update.version_info(self.assistant_dir)["updated"].startswith("20"))
@@ -4525,7 +4554,7 @@ class WebSessionTest(TempDirTest):
         self.assertEqual(turns[-1], 2)
 
     def test_errors_become_messages(self):
-        session = self.make(FakeClient(FakeStream([], error=anthropic.APIConnectionError("断网"))))
+        session = self.make(FakeClient(FakeStream([], error=api_connection_error("断网"))))
         self.assertIsNone(session.ask("你好"))
         events = self.drain()
         self.assertEqual(events[-1]["type"], "error")
@@ -4595,14 +4624,14 @@ class WebLaunchTest(TempDirTest):
 class GoogleLoginStatusTest(TempDirTest):
     def account(self, token=True, credentials=True, login_days_ago=None):
         if credentials:
-            Path(self.tmp, "credentials.json").write_text("{}")
+            Path(self.tmp, "credentials.json").write_text("{}", encoding="utf-8")
         if token:
-            Path(self.tmp, "google_token.json").write_text(json.dumps({"scopes": gmod.SCOPES}))
+            Path(self.tmp, "google_token.json").write_text(json.dumps({"scopes": gmod.SCOPES}), encoding="utf-8")
         account = gmod.GoogleAccount(Path(self.tmp, "credentials.json"), Path(self.tmp, "google_token.json"))
         self.now = 1_800_000_000.0
         account.clock = lambda: self.now
         if login_days_ago is not None:
-            account.login_file.write_text(json.dumps({"login_at": self.now - login_days_ago * 86400}))
+            account.login_file.write_text(json.dumps({"login_at": self.now - login_days_ago * 86400}), encoding="utf-8")
         return account
 
     def fake_google(self, refresh_ok):
@@ -5983,7 +6012,7 @@ class GameBoostTest(TempDirTest):
         quick = friday_quick.QuickCommands(SimpleNamespace())
         quick.gameboost = friday_gameboost.GameBoost(self.tmp, system=system, own_pid=900)
         env = Path(self.tmp, ".env")
-        env.write_text("")
+        env.write_text("", encoding="utf-8")
         quick.env_file = str(env)
         with mock.patch.dict(os.environ, {"FRIDAY_GAME_BOOST": "on"}), \
                 mock.patch.object(friday_gameboost, "checkup", lambda: "体检结果"):
@@ -5993,7 +6022,7 @@ class GameBoostTest(TempDirTest):
             quick.gameboost.start("Apex")
             self.assertIn("关掉了", quick.handle("关掉游戏优化"))
             self.assertEqual(os.environ["FRIDAY_GAME_BOOST"], "off")
-            self.assertIn("FRIDAY_GAME_BOOST=off", env.read_text())
+            self.assertIn("FRIDAY_GAME_BOOST=off", env.read_text(encoding="utf-8"))
             self.assertEqual(system.prio[100], friday_gameboost.NORMAL)  # 关掉时马上改回来
             self.assertIn("自动优化", quick.handle("打开游戏优化"))
         session = app.WebSession(None, app.default_persona(), friday_web.Hub())
@@ -6605,26 +6634,26 @@ class PushToTalkTest(unittest.TestCase):
         started = []
         session.shot_tap = SimpleNamespace(start=lambda key: started.append(key) or f"按一下 {key} 就截图问星期五")
         env = Path(tempfile.mkdtemp(), ".env")
-        env.write_text("")
+        env.write_text("", encoding="utf-8")
         with mock.patch.dict(os.environ, {}):
             app.apply_settings({"shot_key": {"vk": 0x2C, "label": "Print Screen"}}, session, SimpleNamespace(), env)
             self.assertEqual(friday_ptt.key_info(friday_ptt.key_setting("shot"), "shot"), ("Print Screen", 0x2C))
             self.assertEqual(friday_ptt.key_setting("ptt"), "off")  # 两个设定分开
             self.assertIn("error", app.apply_settings({"shot_key": {"vk": 1}}, session, SimpleNamespace(), env))
         self.assertEqual(started, ["vk:44"])
-        self.assertIn("FRIDAY_SHOT_KEY=vk:44", env.read_text())
+        self.assertIn("FRIDAY_SHOT_KEY=vk:44", env.read_text(encoding="utf-8"))
 
     def test_settings_payload(self):
         session = app.WebSession(None, app.default_persona(), friday_web.Hub())
         started = []
         session.ptt = SimpleNamespace(start=lambda key: started.append(key) or f"按住 {key}")
         env = Path(tempfile.mkdtemp(), ".env")
-        env.write_text("")
+        env.write_text("", encoding="utf-8")
         with mock.patch.dict(os.environ, {}):
             self.assertIn("error", app.apply_settings({"ptt_key": "f12"}, session, SimpleNamespace(), env))
             app.apply_settings({"ptt_key": "mouse5"}, session, SimpleNamespace(), env)
         self.assertEqual(started, ["mouse5"])
-        self.assertIn("FRIDAY_PTT_KEY=mouse5", env.read_text())
+        self.assertIn("FRIDAY_PTT_KEY=mouse5", env.read_text(encoding="utf-8"))
         self.assertEqual(app.ptt_state(session)["key"], "off")  # 测试里环境变量已经还原
 
     def test_custom_key(self):
@@ -6634,7 +6663,7 @@ class PushToTalkTest(unittest.TestCase):
                                     recorder_factory=lambda: None, sleep=lambda s: time.sleep(0.01))
         session.ptt = ptt
         env = Path(tempfile.mkdtemp(), ".env")
-        env.write_text("")
+        env.write_text("", encoding="utf-8")
         with mock.patch.dict(os.environ, {}):
             result = app.apply_settings({"ptt_key": {"vk": 0x05, "label": "鼠标侧键(后)"}}, session, SimpleNamespace(), env)
             self.assertIn("按住 鼠标侧键(后)", json.dumps(result, ensure_ascii=False))
@@ -6643,7 +6672,7 @@ class PushToTalkTest(unittest.TestCase):
             self.assertIn(0x05, watched)  # 真的在看这个键
             state = app.ptt_state(session)
             self.assertEqual((state["key"], state["custom"], state["shot"]), ("custom", "鼠标侧键(后)", {"key": "off", "custom": ""}))
-            self.assertIn("FRIDAY_PTT_KEY=vk:5", env.read_text())
+            self.assertIn("FRIDAY_PTT_KEY=vk:5", env.read_text(encoding="utf-8"))
             app.apply_settings({"ptt_key": {"vk": 0x47, "label": "G"}}, session, SimpleNamespace(), env)
             ptt.stop()
             self.assertEqual(friday_ptt.key_info(friday_ptt.key_setting()), ("G", 0x47))
@@ -6662,7 +6691,7 @@ import friday_autoupdate  # noqa: E402
 class AutoUpdateTest(TempDirTest):
     def test_night_update_and_morning_note(self):
         changes = Path(self.tmp, "CHANGES.md")
-        changes.write_text("## 11-12\n- 旧的功能\n")
+        changes.write_text("## 11-12\n- 旧的功能\n", encoding="utf-8")
         now = [datetime.datetime(2026, 11, 13, 3, 30)]
         auto = friday_autoupdate.AutoUpdate(os.path.join(self.tmp, "a.json"), changes, clock=lambda: now[0])
         with mock.patch.dict(os.environ, {"FRIDAY_AUTO_UPDATE": "on"}):
@@ -6678,7 +6707,7 @@ class AutoUpdateTest(TempDirTest):
             now[0] = datetime.datetime(2026, 11, 14, 3, 30)
             self.assertFalse(auto.due(3600, False, False))
         # 更新完重开
-        changes.write_text("## 11-13\n- 按住说话\n- 光球新样子\n\n## 11-12\n- 旧的功能\n")
+        changes.write_text("## 11-13\n- 按住说话\n- 光球新样子\n\n## 11-12\n- 旧的功能\n", encoding="utf-8")
         now[0] = datetime.datetime(2026, 11, 13, 3, 35)
         restarted = friday_autoupdate.AutoUpdate(os.path.join(self.tmp, "a.json"), changes, clock=lambda: now[0])
         restarted.after_start()
@@ -6692,11 +6721,11 @@ class AutoUpdateTest(TempDirTest):
     def test_failed_or_latest_update_is_not_reported_later(self):
         """审计:半夜没更新成(或已经是最新),以后手动更新的不能说成“昨晚我自己更新了”。"""
         changes = Path(self.tmp, "CHANGES.md")
-        changes.write_text("- 旧的\n")
+        changes.write_text("- 旧的\n", encoding="utf-8")
         now = [datetime.datetime(2026, 11, 13, 3, 30)]
         auto = friday_autoupdate.AutoUpdate(os.path.join(self.tmp, "a.json"), changes, clock=lambda: now[0])
         auto.mark_started()  # 半夜开始检查,但断网没装成
-        changes.write_text("- 旧的\n- 后来手动更新的\n")
+        changes.write_text("- 旧的\n- 后来手动更新的\n", encoding="utf-8")
         now[0] = datetime.datetime(2026, 11, 15, 20, 0)  # 两天后手动更新重开
         later = friday_autoupdate.AutoUpdate(os.path.join(self.tmp, "a.json"), changes, clock=lambda: now[0])
         later.after_start()
@@ -6708,7 +6737,7 @@ class AutoUpdateTest(TempDirTest):
 
     def test_nothing_new_says_nothing(self):
         changes = Path(self.tmp, "CHANGES.md")
-        changes.write_text("- 一样\n")
+        changes.write_text("- 一样\n", encoding="utf-8")
         now = datetime.datetime(2026, 11, 13, 3, 30)
         auto = friday_autoupdate.AutoUpdate(os.path.join(self.tmp, "a.json"), changes, clock=lambda: now)
         auto.mark_started()
@@ -6816,7 +6845,7 @@ class LightLinkTest(unittest.TestCase):
     def test_settings_payload(self):
         session = app.WebSession(None, app.default_persona(), friday_web.Hub())
         env = Path(tempfile.mkdtemp(), ".env")
-        env.write_text("")
+        env.write_text("", encoding="utf-8")
         with mock.patch.dict(os.environ, {}):
             self.assertIn("error", app.apply_settings({"lightlink": {"game_mode": "rm", "away_minutes": 0}}, session,
                                                       SimpleNamespace(), env))
@@ -6826,7 +6855,7 @@ class LightLinkTest(unittest.TestCase):
                                               "away": ["PS5"], "back": False}}, session, SimpleNamespace(), env)
             cfg = friday_lightlink.settings()
         self.assertEqual(cfg, {"game_mode": "紫", "game": ["客厅灯"], "away_minutes": 20, "away": ["PS5"], "back": False})
-        self.assertIn("FRIDAY_LIGHT_GAME=客厅灯", env.read_text())
+        self.assertIn("FRIDAY_LIGHT_GAME=客厅灯", env.read_text(encoding="utf-8"))
 
 
 import friday_weekly  # noqa: E402
@@ -7544,7 +7573,7 @@ class PartyModeTest(unittest.TestCase):
     def test_settings_payload(self):
         session = app.WebSession(None, app.default_persona(), friday_web.Hub())
         env = Path(tempfile.mkdtemp(), ".env")
-        env.write_text("")
+        env.write_text("", encoding="utf-8")
         with mock.patch.dict(os.environ, {}):
             self.assertIn("error", app.apply_settings({"party": {"lights": "彩虹"}}, session, SimpleNamespace(), env))
             self.assertIn("error", app.apply_settings({"party": {"game": "x & del *.*;"}}, session, SimpleNamespace(), env))
@@ -7829,7 +7858,7 @@ class SecurityTest(TempDirTest):
 
     def test_tools_refuse_and_alert(self):
         toolbox = self.make_toolbox()
-        Path(self.tmp, ".env").write_text("ANTHROPIC_API_KEY=secret")
+        Path(self.tmp, ".env").write_text("ANTHROPIC_API_KEY=secret", encoding="utf-8")
         result = toolbox.run(tool_use("read_file", {"path": ".env"}), lambda s: None)
         self.assertTrue(result["is_error"])
         self.assertNotIn("secret", result["content"])
@@ -7886,7 +7915,7 @@ class VendorTest(TempDirTest):
         url = "/vendor/three-0.160.0/examples/jsm/shaders/CopyShader.js"
         self.assertIsNotNone(friday_vendor.local_file(web, url))
         self.assertIsNone(friday_vendor.local_file(web, "/vendor/three-0.160.0/../../index.html"))
-        friday_vendor.local_file(web, url).write_text("alert('hacked')")
+        friday_vendor.local_file(web, url).write_text("alert('hacked')", encoding="utf-8")
         self.assertIsNone(friday_vendor.local_file(web, url))  # 被改过就不用
 
     def test_rejects_strange_paths(self):
@@ -7901,7 +7930,7 @@ class HealthTest(TempDirTest):
         downloads = Path(self.tmp, "Downloads")
         downloads.mkdir()
         for n in range(160):
-            (downloads / f"f{n}.txt").write_text("x")
+            (downloads / f"f{n}.txt").write_text("x", encoding="utf-8")
         state = friday_alerts.AlertState(os.path.join(self.tmp, "alerts.json"))
         memory = [95.0]
         day = ["2026-11-10"]
@@ -7932,24 +7961,24 @@ class HealthTest(TempDirTest):
         downloads.mkdir()
         names = ["a.jpg", "b.PDF", "setup.exe", "song.mp3", "x.zip", "readme", "c.jpg", "busy.crdownload"]
         for name in names:
-            (downloads / name).write_text(name)
+            (downloads / name).write_text(name, encoding="utf-8")
         (downloads / "图片").mkdir()
-        (downloads / "图片" / "c.jpg").write_text("old")  # 重名:不覆盖
+        (downloads / "图片" / "c.jpg").write_text("old", encoding="utf-8")  # 重名:不覆盖
         old = time.time() - 3600
         for name in names:
             os.utime(downloads / name, (old, old))
-        (downloads / "new.png").write_text("still downloading")  # 刚下载的:不动
+        (downloads / "new.png").write_text("still downloading", encoding="utf-8")  # 刚下载的:不动
         result = friday_health.tidy(downloads, self.tmp)
         self.assertEqual(result["moved"], 7)
         self.assertEqual(result["groups"], {"图片": 2, "文档": 1, "安装程序": 1, "音乐": 1, "压缩包": 1, "其他": 1})
         self.assertTrue((downloads / "图片" / "c (1).jpg").exists())
-        self.assertEqual((downloads / "图片" / "c.jpg").read_text(), "old")
+        self.assertEqual((downloads / "图片" / "c.jpg").read_text(encoding="utf-8"), "old")
         self.assertTrue((downloads / "busy.crdownload").exists())
         self.assertTrue((downloads / "new.png").exists())
         self.assertIn("7 个文件", friday_health.describe_tidy(result))
         self.assertEqual(friday_health.undo_tidy(self.tmp), 7)
         for name in names:
-            self.assertEqual((downloads / name).read_text(), name)
+            self.assertEqual((downloads / name).read_text(encoding="utf-8"), name)
         self.assertFalse((downloads / "文档").exists())  # 空文件夹删掉了
         self.assertTrue((downloads / "图片").exists())  # 原本就有东西的留着
         self.assertEqual(friday_health.undo_tidy(self.tmp), 0)
@@ -8112,7 +8141,7 @@ class LocksTest(TempDirTest):
     def test_discord_needs_code(self):
         now = [59.0]
         sent, events = [], queue.Queue()
-        Path(self.tmp, "d.json").write_text(json.dumps({"owners": [{"id": 42, "name": "me"}]}))
+        Path(self.tmp, "d.json").write_text(json.dumps({"owners": [{"id": 42, "name": "me"}]}), encoding="utf-8")
         gate = dmod.DiscordGate(Path(self.tmp, "d.json"), events, lambda ch, text: sent.append(text), lambda t: None)
         gate.remote_lock = friday_locks.RemoteLock(secret=lambda: self.SECRET, clock=lambda: now[0])
         gate.handle(42, "me", True, "帮我看看今天的邮件", "dm")
@@ -8208,8 +8237,8 @@ class PhotoTest(TempDirTest):
         self.assertNotIn("thinking", [getattr(b, "type", None) for b in bot.messages[-1]["content"]])
 
     def test_retries_without_thinking_when_signature_rejected(self):
-        error = anthropic.APIStatusError("messages.5.content.0: Invalid `signature` in `thinking` block. "
-                                         "The block is bound to a different conversation.", status_code=400)
+        error = api_status_error("messages.5.content.0: Invalid `signature` in `thinking` block. "
+                                 "The block is bound to a different conversation.", status_code=400)
         client = FakeClient(FakeStream([], error=error), FakeStream(["好的"]))
         bot = app.Assistant(client=client)
         bot.messages = [{"role": "user", "content": "你好"},
@@ -8217,7 +8246,7 @@ class PhotoTest(TempDirTest):
                                                           {"type": "text", "text": "你好"}]}]
         self.assertEqual(bot.ask("再见", lambda t: None), "好的")
         self.assertEqual([b["type"] for b in client.calls[1]["messages"][1]["content"]], ["text"])
-        other = anthropic.APIStatusError("bad request", status_code=400)
+        other = api_status_error("bad request", status_code=400)
         bot2 = app.Assistant(client=FakeClient(FakeStream([], error=other)))
         with self.assertRaises(anthropic.APIStatusError):
             bot2.ask("x", lambda t: None)  # 其他 400 照常报错
@@ -8245,7 +8274,7 @@ class PhotoTest(TempDirTest):
 
     def test_gate_passes_photos(self):
         events = queue.Queue()
-        Path(self.tmp, "d.json").write_text(json.dumps({"owners": [{"id": 42, "name": "me"}]}))
+        Path(self.tmp, "d.json").write_text(json.dumps({"owners": [{"id": 42, "name": "me"}]}), encoding="utf-8")
         gate = dmod.DiscordGate(Path(self.tmp, "d.json"), events, lambda ch, t: None, lambda t: None)
         gate.handle(42, "me", True, "", "dm", images=[b"JPEG"])
         self.assertEqual(events.get_nowait()[1].images, [b"JPEG"])
@@ -8432,9 +8461,9 @@ class SendToPhoneTest(TempDirTest):
 
     def test_refusals(self):
         toolbox, sent = self.make(confirm=False)
-        Path(self.tmp, "a.txt").write_text("x")
+        Path(self.tmp, "a.txt").write_text("x", encoding="utf-8")
         self.assertTrue(toolbox.run(tool_use("send_to_phone", {"action": "file", "path": "a.txt"}), lambda s: None)["is_error"])
-        Path(self.tmp, ".env").write_text("KEY=secret")
+        Path(self.tmp, ".env").write_text("KEY=secret", encoding="utf-8")
         result = toolbox.run(tool_use("send_to_phone", {"action": "file", "path": ".env"}), lambda s: None)
         self.assertTrue(result["is_error"])
         big = Path(self.tmp, "big.zip")
@@ -8956,7 +8985,7 @@ class GuardTest(TempDirTest):
     def beat(self, state="running", age=0):
         data = {"time": self.now[0] - age, "pid": 4242, "state": state, "exe": "pythonw", "argv": ["--web", "--port", "47800"],
                 "script": "assistant.py"}
-        Path(self.tmp, friday_guard.HEARTBEAT).write_text(json.dumps(data))
+        Path(self.tmp, friday_guard.HEARTBEAT).write_text(json.dumps(data), encoding="utf-8")
 
     def test_normal_running_and_quit(self):
         guard = self.make()
@@ -9027,7 +9056,7 @@ class SelfRescueTest(TempDirTest):
 
     def beat(self):
         Path(self.tmp, friday_guard.HEARTBEAT).write_text(json.dumps(
-            {"time": self.now[0], "pid": 77, "state": "running", "exe": "pythonw", "argv": [], "script": "/x/assistant.py"}))
+            {"time": self.now[0], "pid": 77, "state": "running", "exe": "pythonw", "argv": [], "script": "/x/assistant.py"}), encoding="utf-8")
 
     def test_window_not_answering_restarts_after_four_tries(self):
         guard = self.guard([False, False, True, False, False, False, False])
@@ -9055,19 +9084,19 @@ class SelfRescueTest(TempDirTest):
     def test_ping_reads_instance_file(self):
         beat = {"pid": 77}
         self.assertIsNone(friday_guard.ping(Path(self.tmp), beat))  # 还没写好
-        Path(self.tmp, "friday_web.json").write_text(json.dumps({"port": 1, "token": "t", "pid": 99}))
+        Path(self.tmp, "friday_web.json").write_text(json.dumps({"port": 1, "token": "t", "pid": 99}), encoding="utf-8")
         self.assertIsNone(friday_guard.ping(Path(self.tmp), beat))  # 是上一个星期五留下的
-        Path(self.tmp, "friday_web.json").write_text(json.dumps({"port": 1, "token": "t", "pid": 77}))
+        Path(self.tmp, "friday_web.json").write_text(json.dumps({"port": 1, "token": "t", "pid": 77}), encoding="utf-8")
         self.assertFalse(friday_guard.ping(Path(self.tmp), beat))  # 叫不动
 
     def update_dir(self):
         root = Path(self.tmp, "repo")
         folder = root / "assistant"
         folder.mkdir(parents=True)
-        (folder / "assistant.py").write_text("old")
-        (folder / "keep.py").write_text("same")
-        (folder / ".env").write_text("SECRET=mine")
-        (folder / friday_update.VERSION_FILE).write_text('{"commit": "old1"}')
+        (folder / "assistant.py").write_text("old", encoding="utf-8")
+        (folder / "keep.py").write_text("same", encoding="utf-8")
+        (folder / ".env").write_text("SECRET=mine", encoding="utf-8")
+        (folder / friday_update.VERSION_FILE).write_text('{"commit": "old1"}', encoding="utf-8")
         return folder
 
     def test_update_backup_and_rollback(self):
@@ -9076,11 +9105,11 @@ class SelfRescueTest(TempDirTest):
                              "assistant/brand_new.py": "x", "assistant/.env": "SECRET=other"})
         result = friday_update.update(folder, fetcher=lambda url: data, installer=lambda d: True)
         self.assertEqual(sorted(result["changed"]), ["assistant/assistant.py", "assistant/brand_new.py"])
-        self.assertEqual((folder / "assistant.py").read_text(), "broken")
+        self.assertEqual((folder / "assistant.py").read_text(encoding="utf-8"), "broken")
         self.assertTrue(friday_update.rollback(folder))
-        self.assertEqual((folder / "assistant.py").read_text(), "old")
+        self.assertEqual((folder / "assistant.py").read_text(encoding="utf-8"), "old")
         self.assertFalse((folder / "brand_new.py").exists())  # 新加的文件拿掉
-        self.assertEqual((folder / ".env").read_text(), "SECRET=mine")
+        self.assertEqual((folder / ".env").read_text(encoding="utf-8"), "SECRET=mine")
         self.assertEqual(friday_update.current_version(folder), "old1")
         self.assertFalse(friday_update.rollback(folder))  # 只退一次
 
@@ -9090,28 +9119,28 @@ class SelfRescueTest(TempDirTest):
         friday_update.update(folder, fetcher=lambda url: data, installer=lambda d: True)
         later = time.time() + friday_update.ROLLBACK_WINDOW + 60
         self.assertFalse(friday_update.rollback(folder, clock=lambda: later))  # 用了很久都没事:不是更新的问题
-        self.assertEqual((folder / "assistant.py").read_text(), "new")
+        self.assertEqual((folder / "assistant.py").read_text(encoding="utf-8"), "new")
 
     def test_rollback_stays_inside_install_folder(self):
         """审计:清单被改过也不会删到安装文件夹外面、或碰到私人文件。"""
         folder = self.update_dir()
         outside = Path(self.tmp, "outside.txt")
-        outside.write_text("keep")
+        outside.write_text("keep", encoding="utf-8")
         backup = folder / friday_update.BACKUP_DIR
         backup.mkdir()
         (backup / "manifest.json").write_text(json.dumps({
             "time": time.time(), "changed": ["../outside.txt", "assistant/.env"], "added": ["../outside.txt", "assistant/.env"],
-            "version": "", "used": False}))
+            "version": "", "used": False}), encoding="utf-8")
         self.assertTrue(friday_update.rollback(folder))
-        self.assertEqual(outside.read_text(), "keep")
-        self.assertEqual((folder / ".env").read_text(), "SECRET=mine")
+        self.assertEqual(outside.read_text(encoding="utf-8"), "keep")
+        self.assertEqual((folder / ".env").read_text(encoding="utf-8"), "SECRET=mine")
 
     def test_guard_rollback_uses_script_folder(self):
         folder = self.update_dir()
         data = make_archive({"assistant/assistant.py": "broken"})
         friday_update.update(folder, fetcher=lambda url: data, installer=lambda d: True)
         self.assertTrue(friday_guard.rollback_update({"script": str(folder / "assistant.py")}))
-        self.assertEqual((folder / "assistant.py").read_text(), "old")
+        self.assertEqual((folder / "assistant.py").read_text(encoding="utf-8"), "old")
         self.assertFalse(friday_guard.rollback_update({}))
 
     def test_orb_process_start_and_stop(self):
@@ -9172,7 +9201,7 @@ class SelfRescueTest(TempDirTest):
         self.assertLessEqual(len(calls), 6)  # 星期五不在了:小光球自己结束
 
     def test_remote_needs_the_right_friday(self):
-        Path(self.tmp, "friday_web.json").write_text(json.dumps({"port": 1, "token": "t", "pid": 99}))
+        Path(self.tmp, "friday_web.json").write_text(json.dumps({"port": 1, "token": "t", "pid": 99}), encoding="utf-8")
         with self.assertRaises(RuntimeError):
             friday_floatorb._remote(Path(self.tmp), 5)
         self.assertTrue(callable(friday_floatorb._remote(Path(self.tmp), 99)))
@@ -9203,10 +9232,10 @@ class KeyAndCreditAlertTest(TempDirTest):
         session.discord = SimpleNamespace(notify_owners=lambda text: sent.append(text))
         session._alerted = {}
         with mock.patch.object(app.threading, "Thread", lambda target, daemon=None, **kw: SimpleNamespace(start=target)):
-            session._alert_serious(anthropic.AuthenticationError("invalid x-api-key", status_code=401))
-            session._alert_serious(anthropic.AuthenticationError("invalid x-api-key", status_code=401))  # 6 小时内不重复
-            session._alert_serious(anthropic.APIStatusError("Your credit balance is too low", status_code=400))
-            session._alert_serious(anthropic.APIStatusError("overloaded", status_code=529))
+            session._alert_serious(api_status_error("invalid x-api-key", 401, anthropic.AuthenticationError))
+            session._alert_serious(api_status_error("invalid x-api-key", 401, anthropic.AuthenticationError))  # 6 小时内不重复
+            session._alert_serious(api_status_error("Your credit balance is too low", status_code=400))
+            session._alert_serious(api_status_error("overloaded", status_code=529))
         self.assertEqual(len(sent), 2)
         self.assertIn("钥匙失效", sent[0])
         self.assertIn("余额用完", sent[1])
@@ -9276,7 +9305,7 @@ class PhotoSortTest(TempDirTest):
         Image.new("RGB", (10, 10)).save(folder / "beach.jpg", exif=exif)  # 照片里记的拍摄时间
         (folder / "IMG_20261105_120000.jpg").write_bytes(b"x")  # 文件名里的日期
         (folder / "Screenshot_2026-10-01.png").write_bytes(b"x")
-        (folder / "notes.txt").write_text("不是照片")
+        (folder / "notes.txt").write_text("不是照片", encoding="utf-8")
         old = datetime.datetime(2024, 7, 1).timestamp()
         (folder / "old.mov").write_bytes(b"x")
         for name in ("beach.jpg", "IMG_20261105_120000.jpg", "Screenshot_2026-10-01.png", "old.mov"):
@@ -9588,7 +9617,7 @@ class FindFilesTest(TempDirTest):
         old = root / "Downloads" / "报价单_旧.pdf"
         new = root / "Downloads" / "报价单_新.PDF"
         for path in (old, new, root / "Downloads" / "报价单.xlsx", root / "AppData" / "报价单.pdf", root / ".env"):
-            path.write_text("x")
+            path.write_text("x", encoding="utf-8")
         os.utime(old, (time.time() - 10 * 86400,) * 2)
         result = friday_files.search([root], ["报价"], "pdf")
         self.assertEqual([Path(f["path"]).name for f in result["files"]], ["报价单_新.PDF", "报价单_旧.pdf"])
@@ -9603,8 +9632,8 @@ class FindFilesTest(TempDirTest):
         import friday_quick
 
         root = Path(self.tmp)
-        (root / "合同2026.docx").write_text("x")
-        (root / "credentials.json").write_text("x")
+        (root / "合同2026.docx").write_text("x", encoding="utf-8")
+        (root / "credentials.json").write_text("x", encoding="utf-8")
         box = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m.json")), lambda a: True)
         box.file_roots = lambda folder=None: [root]
         self.assertIn("find_files", [t["name"] for t in box.definitions()])
@@ -10121,8 +10150,8 @@ class FolderBackupTest(TempDirTest):
         super().setUp()
         self.src = Path(self.tmp, "文档")
         (self.src / "子").mkdir(parents=True)
-        (self.src / "a.txt").write_text("一")
-        (self.src / "子" / "b.txt").write_text("二")
+        (self.src / "a.txt").write_text("一", encoding="utf-8")
+        (self.src / "子" / "b.txt").write_text("二", encoding="utf-8")
         self.dest = Path(self.tmp, "备份盘")
         self.dest.mkdir()
         self.now = [1_800_000_000.0]
@@ -10137,33 +10166,33 @@ class FolderBackupTest(TempDirTest):
         self.assertIn("设好了", backup.configure([str(self.src)], str(self.dest)))
         result = backup.run()
         self.assertEqual((result["copied"], result["updated"]), (2, 0))
-        self.assertEqual((self.dest / "文档" / "子" / "b.txt").read_text(), "二")
+        self.assertEqual((self.dest / "文档" / "子" / "b.txt").read_text(encoding="utf-8"), "二")
         self.assertEqual(backup.run()["copied"], 0)  # 没改过就不复制
-        (self.src / "a.txt").write_text("一改了")
+        (self.src / "a.txt").write_text("一改了", encoding="utf-8")
         os.utime(self.src / "a.txt", (time.time() + 100,) * 2)
         (self.src / "子" / "b.txt").unlink()
         result = backup.run()
         self.assertEqual(result["updated"], 1)
-        self.assertEqual((self.dest / "文档" / "a.txt").read_text(), "一改了")
+        self.assertEqual((self.dest / "文档" / "a.txt").read_text(encoding="utf-8"), "一改了")
         olds = list((self.dest / "_旧版本").rglob("a.txt"))
-        self.assertEqual(olds[0].read_text(), "一")
+        self.assertEqual(olds[0].read_text(encoding="utf-8"), "一")
         self.assertTrue((self.dest / "文档" / "子" / "b.txt").exists())  # 原文件删了,备份还在
 
     def test_ransomware_guard(self):
         import friday_folderbackup
 
         for i in range(60):
-            (self.src / f"f{i}.docx").write_text("原来")
+            (self.src / f"f{i}.docx").write_text("原来", encoding="utf-8")
         backup = self.make()
         backup.configure([str(self.src)], str(self.dest))
         backup.run()
         for i in range(60):
             path = self.src / f"f{i}.docx"
-            path.write_text("加密了!!")
+            path.write_text("加密了!!", encoding="utf-8")
             os.utime(path, (time.time() + 100,) * 2)
         result = backup.run()
         self.assertTrue(result["blocked"])
-        self.assertEqual((self.dest / "文档" / "f1.docx").read_text(), "原来")
+        self.assertEqual((self.dest / "文档" / "f1.docx").read_text(encoding="utf-8"), "原来")
         self.assertFalse(backup.due())  # 停下来等你确认
         self.assertTrue(backup.run(force=True)["ok"])
         self.assertFalse(friday_folderbackup.FolderBackup(os.path.join(self.tmp, "fb.json")).blocked)
@@ -11414,7 +11443,7 @@ class FloatOrbTest(TempDirTest):
             self.assertEqual(os.environ["FRIDAY_FLOATORB"], "on")
             self.assertIn("收起", app.floatorb_switch(session, False))
         self.assertEqual([c for c in calls if c in ("start", "stop")], ["start", "stop"])
-        self.assertIn("FRIDAY_FLOATORB=off", Path(self.tmp, ".env").read_text())
+        self.assertIn("FRIDAY_FLOATORB=off", Path(self.tmp, ".env").read_text(encoding="utf-8"))
         quick = friday_quick.QuickCommands(SimpleNamespace())
         quick.floatorb = lambda on: f"orb {on}"
         self.assertEqual(quick.handle("显示小光球"), "orb True")
@@ -11940,8 +11969,10 @@ class LibraryTest(TempDirTest):
 
     def make(self, root):
         import friday_security
-        return friday_library.Library(os.path.join(self.tmp, "lib.db"), folders=lambda: [str(root)],
-                                      skip=friday_security.is_secret_path)
+        lib = friday_library.Library(os.path.join(self.tmp, "lib.db"), folders=lambda: [str(root)],
+                                     skip=friday_security.is_secret_path)
+        self.addCleanup(lib.close)  # Windows:数据库开着,临时文件夹删不掉
+        return lib
 
     def test_reads_office_files(self):
         root = self.folder()
@@ -12444,8 +12475,8 @@ class StartupDoctorTest(TempDirTest):
         approved = friday_startup.APPROVED
         user_startup = Path(self.tmp, "Startup")
         user_startup.mkdir(exist_ok=True)
-        (user_startup / "Spotify.lnk").write_text("x")
-        (user_startup / "desktop.ini").write_text("x")
+        (user_startup / "Spotify.lnk").write_text("x", encoding="utf-8")
+        (user_startup / "desktop.ini").write_text("x", encoding="utf-8")
         registry = FakeRegistry({
             ("HKCU", friday_startup.RUN): {"Steam": '"C:\\Program Files (x86)\\Steam\\steam.exe" -silent',
                                            "Discord": "C:\\Users\\a\\AppData\\Local\\Discord\\Update.exe --processStart Discord.exe",
@@ -13248,11 +13279,19 @@ class AuditNov15Test(TempDirTest):
         temp.mkdir()
         outside.mkdir()
         keep = outside / "keep.txt"
-        keep.write_text("x")
+        keep.write_text("x", encoding="utf-8")
         os.utime(keep, (time.time() - 90 * 86400,) * 2)
-        os.symlink(outside, temp / "link", target_is_directory=True)
+        try:
+            os.symlink(outside, temp / "link", target_is_directory=True)
+        except OSError:  # Windows 没有开发人员模式:不能建符号连结
+            try:
+                import _winapi
+
+                _winapi.CreateJunction(str(outside), str(temp / "link"))
+            except (ImportError, OSError, AttributeError):
+                self.skipTest("这台电脑建不了捷径")
         old = temp / "old.tmp"
-        old.write_text("y")
+        old.write_text("y", encoding="utf-8")
         os.utime(old, (time.time() - 30 * 86400,) * 2)
         freed, count = friday_startup.clean_temp(temp)
         self.assertEqual(count, 1)
@@ -13423,12 +13462,17 @@ class CodeLabTest(TempDirTest):
             "class T(unittest.TestCase):\n"
             "    def test_blocked(self):\n        subprocess.run([sys.executable, '-c', 'pass'])\n"
             "    def test_env(self):\n        self.assertEqual(os.sep, '?', 'Windows 路径不一样')\n"
+            "    def test_hidden(self):\n        try:\n            subprocess.run([sys.executable, '-c', 'pass'])\n"
+            "            ok = True\n        except OSError:\n            ok = False\n        self.assertTrue(ok)\n"
             "    def test_ok(self):\n        self.assertEqual(calc.X, 1)\n", encoding="utf-8")
         lab = self.make(app_dir=app_dir)
         record = lab.self_test([{"file": "calc.py", "old": "X = 1", "new": "X = 1  # 注解"}], "看原因")
         report = Path(record["report"]).read_text(encoding="utf-8")
-        self.assertIn("【安全网故意挡住的(1 个", report)
+        self.assertIn("【安全网故意挡住的(2 个", report)
         self.assertIn("test_assistant.T.test_blocked —— PermissionError: 代码实验室不允许:subprocess.Popen", report)
+        # 错误被测试自己吞掉了:还是看得出是被挡住
+        self.assertIn("test_assistant.T.test_hidden —— 代码实验室不允许:subprocess.Popen(测试里被挡住了,所以:AssertionError",
+                      report)
         self.assertIn("【其他原因(1 个", report)
         self.assertIn("test_assistant.T.test_env —— AssertionError", report)
         self.assertIn("Windows 路径不一样", report)

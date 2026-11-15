@@ -13,6 +13,7 @@ import datetime
 import json
 import os
 import shutil
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -48,7 +49,8 @@ def check_source(folder: str) -> Path:
     if path == Path(path.anchor) or path == Path.home().resolve():
         raise ValueError(f"{path} 太大了(整个硬盘或用户文件夹),请选里面重要的文件夹,例如文档、照片")
     lowered = str(path).lower()
-    if any(part in lowered for part in ("\\windows", "\\program files", "\\appdata", "\\programdata")):
+    in_temp = _inside(path, Path(tempfile.gettempdir()))  # 临时文件夹在 AppData 里面,但不是程序的东西
+    if not in_temp and any(part in lowered for part in ("\\windows", "\\program files", "\\appdata", "\\programdata")):
         raise ValueError(f"{path} 是系统或程序的文件夹,不用备份")
     if _inside(path, ASSISTANT_DIR.parent):
         raise ValueError("星期五自己的文件夹不用放进来(它有自己的备份)")

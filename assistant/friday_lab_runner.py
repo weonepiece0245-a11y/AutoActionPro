@@ -32,6 +32,14 @@ def _inside(path: str, roots: list[str]) -> bool:
     return any(path == root or path.startswith(root + os.sep) for root in roots)
 
 
+BLOCKED: list[str] = []  # 这个测试里被安全网挡下的事(有的程序会把错误吞掉,报告里要看得出来是被挡住)
+
+
+def _deny(message: str) -> None:
+    BLOCKED.append(message)
+    raise PermissionError(message)
+
+
 def install(mode: str, workdir: str) -> None:
     work = _norm(workdir)
     temp = _norm(tempfile.gettempdir())
@@ -101,7 +109,8 @@ def install(mode: str, workdir: str) -> None:
     # 开实验室小程序时 Windows 会用到的(管道、开程序、超时停掉它)
     process_events = {"_winapi.CreateProcess", "_winapi.CreatePipe", "_winapi.TerminateProcess",
                       "msvcrt.open_osfhandle", "msvcrt.get_osfhandle", "os.kill", "os.posix_spawn"}
-    harmless_events = {"ctypes.create_unicode_buffer", "ctypes.create_string_buffer"}  # 只是一块记忆体
+    harmless_events = {"ctypes.create_unicode_buffer", "ctypes.create_string_buffer",  # 只是一块记忆体
+                       "msvcrt.locking"}  # 锁住自己开着的文件(“只开一个星期五”用的)
     harmless = {_norm(os.devnull)}  # “空设备”:读写都没东西
     local_hosts = {"127.0.0.1", "localhost", "::1", "0.0.0.0", ""}
     path_events = {"os.remove": 0, "os.rmdir": 0, "os.mkdir": 0, "os.chmod": 0, "os.chown": 0, "os.rename": 0,
@@ -116,8 +125,12 @@ def install(mode: str, workdir: str) -> None:
             return
         if event in process_events and approved_in_stack():
             return
+        if event == "_winapi.CopyFile2" and len(args) >= 2:  # Windows 上复制文件(shutil.copy2):照读写的规矩看
+            if _inside(_norm(args[0]), read_roots) and _inside(_norm(args[1]), write_roots):
+                return
+            _deny(f"代码实验室只能把看得到的文件复制到自己的文件夹:{args[1]}")
         if event.startswith(blocked_events):
-            raise PermissionError(f"代码实验室不允许:{event}")
+            _deny(f"代码实验室不允许:{event}")
         if event == "open" and args:
             path = args[0]
             if isinstance(path, int):
@@ -129,24 +142,24 @@ def install(mode: str, workdir: str) -> None:
             if real in harmless or (not writing and os.path.basename(real) == "mime.types"):
                 return
             if writing and not _inside(real, write_roots):
-                raise PermissionError(f"代码实验室只能在自己的文件夹里写文件:{path}")
+                _deny(f"代码实验室只能在自己的文件夹里写文件:{path}")
             if not writing and not _inside(real, read_roots):
-                raise PermissionError(f"代码实验室不能读这里的文件:{path}(要用的文件请让星期五先放进实验室)")
+                _deny(f"代码实验室不能读这里的文件:{path}(要用的文件请让星期五先放进实验室)")
             return
         if event in path_events and args:
             for target in args[: 2 if event in ("os.rename", "os.replace", "os.link", "os.symlink", "shutil.move") else 1]:
                 if isinstance(target, int):
                     continue
                 if not _inside(_norm(target), write_roots):
-                    raise PermissionError(f"代码实验室只能改自己文件夹里的东西:{target}")
+                    _deny(f"代码实验室只能改自己文件夹里的东西:{target}")
             return
         if event in ("socket.connect", "socket.sendto", "socket.bind") and len(args) > 1:
             address = args[1]
             host = address[0] if isinstance(address, tuple) and address else str(address)
             if mode == "strict" or str(host) not in local_hosts:
-                raise PermissionError("代码实验室不能上网" + ("" if mode == "strict" else "(只能连本机)"))
+                _deny("代码实验室不能上网" + ("" if mode == "strict" else "(只能连本机)"))
         if event == "socket.getaddrinfo" and args and mode == "strict":
-            raise PermissionError("代码实验室不能上网")
+            _deny("代码实验室不能上网")
 
     sys.addaudithook(hook)
 
@@ -203,7 +216,19 @@ def main(argv: list[str]) -> int:
                 print(getattr(test, "_exception", test))
             print("\n@@LOADFAIL")
             return 1
-        result = unittest.TextTestRunner(stream=sys.stdout, verbosity=1).run(suite)
+        blocked_in: dict[str, str] = {}
+
+        class Result(unittest.TextTestResult):
+            def startTest(self, test):
+                BLOCKED.clear()
+                super().startTest(test)
+
+            def stopTest(self, test):
+                if BLOCKED:
+                    blocked_in[test.id()] = BLOCKED[0]
+                super().stopTest(test)
+
+        result = unittest.TextTestRunner(stream=sys.stdout, verbosity=1, resultclass=Result).run(suite)
         print(f"\n@@RESULT ran={result.testsRun} failures={len(result.failures)} errors={len(result.errors)}")
         for test, trace in result.failures + result.errors:
             print(f"@@FAILED {test.id()}")
@@ -212,7 +237,11 @@ def main(argv: list[str]) -> int:
             blocked = [line for line in lines if "代码实验室" in line]
             starts = [i for i, line in enumerate(lines)
                       if re.match(r"^[\w.]+(Error|Exception|Exit|Interrupt|Warning)\b", line)]
-            why = blocked[-1] if blocked else (" ".join(lines[starts[-1]:]) if starts else (lines or ["?"])[-1])
+            why = " ".join(lines[starts[-1]:]) if starts else (lines or ["?"])[-1]
+            if blocked:
+                why = blocked[-1]
+            elif test.id() in blocked_in:  # 错误被程序自己吞掉了,但测试中途确实被挡过
+                why = f"{blocked_in[test.id()]}(测试里被挡住了,所以:{why})"
             print(f"@@WHY {test.id()}\t{why[:240]}")
         return 0 if result.wasSuccessful() else 1
     print("不认识的模式", file=sys.stderr)

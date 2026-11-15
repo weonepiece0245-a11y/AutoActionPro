@@ -182,6 +182,14 @@ class Library:
             self.fts = False
         self.db.commit()
 
+    def close(self) -> None:
+        """关掉数据库(Windows 上开着的文件删不掉、搬不动)。"""
+        with self.lock:
+            try:
+                self.db.close()
+            except sqlite3.Error:
+                pass
+
     # ---------- 整理(建索引) ----------
     def _walk(self) -> list[Path]:
         found = []
