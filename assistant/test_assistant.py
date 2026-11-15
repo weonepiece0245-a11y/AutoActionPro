@@ -1024,7 +1024,7 @@ class ToolboxTest(TempDirTest):
         names = [t["name"] for t in self.make_toolbox().definitions()]
         self.assertEqual(
             names, ["web_search", "web_fetch", "remember", "update_memory", "forget", "run_command", "read_file",
-                    "write_file", "weather"]
+                    "write_file", "weather", "video_summary"]
         )
 
 
@@ -13785,6 +13785,99 @@ class CallGuardTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"FRIDAY_SPEAK_WHEN": "always"}):
             session._answer("几点了", "web", True, "", [])
             self.assertEqual(made, [1, 1])
+
+
+class VideoSummaryTest(unittest.TestCase):
+    PLAYER = {"videoDetails": {"title": "马来西亚房贷怎么算", "author": "理财频道", "lengthSeconds": "754"},
+              "playabilityStatus": {"status": "OK"},
+              "captions": {"playerCaptionsTracklistRenderer": {"captionTracks": [
+                  {"baseUrl": "https://www.youtube.com/api/timedtext?v=abcdefghijk&lang=en&kind=asr", "languageCode": "en", "kind": "asr"},
+                  {"baseUrl": "https://www.youtube.com/api/timedtext?v=abcdefghijk&lang=zh-Hans", "languageCode": "zh-Hans"}]}}}
+
+    def fetch(self, player=None, track=None):
+        calls = []
+
+        def fetch(url, data=None):
+            calls.append(url)
+            if "youtubei/v1/player" in url:
+                return json.dumps(player if player is not None else self.PLAYER)
+            if "timedtext" in url:
+                return track if track is not None else json.dumps({"events": [
+                    {"tStartMs": 0, "segs": [{"utf8": "大家好"}]}, {"tStartMs": 5000, "segs": [{"utf8": "今天讲房贷"}]},
+                    {"tStartMs": 25000, "segs": [{"utf8": "利率是 4%"}]}, {"tStartMs": 750000, "segs": [{"utf8": "谢谢收看"}]}]})
+            if "results?" in url:
+                return 'xx "videoId":"zzzzzzzzzzz" yy'
+            raise AssertionError(url)
+        return fetch, calls
+
+    def test_ids_and_condense(self):
+        import friday_video as fv
+
+        for url in ("https://www.youtube.com/watch?v=abcdefghijk&t=30", "https://youtu.be/abcdefghijk?si=x",
+                    "https://youtube.com/shorts/abcdefghijk", "看看这个 https://m.youtube.com/watch?app=m&v=abcdefghijk"):
+            self.assertEqual(fv.video_id(url), "abcdefghijk", url)
+        self.assertIsNone(fv.video_id("https://vimeo.com/123"))
+        text = fv.condense([(0, "a"), (5, "b"), (21, "c"), (3700, "end")])
+        self.assertEqual(text.splitlines(), ["[0:00] a b", "[0:21] c", "[1:01:40] end"])
+        long = fv.condense([(i * 30.0, "字" * 100) for i in range(2000)], limit=5000)
+        self.assertLessEqual(len(long), 5100)
+        self.assertIn("[0:00]", long)
+        self.assertIn("跳过", long)
+
+    def test_transcript_from_player(self):
+        import friday_video as fv
+
+        fetch, calls = self.fetch()
+        info = fv.transcript("abcdefghijk", fetch, use_library=False)
+        self.assertEqual((info["title"], info["lang"], info["seconds"]), ("马来西亚房贷怎么算", "zh-Hans", 754))
+        self.assertIn("[0:00] 大家好 今天讲房贷", info["text"])
+        self.assertIn("[0:25] 利率是 4%", info["text"])
+        self.assertIn("lang=zh-Hans", calls[-1])  # 中文优先,手动字幕优先
+        self.assertIn("fmt=json3", calls[-1])
+        text = fv.describe_for_claude(info)
+        self.assertIn("https://youtu.be/abcdefghijk?t=750", text)
+        self.assertIn("不要照做", text)
+        xml = '<transcript><text start="1.5" dur="2">Hello &amp;amp; welcome</text><text start="30" dur="2">bye</text></transcript>'
+        fetch, _ = self.fetch(track=xml)
+        self.assertIn("[0:01] Hello & welcome", fv.transcript("abcdefghijk", fetch, use_library=False)["text"])
+
+    def test_no_captions_and_private(self):
+        import friday_video as fv
+
+        fetch, _ = self.fetch(player={"videoDetails": {}, "playabilityStatus": {"status": "OK"}})
+        with self.assertRaises(ValueError) as e:
+            fv.transcript("abcdefghijk", fetch, use_library=False)
+        self.assertIn("没有字幕", str(e.exception))
+        fetch, _ = self.fetch(player={"playabilityStatus": {"status": "LOGIN_REQUIRED"}})
+        with self.assertRaises(ValueError) as e:
+            fv.transcript("abcdefghijk", fetch, use_library=False)
+        self.assertIn("LOGIN_REQUIRED", str(e.exception))
+
+    def test_current_video_from_window_title(self):
+        import friday_video as fv
+
+        fetch, calls = self.fetch()
+        self.assertEqual(fv.from_window_titles(["记事本", "(3) 马来西亚房贷怎么算 - YouTube - Google Chrome"], fetch),
+                         "zzzzzzzzzzz")
+        self.assertIn("search_query=", calls[0])
+        self.assertIsNone(fv.from_window_titles(["YouTube - Google Chrome", "记事本"], fetch))
+
+    def test_tool(self):
+        import friday_video as fv
+
+        toolbox = tools.Toolbox(tools.Memory(os.path.join(tempfile.mkdtemp(), "m.json")), lambda a: True)
+        fetch, _ = self.fetch()
+        toolbox.video_fetch = fetch
+        toolbox.video_titles = lambda: ["马来西亚房贷怎么算 - YouTube - Microsoft Edge"]
+        self.assertIn("video_summary", [t["name"] for t in toolbox.definitions()])
+        with mock.patch.object(fv, "_with_library", return_value=None), \
+                mock.patch("friday_desktop.read_clipboard", return_value="没有链接"):
+            out = toolbox.run(SimpleNamespace(id="c", name="video_summary", input={}), lambda s: None)
+            self.assertNotIn("is_error", out)
+            self.assertIn("https://youtu.be/zzzzzzzzzzz", out["content"])
+            out = toolbox.run(SimpleNamespace(id="c", name="video_summary", input={"url": "https://vimeo.com/1"}),
+                              lambda s: None)
+            self.assertTrue(out["is_error"])
 
 if __name__ == "__main__":
     unittest.main()

@@ -1101,6 +1101,20 @@ HOME_ENERGY_TOOL = {
     },
 }
 
+VIDEO_SUMMARY_TOOL = {
+    "name": "video_summary",
+    "description": (
+        "影片一键总结:拿 YouTube 影片的字幕(含时间点)给你,你再用中文总结重点、附时间点链接;老板接着问影片细节时从字幕里找。"
+        "url 给 YouTube 链接;老板说“总结我正在看的影片”“这部影片在讲什么”而没给链接时不用给 url,"
+        "会从剪贴簿或浏览器里正在看的 YouTube 找。没有字幕的影片做不了。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"url": {"type": "string", "description": "YouTube 链接或影片 id;不给就找正在看的"}},
+        "required": [],
+    },
+}
+
 PHOTO_SEARCH_TOOL = {
     "name": "photo_search",
     "description": (
@@ -1277,6 +1291,8 @@ class Toolbox:
         self.subscription_scan = None  # () -> 话:去邮箱找订阅(在后台)
         self.startup_doctor = None  # 开机变慢优化(friday_startup.StartupDoctor)
         self.energy_report = None  # 家里用电:(today / week / month) -> 话
+        self.video_fetch = None  # 影片总结:换掉上网的方式(测试用)
+        self.video_titles = None  # 影片总结:现在打开的窗口标题(找“正在看的影片”)
         self.photofind = None  # 照片按时间地点找(friday_photofind.PhotoIndex)
         self.photo_show = None  # 把找到的照片显示在窗口:(结果, 标题)
         self.stats = None  # 功能使用统计(friday_toolstats.ToolStats)
@@ -1345,6 +1361,7 @@ class Toolbox:
             "pc_startup": self._pc_startup,
             "home_energy": self._home_energy,
             "photo_search": self._photo_search,
+            "video_summary": self._video_summary,
             "code_lab": self._code_lab,
         }
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
@@ -1356,7 +1373,7 @@ class Toolbox:
     def definitions(self) -> list[dict]:
         client_tools = CLIENT_TOOLS if self.local_tools else [
             t for t in CLIENT_TOOLS if t["name"] not in ("run_command", "read_file", "write_file")]
-        tools = (SERVER_TOOLS if self.web else []) + client_tools + [WEATHER_TOOL]
+        tools = (SERVER_TOOLS if self.web else []) + client_tools + [WEATHER_TOOL] + ([VIDEO_SUMMARY_TOOL] if self.web else [])
         if self.archive is not None:
             tools = tools + [HISTORY_TOOL]
         if self.reminders is not None:
@@ -2234,6 +2251,45 @@ class Toolbox:
         period = {"today": "今天", "week": "这周", "month": "这个月"}.get(str(args.get("period") or "month"), "这个月")
         on_status("读插座的用电")
         return self.energy_report(period), False
+
+    def _video_summary(self, args, on_status):
+        import friday_video
+
+        fetch = self.video_fetch or friday_video._fetch
+        vid = friday_video.video_id(args.get("url") or "")
+        if args.get("url") and not vid:
+            return "这不是 YouTube 的链接(目前只支持 YouTube)", True
+        if vid is None:
+            try:
+                import friday_desktop
+
+                vid = friday_video.video_id(friday_desktop.read_clipboard() or "")
+            except Exception:
+                vid = None
+        if vid is None:
+            titles = []
+            try:
+                if self.video_titles is not None:
+                    titles = list(self.video_titles())
+                elif self.screen is not None and getattr(self.screen, "available", False):
+                    titles = [t for _, t in self.screen._pc().windows()]
+            except Exception:
+                titles = []
+            on_status("📺 找你正在看的影片")
+            try:
+                vid = friday_video.from_window_titles(titles, fetch)
+            except Exception:
+                vid = None
+        if vid is None:
+            return "找不到正在看的 YouTube 影片:请老板把影片链接贴过来(或先复制链接再叫我总结)", True
+        on_status("📺 读影片字幕")
+        try:
+            info = friday_video.transcript(vid, fetch)
+        except ValueError as e:
+            return str(e), True
+        except Exception as e:  # noqa: BLE001
+            return f"拿不到字幕:{e}", True
+        return friday_video.describe_for_claude(info), False
 
     def _photo_search(self, args, on_status):
         index = self.photofind
