@@ -1376,6 +1376,17 @@ function fillSettings() {
   if (s.brief != null) $("setBrief").checked = s.brief;
   $("eventRow").hidden = s.event_lead === null || s.event_lead === undefined;
   if (s.event_lead != null) $("setEventLead").value = String(s.event_lead);
+  const dp = s.departure;
+  $("departGroup").hidden = !dp;
+  if (dp) {
+    $("setDepartOn").checked = dp.on;
+    if (document.activeElement !== $("setDepartHome")) $("setDepartHome").value = dp.home || "";
+    $("setDepartExtra").value = String(dp.extra);
+    const next = (dp.upcoming || []).map((u) => `${u.leave} 出门 → ${u.start}「${u.title}」(预留 ${u.minutes} 分钟)`);
+    $("departNote").textContent = dp.problem ? "⚠ " + dp.problem
+      : !dp.home ? "先写家的地址才会提醒" : next.length ? "接下来:" + next.join(";") : "接下来 4 小时没有要出门的活动";
+    $("departNote").className = "set-note" + (dp.problem ? " warn" : "");
+  }
   const ml = s.mail_alert;
   $("mailGroup").hidden = !ml;
   if (ml && !$("mailGroup").contains(document.activeElement)) {
@@ -1828,6 +1839,9 @@ $("saveKeyExpires").onclick = () => saveSetting({ key_expires: $("setKeyExpires"
 $("setRain").onchange = (e) => saveSetting({ rain_alert: e.target.value });
 $("setBrief").onchange = (e) => saveSetting({ brief: e.target.checked });
 $("setEventLead").onchange = (e) => saveSetting({ event_lead: Number(e.target.value) });
+$("setDepartOn").onchange = (e) => saveSetting({ depart_on: e.target.checked });
+$("setDepartExtra").onchange = (e) => saveSetting({ depart_extra: Number(e.target.value) });
+$("departSave").onclick = () => saveSetting({ depart_home: $("setDepartHome").value.trim() });
 $("mailSave").onclick = () => saveSetting({ mail_alert: { senders: $("mailSenders").value, words: $("mailWords").value,
                                                            important: $("mailImportant").checked } }, 5000);
 $("mailImportant").onchange = () => $("mailSave").click();

@@ -522,6 +522,14 @@
         <select class="mini-select" id="setRain"><option value="07:00">早上 7:00</option><option value="07:30">早上 7:30</option><option value="08:00">早上 8:00</option><option value="08:30">早上 8:30</option><option value="09:00">早上 9:00</option><option value="off">不提醒</option></select></div>
       <div class="set-row" id="eventRow" hidden><label for="setEventLead">Google 日历上的活动,提前提醒我(不花钱)</label>
         <select class="mini-select" id="setEventLead"><option value="10">10 分钟</option><option value="15">15 分钟</option><option value="30">30 分钟</option><option value="60">1 小时</option><option value="0">不提醒</option></select></div>
+      <div id="departGroup" hidden>
+        <div class="set-row"><label for="setDepartOn">出门提醒:日历上有地点的活动,算好开车要多久,该出门前 5 分钟叫你(不花钱)</label><input type="checkbox" class="switch" id="setDepartOn"></div>
+        <div class="set-row sub"><label for="setDepartHome">家的地址</label><input class="mini-input wide" id="setDepartHome" maxlength="200" placeholder="例如 Jalan Ampang, Kuala Lumpur"><button type="button" class="mini-btn" id="departSave">保存</button></div>
+        <div class="set-row sub"><label for="setDepartExtra">停车、走路多留</label>
+          <select class="mini-select" id="setDepartExtra"><option value="0">不用</option><option value="5">5 分钟</option><option value="10">10 分钟</option><option value="15">15 分钟</option><option value="20">20 分钟</option><option value="30">30 分钟</option></select></div>
+        <div class="set-note" id="departNote"></div>
+        <div class="set-note">只会把家的地址和活动的地点送去 OpenStreetMap 查路线(不送标题和别的);上下班时间多算 40%,会下雨再加 10 分钟。</div>
+      </div>
       <div id="mailGroup" hidden>
         <div class="set-row"><span>重要邮件马上提醒我(不花钱)</span><button type="button" class="mini-btn" id="mailSave">保存</button></div>
         <div class="set-row sub"><label for="mailSenders">寄件人</label><input class="mini-input wide" id="mailSenders" placeholder="例如 boss@公司.com, Maybank, @学校.edu.my"></div>

@@ -2667,6 +2667,7 @@ def settings_state(session, meter=None) -> dict:
         if getattr(session, "clips", None) is not None and os.name == "nt" else None,
         "rain_alert": __import__("friday_alerts").rain_time(),
         "event_lead": __import__("friday_events").lead_minutes() if google_ready(session) else None,
+        "departure": departure_state(session),
         "mail_alert": mail_alert_state(session),
         "memtidy": memtidy_state(session),
         "vocab": vocab_state(session),
@@ -3289,6 +3290,32 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         save_env_value(env, "FRIDAY_EVENT_LEAD", str(lead))
         os.environ["FRIDAY_EVENT_LEAD"] = str(lead)
         done.append(f"日历上的活动开始前 {lead} 分钟提醒你" if lead else "不再提前提醒日历上的活动")
+    if "depart_home" in payload:
+        home = " ".join(str(payload["depart_home"] or "").split())[:200]
+        save_env_value(env, "FRIDAY_HOME_ADDRESS", home)
+        os.environ["FRIDAY_HOME_ADDRESS"] = home
+        reminder = getattr(session, "departure", None)
+        if reminder is not None:
+            reminder.drives.clear()
+            reminder.problem = ""
+        done.append(f"家的地址记好了:{home}" if home else "家的地址清掉了(不再提醒出门)")
+    if "depart_on" in payload:
+        on = bool(payload["depart_on"])
+        save_env_value(env, "FRIDAY_DEPART_REMIND", "on" if on else "off")
+        os.environ["FRIDAY_DEPART_REMIND"] = "on" if on else "off"
+        done.append("该出门的时候提醒你" if on else "不再提醒出门")
+    if "depart_extra" in payload:
+        import friday_departure
+
+        try:
+            extra = int(payload["depart_extra"])
+        except (TypeError, ValueError):
+            return {"error": "时间不对"}
+        if extra not in friday_departure.EXTRA_CHOICES:
+            return {"error": "时间不对"}
+        save_env_value(env, "FRIDAY_DEPART_EXTRA", str(extra))
+        os.environ["FRIDAY_DEPART_EXTRA"] = str(extra)
+        done.append(f"出门多留 {extra} 分钟停车、走路" if extra else "出门不多留时间")
     if "key_expires" in payload:
         value = str(payload["key_expires"] or "").strip()
         if value:
@@ -5591,6 +5618,7 @@ def start_daily_checks(session, toolbox: Toolbox, data_dir: str, interval: float
 
     threading.Thread(target=loop, daemon=True, name="friday-daily-checks").start()
     start_event_reminders(session, toolbox, state)
+    _quietly(lambda: start_departure_reminders(session, toolbox, state, data_dir))
     start_watch(session, toolbox)
     start_mail_alerts(session, toolbox, data_dir)
 
@@ -5659,6 +5687,65 @@ def start_event_reminders(session, toolbox: Toolbox, state, interval: float = 60
             time.sleep(interval)
 
     threading.Thread(target=loop, daemon=True, name="friday-events").start()
+
+
+def start_departure_reminders(session, toolbox: Toolbox, state, data_dir: str, interval: float = 60) -> None:
+    """出门提醒:日历上有地点的活动,算好从家里过去要多久,该出门前 5 分钟叫你。"""
+    import friday_departure
+    import friday_events
+
+    google = getattr(toolbox, "google", None)
+    if google is None:
+        return
+    geocoder = friday_departure.Geocoder(os.path.join(data_dir, "friday_places.json"))
+    session.departure = friday_departure.DepartureReminder(google.raw_events, state, geocoder,
+                                                           rain=friday_events.rain_at())
+    session.quick.extra.append(DepartureCommands(session))
+
+    def check() -> None:
+        for text in session.departure.check(_call_me(session)):
+            announce(session, text, "🚗", text, timely=True)  # 不在电脑前也会推到手机
+
+    def loop() -> None:
+        time.sleep(45)
+        while True:
+            _quietly(check)
+            time.sleep(interval)
+
+    threading.Thread(target=loop, daemon=True, name="friday-departure").start()
+
+
+class DepartureCommands:
+    """“我几点要出门”:看接下来 4 小时有地点的活动(不问 Claude)。"""
+
+    ASK = re.compile(r"(几点|什么时候|幾點|甚麼時候|什麼時候)(要|该|該|得)?出门|出门(时间|提醒)")
+
+    def __init__(self, session) -> None:
+        self.session = session
+
+    def handle(self, text: str) -> str | None:
+        import friday_departure
+
+        reminder = getattr(self.session, "departure", None)
+        if reminder is None or not self.ASK.search(re.sub(r"\s+", "", str(text or ""))):
+            return None
+        if not friday_departure.home_address():
+            return "还没设定家的地址:在齿轮设定 → 提醒 → 出门提醒写一下,我才算得出要几点出门。"
+        if not reminder.upcoming:
+            return reminder.problem or "接下来 4 小时日历上没有要出门的活动。"
+        return ";".join(f"{u['leave']} 出门,赶 {u['start']} 的「{u['title']}」(预留 {u['minutes']} 分钟)"
+                        for u in reminder.upcoming[:3]) + "。"
+
+
+def departure_state(session) -> dict | None:
+    import friday_departure
+
+    reminder = getattr(session, "departure", None)
+    if reminder is None:
+        return None
+    return {"home": friday_departure.home_address(), "on": friday_departure.enabled(),
+            "extra": friday_departure.extra_minutes(), "problem": reminder.problem,
+            "upcoming": reminder.upcoming[:3]}
 
 
 def start_cloud_client(code: str, folder: Path, on_pull, on_status):

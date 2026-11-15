@@ -27,6 +27,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import friday_departure
+
 # 未安装 anthropic 时用桩模块代替,测试只依赖其中的异常类型
 if "anthropic" not in sys.modules:
     try:
@@ -13169,6 +13171,102 @@ class SnipTest(unittest.TestCase):
             self.assertEqual(os.environ["FRIDAY_SNIP_HOTKEY"], "ctrl+alt+x")
             self.assertIn("Ctrl + Alt + X", " ".join(result.get("done", [])) + str(result))
             self.assertIn("error", app.apply_settings({"snip_hotkey": "ctrl+z"}, session, None, env))
+
+
+class DepartureTest(TempDirTest):
+    KL = datetime.timezone(datetime.timedelta(hours=8))
+
+    def event(self, start, location="Sunway Pyramid, Petaling Jaya", title="看电影", id_="e1"):
+        return {"id": id_, "summary": title, "location": location, "start": {"dateTime": start.isoformat()}}
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.dict(os.environ, {"FRIDAY_HOME_ADDRESS": "Jalan Ampang, KL", "FRIDAY_DEPART_REMIND": "on",
+                                               "FRIDAY_DEPART_EXTRA": "10"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        import friday_alerts
+
+        self.state = friday_alerts.AlertState(os.path.join(self.tmp, "s.json"))
+        self.asked = []
+
+        def fetch(url):
+            self.asked.append(url)
+            if "nominatim" in url:
+                return [] if "Nowhere" in url else [{"lat": "3.15", "lon": "101.7"}]
+            return {"code": "Ok", "routes": [{"duration": 1800}]}
+        self.geo = friday_departure.Geocoder(os.path.join(self.tmp, "places.json"), fetch=fetch, sleep=lambda s: None)
+        self.fetch = fetch
+
+    def reminder(self, now, events, rain=None):
+        clock = [now]
+        r = friday_departure.DepartureReminder(lambda a, b: events, self.state, self.geo,
+                                               route=lambda a, b: friday_departure.drive_minutes(a, b, self.fetch),
+                                               rain=rain, clock=lambda: clock[0])
+        return r, clock
+
+    def test_plan_adds_peak_rain_and_parking(self):
+        start = datetime.datetime(2026, 11, 16, 18, 30, tzinfo=self.KL)  # 星期一傍晚
+        result = friday_departure.plan(30, start, 10, 70)
+        self.assertEqual(result["minutes"], 62)  # 30×1.4 + 10 雨 + 10 停车
+        self.assertEqual(result["leave"].strftime("%H:%M"), "17:28")
+        weekend = friday_departure.plan(30, datetime.datetime(2026, 11, 15, 18, 30, tzinfo=self.KL), 0, None)
+        self.assertEqual(weekend["minutes"], 30)
+
+    def test_reminds_once_five_minutes_before_leaving(self):
+        now = datetime.datetime(2026, 11, 15, 13, 0, tzinfo=self.KL)  # 星期天
+        start = now + datetime.timedelta(minutes=60)  # 14:00,开车 30 + 停车 10 -> 13:20 出门
+        r, clock = self.reminder(now, [self.event(start)])
+        self.assertEqual(r.check("老板"), [])
+        self.assertEqual(r.upcoming[0]["leave"], "13:20")
+        clock[0] = now + datetime.timedelta(minutes=15)
+        said = r.check("老板")
+        self.assertEqual(len(said), 1)
+        self.assertIn("13:20 要出门", said[0])
+        self.assertIn("Sunway Pyramid", said[0])
+        clock[0] = now + datetime.timedelta(minutes=16)
+        self.assertEqual(r.check("老板"), [])  # 只叫一次
+        self.assertEqual(sum("nominatim" in u for u in self.asked), 2)  # 家 + 地点,查过就记住
+        geo2 = friday_departure.Geocoder(os.path.join(self.tmp, "places.json"), fetch=lambda u: 1 / 0)
+        self.assertEqual(geo2.find("Jalan Ampang, KL"), (3.15, 101.7))  # 存在文件里
+
+    def test_skips_online_unknown_and_without_home(self):
+        now = datetime.datetime(2026, 11, 15, 13, 0, tzinfo=self.KL)
+        start = now + datetime.timedelta(minutes=20)
+        events = [self.event(start, "https://zoom.us/j/123", id_="a"), self.event(start, "Google Meet", id_="b"),
+                  self.event(start, "Nowhere Land 999", id_="c")]
+        r, clock = self.reminder(now, events)
+        self.assertEqual(r.check("老板"), [])
+        self.assertIn("Nowhere Land", r.problem)
+        with mock.patch.dict(os.environ, {"FRIDAY_HOME_ADDRESS": ""}):
+            r2, _ = self.reminder(now, [self.event(start)])
+            self.assertEqual(r2.check("老板"), [])
+        with mock.patch.dict(os.environ, {"FRIDAY_DEPART_REMIND": "off"}):
+            r3, _ = self.reminder(now, [self.event(start)])
+            self.assertEqual(r3.check("老板"), [])
+
+    def test_late_and_rain(self):
+        now = datetime.datetime(2026, 11, 15, 13, 0, tzinfo=self.KL)
+        r, clock = self.reminder(now, [self.event(now + datetime.timedelta(minutes=30))], rain=lambda when: 80)
+        said = r.check("老板")
+        self.assertIn("已经晚了", said[0])
+        self.assertIn("下雨", said[0])
+
+    def test_quick_question_and_settings(self):
+        hub = friday_web.Hub()
+        session = app.WebSession(None, app.default_persona(), hub)
+        now = datetime.datetime(2026, 11, 15, 13, 0, tzinfo=self.KL)
+        session.departure, _ = self.reminder(now, [self.event(now + datetime.timedelta(minutes=60))])
+        session.departure.check("老板")
+        answer = app.DepartureCommands(session).handle("我几点要出门?")
+        self.assertIn("13:20 出门", answer)
+        self.assertIsNone(app.DepartureCommands(session).handle("今天天气"))
+        env = os.path.join(self.tmp, ".env")
+        app.apply_settings({"depart_home": "  Jalan  Bukit Bintang  ", "depart_extra": 15}, session, None, env)
+        self.assertEqual(os.environ["FRIDAY_HOME_ADDRESS"], "Jalan Bukit Bintang")
+        self.assertEqual(friday_departure.extra_minutes(), 15)
+        self.assertIn("error", app.apply_settings({"depart_extra": 7}, session, None, env))
+        self.assertEqual(app.departure_state(session)["home"], "Jalan Bukit Bintang")
 
 if __name__ == "__main__":
     unittest.main()
