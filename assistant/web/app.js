@@ -405,9 +405,9 @@ function labCard(ev) {
   }
   if (ev.phase !== "end") return;
   card.classList.remove("running");
-  card.classList.add(ev.ok ? "ok" : "fail");
+  card.classList.add(ev.ok ? (ev.uncertain ? "unsure" : "ok") : "fail");
   card.querySelector(".lab-state").textContent = ev.kind === "self_test"
-    ? (ev.ok ? `✅ 通过 · ${ev.seconds} 秒` : `❌ 没通过 · ${ev.seconds} 秒`)
+    ? (ev.ok ? (ev.uncertain ? `⚠ 没法完全确认 · ${ev.seconds} 秒` : `✅ 通过 · ${ev.seconds} 秒`) : `❌ 没通过 · ${ev.seconds} 秒`)
     : (ev.ok ? `✅ 成功 · ${ev.seconds} 秒` : `❌ 失败 · ${ev.seconds} 秒`);
   if (!ev.ok && ev.error) {
     out.hidden = false;
@@ -418,8 +418,9 @@ function labCard(ev) {
   }
   if (ev.summary) {
     const note = document.createElement("div");
-    note.className = "lab-note" + (ev.ok ? " good" : "");
-    note.textContent = ev.summary + ((ev.failed || []).length ? "\n被改坏的测试:" + ev.failed.join("、") : "");
+    note.className = "lab-note" + (ev.ok && !ev.uncertain ? " good" : "");
+    note.textContent = ev.summary + ((ev.failed || []).length
+      ? (ev.uncertain ? "\n测不到的测试:" : "\n被改坏的测试:") + ev.failed.join("、") : "");
     card.append(note);
   } else if (!ev.ok) {
     const note = document.createElement("div");

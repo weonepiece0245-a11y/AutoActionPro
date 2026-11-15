@@ -466,6 +466,30 @@ class Lab:
             changed, after = [], {"ran": 0, "failed": [], "error": str(e), "output": ""}
         return self._finish_self_test(run_id, started, title, edits, changed, after, set(self.baseline.get("failed") or []))
 
+    @staticmethod
+    def related_tests(root: Path, changed: list[str], failed: set) -> list[str]:
+        """改到的文件,有哪些相关的测试在这台电脑本来就过不了(这部分测不到)。
+
+        看测试档案里每一组测试(class)有没有用到改的那个模块(assistant.py 是 app.)。"""
+        try:
+            text = (root / "test_assistant.py").read_text(encoding="utf-8")
+        except OSError:
+            return sorted(failed)
+        sections = {}
+        for match in re.finditer(r"^class (\w+)\(.*?(?=^class \w+\(|\Z)", text, re.S | re.M):
+            sections[match.group(1)] = match.group(0)
+        keys = set()
+        for name in changed:
+            stem = Path(name).stem
+            if name.startswith("web/"):
+                keys.add("friday_web")
+            elif stem == "assistant":
+                keys.add("app.")
+            elif stem != "test_assistant":
+                keys.add(stem)
+        related = {cls for cls, body in sections.items() if any(k in body for k in keys)}
+        return sorted(t for t in failed if len(t.split(".")) > 2 and t.split(".")[-2] in related)
+
     def _finish_self_test(self, run_id: str, started: float, title: str, edits: list[dict], changed: list[str],
                           after: dict, before_failed: set) -> dict:
         def step(text: str) -> None:
@@ -474,17 +498,20 @@ class Lab:
         new_failures = [t for t in after.get("failed", []) if t not in before_failed]
         fixed = [t for t in before_failed if after.get("ran") and t not in after.get("failed", [])]
         ok = bool(after.get("ran")) and not after.get("error") and not new_failures
+        blind = self.related_tests(self.folder / "selftest" / "changed", changed, before_failed) if ok else []
         record = {"kind": "self_test", "time": self.clock().strftime("%Y-%m-%d %H:%M"), "title": str(title or "自我测试")[:60],
                   "ok": ok, "ran": after.get("ran", 0), "baseline_failed": len(before_failed),
                   "new_failures": new_failures[:30], "fixed": fixed[:30], "changed": changed,
-                  "error": after.get("error", ""), "output": after.get("output", "")}
+                  "error": after.get("error", ""), "output": after.get("output", ""), "blind": blind[:30]}
         record["report"] = self._write_report(record, edits)
         if after.get("ran"):
             step(f"   改过的:跑了 {after['ran']} 个测试,用了 {after.get('seconds', 0)} 秒")
-        self._emit({"phase": "end", "run": run_id, "kind": "self_test", "ok": ok,
+        if blind:
+            step(f"   ⚠ 改到的地方有 {len(blind)} 个相关测试在这台电脑本来就过不了,这部分测不到")
+        self._emit({"phase": "end", "run": run_id, "kind": "self_test", "ok": ok, "uncertain": bool(blind),
                     "seconds": round(time.monotonic() - started, 1), "error": "", "attempt": 1, "max": MAX_ATTEMPTS,
                     "summary": self.describe(record).split("。报告存在")[0][:2500] + "。真正的星期五没有被改。",
-                    "failed": new_failures[:10],
+                    "failed": new_failures[:10] or blind[:10],
                     "produced": [{"name": Path(record["report"]).name, "image": False, "openable": True,
                                   "run": "reports"}]})
         return self._record(record)
@@ -505,6 +532,9 @@ class Lab:
             lines.append(f"问题:{record['error']}")
         if record["new_failures"]:
             lines += ["", "改了以后多坏掉的:"] + [f"- {t}" for t in record["new_failures"]]
+        if record.get("blind"):
+            lines[3] = "结果:⚠ 没法完全确认(没有多坏掉的,但相关测试本来就跑不了)"
+            lines += ["", "改到的地方,这些相关测试在这台电脑本来就过不了(测不到):"] + [f"- {t}" for t in record["blind"]]
         if record["fixed"]:
             lines += ["", "改了以后修好的:"] + [f"- {t}" for t in record["fixed"]]
         lines += ["", "改了什么:"]
@@ -524,7 +554,13 @@ class Lab:
         head = f"{'✅' if record['ok'] else '❌'} 自我测试「{record['title']}」:"
         if record.get("error"):
             return head + f"没通过 —— {record['error']}。报告:{record['report']}"
-        text = head + (f"通过了,{record['ran']} 个测试没有多坏掉的" if record["ok"] else f"有 {len(record['new_failures'])} 个测试被改坏了")
+        blind = record.get("blind") or []
+        if record["ok"] and blind:
+            head = f"⚠ 自我测试「{record['title']}」:"
+            text = head + (f"没有多坏掉的测试,但没法完全确认 —— 改到的地方有 {len(blind)} 个相关测试在这台电脑本来就过不了"
+                           f"(在实验室里跑不了),这部分改得对不对测不到")
+        else:
+            text = head + (f"通过了,{record['ran']} 个测试没有多坏掉的" if record["ok"] else f"有 {len(record['new_failures'])} 个测试被改坏了")
         if record["fixed"]:
             text += f";修好了 {len(record['fixed'])} 个"
         if record["new_failures"]:

@@ -7,12 +7,14 @@
 - 不能开别的程序(subprocess、os.system……)、不能用 ctypes / 注册表;
 - 写文件、删文件、改名只能在实验室文件夹里(selftest 还可以写系统的临时文件夹);
 - strict:不能上网;读文件只能读实验室文件夹和 Python 自己的库;
-- selftest:只能连本机(127.0.0.1),跑星期五自己的测试用。
+- selftest:只能连本机(127.0.0.1),跑星期五自己的测试用。测试里要开“实验室小程序”(和这个一模一样、
+  也装着同样的安全网)时可以开,其他程序一样不行。
 这是防“写错代码”的安全网,不是对付坏人的铁笼子;所以星期五也不会把你的钥匙、密码放进去。
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import tempfile
@@ -55,6 +57,50 @@ def install(mode: str, workdir: str) -> None:
                       # 注册表:读可以(Python 自己会读,例如文件类型),改不行
                       "winreg.CreateKey", "winreg.DeleteKey", "winreg.DeleteValue", "winreg.SetValue",
                       "winreg.ConnectRegistry", "winreg.LoadKey", "winreg.SaveKey", "winreg.DisableReflectionKey")
+    # 自我测试里,测试要开的“实验室小程序”:只认副本里和这个一模一样的那份(它自己也会装安全网)
+    allowed_runner = None
+    if mode == "selftest":
+        try:
+            mine = hashlib.sha256(open(os.path.abspath(__file__), "rb").read()).hexdigest()
+            copy = os.path.join(workdir, "friday_lab_runner.py")
+            if hashlib.sha256(open(copy, "rb").read()).hexdigest() == mine:
+                allowed_runner = _norm(copy)
+        except OSError:
+            pass
+    import subprocess
+
+    python = _norm(sys.executable)
+
+    def approved(args) -> bool:
+        """这个指令是不是“用同一个 Python 开实验室小程序”。"""
+        if allowed_runner is None or not isinstance(args, (list, tuple)) or len(args) < 4:
+            return False
+        try:
+            parts = [os.fspath(a) for a in args]
+        except TypeError:
+            return False
+        if _norm(parts[0]) != python:
+            return False
+        return any(_norm(parts[i]) == allowed_runner and parts[i + 1] in ("strict", "selftest")
+                   for i in range(1, len(parts) - 1))
+
+    def approved_in_stack() -> bool:
+        """现在是不是正在开 / 停一个“实验室小程序”(看是谁在叫)。"""
+        if allowed_runner is None:
+            return False
+        frame = sys._getframe(2)
+        while frame is not None:
+            if frame.f_code.co_filename.endswith("subprocess.py"):
+                obj = frame.f_locals.get("self")
+                if isinstance(obj, subprocess.Popen):
+                    return approved(getattr(obj, "args", None))
+            frame = frame.f_back
+        return False
+
+    # 开实验室小程序时 Windows 会用到的(管道、开程序、超时停掉它)
+    process_events = {"_winapi.CreateProcess", "_winapi.CreatePipe", "_winapi.TerminateProcess",
+                      "msvcrt.open_osfhandle", "msvcrt.get_osfhandle", "os.kill", "os.posix_spawn"}
+    harmless_events = {"ctypes.create_unicode_buffer", "ctypes.create_string_buffer"}  # 只是一块记忆体
     harmless = {_norm(os.devnull)}  # “空设备”:读写都没东西
     local_hosts = {"127.0.0.1", "localhost", "::1", "0.0.0.0", ""}
     path_events = {"os.remove": 0, "os.rmdir": 0, "os.mkdir": 0, "os.chmod": 0, "os.chown": 0, "os.rename": 0,
@@ -62,6 +108,12 @@ def install(mode: str, workdir: str) -> None:
                    "shutil.copyfile": 1, "shutil.move": 1, "os.utime": 0}
 
     def hook(event: str, args: tuple) -> None:
+        if event in harmless_events:
+            return
+        if event == "subprocess.Popen" and len(args) > 1 and approved(args[1]):
+            return
+        if event in process_events and approved_in_stack():
+            return
         if event.startswith(blocked_events):
             raise PermissionError(f"代码实验室不允许:{event}")
         if event == "open" and args:

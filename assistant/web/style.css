@@ -359,6 +359,7 @@ body.locked > *:not(#lockScreen) { visibility: hidden !important; }
 .lab-card.running { border-color: var(--cyan, #22d3ee); box-shadow: 0 0 12px rgba(var(--c-rgb), .18); }
 .lab-card.ok { border-color: rgba(52, 211, 153, .55); }
 .lab-card.fail { border-color: rgba(248, 113, 113, .6); }
+.lab-card.unsure { border-color: rgba(251, 191, 36, .6); }
 .lab-head { display: flex; align-items: center; gap: 8px; }
 .lab-title { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lab-attempt { font-size: 11px; color: #fbbf24; }

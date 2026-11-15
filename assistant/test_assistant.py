@@ -13149,6 +13149,62 @@ class CodeLabTest(TempDirTest):
         self.assertIn("not_installed_lib_zz", record["error"])  # 看得到原因
         self.assertIsNone(lab.baseline)  # 没跑起来的对照不留着
 
+    def test_self_test_says_when_it_cannot_tell(self):
+        app_dir = Path(self.tmp, "app3")
+        app_dir.mkdir()
+        (app_dir / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+        (app_dir / "other.py").write_text("X = 1\n", encoding="utf-8")
+        (app_dir / "test_assistant.py").write_text(
+            "import subprocess, sys, unittest\nimport calc\nimport other\n\n"
+            "class CalcTest(unittest.TestCase):\n    def test_add(self):\n"
+            "        subprocess.run([sys.executable, '-c', 'pass'])  # 实验室里开不了程序:本来就过不了\n"
+            "        self.assertEqual(calc.add(1, 2), 3)\n\n"
+            "class OtherTest(unittest.TestCase):\n    def test_x(self):\n        self.assertEqual(other.X, 1)\n",
+            encoding="utf-8")
+        lab = self.make(app_dir=app_dir)
+        events = []
+        lab.on_event = events.append
+        record = lab.self_test([{"file": "calc.py", "old": "a + b", "new": "a - b"}], "改坏 calc")
+        self.assertEqual(record["blind"], ["test_assistant.CalcTest.test_add"])  # 测不到,不能说通过
+        self.assertIn("没法完全确认", friday_lab.Lab.describe(record))
+        self.assertTrue(events[-1]["uncertain"])
+        self.assertIn("没法完全确认", Path(record["report"]).read_text(encoding="utf-8"))
+        record = lab.self_test([{"file": "other.py", "old": "X = 1", "new": "X = 1  # 注解"}], "改 other")
+        self.assertEqual(record["blind"], [])  # 改的地方测得到
+        self.assertIn("通过了", friday_lab.Lab.describe(record))
+
+    def test_selftest_can_start_lab_runner_but_nothing_else(self):
+        import shutil as _shutil
+
+        app_dir = Path(self.tmp, "app4")
+        work = Path(self.tmp, "app4work")
+        app_dir.mkdir()
+        work.mkdir()
+        _shutil.copy(friday_lab.RUNNER, app_dir / "friday_lab_runner.py")
+        (work / "main.py").write_text("print('hi from lab')", encoding="utf-8")
+        (app_dir / "test_assistant.py").write_text(
+            "import os, subprocess, sys, unittest\n\n"
+            "class T(unittest.TestCase):\n"
+            "    def test_runner_ok(self):\n"
+            f"        out = subprocess.run([sys.executable, '-E', '-B', os.path.abspath('friday_lab_runner.py'), 'strict', {str(work)!r}, {str(work / 'main.py')!r}],\n"
+            "                             capture_output=True, timeout=60)\n"
+            "        self.assertIn(b'hi from lab', out.stdout)\n"
+            "    def test_other_blocked(self):\n"
+            "        with self.assertRaises(PermissionError):\n"
+            "            subprocess.run([sys.executable, '-c', 'print(1)'])\n"
+            "    def test_runner_with_other_python_blocked(self):\n"
+            "        with self.assertRaises(PermissionError):\n"
+            "            subprocess.run(['python-not-same', os.path.abspath('friday_lab_runner.py'), 'strict', '.', 'x'])\n",
+            encoding="utf-8")
+        proc = subprocess.run([sys.executable, "-E", "-B", str(friday_lab.RUNNER), "selftest", str(app_dir)],
+                              capture_output=True, timeout=120, stdin=subprocess.DEVNULL, cwd=str(app_dir))
+        out = proc.stdout.decode("utf-8", "replace")
+        self.assertIn("@@RESULT ran=3 failures=0 errors=0", out, out + proc.stderr.decode("utf-8", "replace"))
+        (app_dir / "friday_lab_runner.py").write_text("# 被改过的\n", encoding="utf-8")  # 不一样的就不准开
+        proc = subprocess.run([sys.executable, "-E", "-B", str(friday_lab.RUNNER), "selftest", str(app_dir)],
+                              capture_output=True, timeout=120, stdin=subprocess.DEVNULL, cwd=str(app_dir))
+        self.assertIn("@@FAILED test_assistant.T.test_runner_ok", proc.stdout.decode("utf-8", "replace"))
+
     def test_env_has_no_keys(self):
         with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-secret", "FRIDAY_DISCORD_TOKEN": "x"}):
             env = friday_lab.safe_env()
