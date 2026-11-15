@@ -147,6 +147,7 @@ class SpeechStream:
         self.measure = measure  # 怎么算字数:按真的会读出来的字(“- ”“1. ”这些符号不算)
         self.log = log
         self.leftover = ""  # 超过上限没读的部分(“接着读”用)
+        self.last_spoken = ""  # 最后读到的几个字(告诉 Claude 读到哪里)
         self.done = False  # 全部合成、送出去了
         self.failures = 0
         self.buffer = ""
@@ -195,6 +196,7 @@ class SpeechStream:
             else:
                 self.pending.append(sentence)
                 self.spoken += size
+                self.last_spoken = (self.last_spoken + sentence.strip())[-60:]
             self.wakeup.notify()
 
     def finish(self) -> None:
@@ -237,11 +239,15 @@ class SpeechStream:
                     except Exception:
                         pass
                 return
-            try:
-                audio = self.synthesize(batch)
-            except Exception as e:  # noqa: BLE001
-                audio = None
-                self.log(f"朗读合成出错:{type(e).__name__}: {e}")
+            audio = None
+            for attempt in range(2):  # 失败先再试一次(网络闪一下),还是不行就跳过这一段,后面照读
+                try:
+                    audio = self.synthesize(batch)
+                except Exception as e:  # noqa: BLE001
+                    audio = None
+                    self.log(f"朗读合成出错(第 {attempt + 1} 次):{type(e).__name__}: {e}")
+                if audio or self.cancelled or not batch.strip():
+                    break
             if not audio and not self.cancelled and batch.strip():
                 self.failures += 1
                 self.log(f"朗读合成失败,跳过一段({len(batch)} 字):{batch[:20]}……")

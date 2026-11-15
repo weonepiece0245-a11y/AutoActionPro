@@ -107,6 +107,8 @@ FRIDAY_PROMPT = """你是“星期五”,{call_me}的私人 AI 助手。
 - “我记得的事”里【教训】是你以前做错、被{call_me}纠正过的事:一定照着做,不要再犯。
 - {call_me}在吉隆坡,说话常夹英文和马来文(例如 book、lunch、tapau、mamak、Grab、Mid Valley、Shopee)。
   用说的问题是语音识别转出来的,可能把这些词写成发音相近的中文字或奇怪的词:按发音去猜真正的意思,真的猜不到再问。
+- 用说的问题如果句子不通、像是听错了,而你要做的是会改东西或留下东西的事(写文件、发讯息或邮件、改设定、排日历、买东西),
+  先用一句话问清楚是不是这个意思,{call_me}说对了再做;只是聊天、查资料就按最可能的意思回答。
 
 ## 关于你自己
 你的程序(星期五自己的代码)装在 {app_dir},{version}。
@@ -1152,17 +1154,69 @@ def merge_cloud_changes(changes: dict, toolbox: Toolbox, assistant: Assistant | 
     return summary + ",已经同步回来了"
 
 
+class SpeechControls:
+    """说“暂停 / 继续 / 别读了 / 读快一点 / 读慢一点 / 正常速度”:回答的朗读和“读给我听”都一样,在电脑上直接办。"""
+
+    SPEED = re.compile(r"^(读|念|说|讲)?(快|慢)(一点|点|些)$|^(朗读|说话|读)?(速度)?(恢复)?(正常速度|正常的速度|原来的速度)$|^(读|说|讲)?正常(一点|速度)$")
+    PAUSE = re.compile(r"^(暂停|停一下|等一下|先停|暂停朗读|暂停一下)$")
+    RESUME = re.compile(r"^(继续|继续读|接着读|继续念|接着念|继续朗读|继续说)$")
+    STOP = re.compile(r"^(停止朗读|别读了|不要读了|不用读了|停止读|不读了|别念了|关掉朗读|停止|别说了|不要说了|安静|安静一下|闭嘴|好了别说了)$")
+
+    def __init__(self, session) -> None:
+        self.session = session
+
+    def handle(self, text: str) -> str | None:
+        import friday_quick
+
+        session = self.session
+        sentence = friday_quick.clean(text) or str(text or "").strip().rstrip("。!！")
+        reader = getattr(session, "reader", None)
+        if reader is not None and reader.active:
+            return None  # 正在“读给我听”:那边自己处理(速度也会存成同一个设定)
+        found = self.SPEED.match(sentence)
+        if found:
+            faster = None if not found.group(2) else found.group(2) == "快"
+            return self._quiet(session.set_speech_rate(faster))
+        if not (session.still_speaking() or session._audio_paused):
+            return None
+        if self.PAUSE.match(sentence) and not session._audio_paused:
+            session._audio_paused = True
+            session.hub.broadcast({"type": "audio_pause"})
+            return self._quiet("好,先停一下。说“继续”接着读。")
+        if self.RESUME.match(sentence) and session._audio_paused:
+            session._audio_paused = False
+            session.hub.broadcast({"type": "audio_resume"})
+            return self._quiet("好,接着读。")
+        if self.STOP.match(sentence):
+            session._audio_paused = False
+            if session._stream is not None:
+                session._stream.cancel("你说别读了")
+            session._leftover = ""
+            session.hub.broadcast({"type": "stop_audio"})
+            return self._quiet("好,不读了。")
+        return None
+
+    def _quiet(self, reply: str) -> str:
+        quick = getattr(self.session, "quick", None)
+        if quick is not None:
+            quick.silent = True  # 这句不用再读出来(读出来会把正在读的切掉)
+        return reply
+
+
 CONTINUE_READING = re.compile(r"^(星期五)?[,，\s]*(要|好|好的|可以|继续|接着读|继续读|读下去|继续念|接着念|读完|要的|嗯|对)(吧|啊|呀)?[。!！]?$")
-SPEAK_CHOICES = (800, 1500, 2000, 3000, 5000)
+SPEAK_CHOICES = (800, 1500, 2000, 3000, 5000, 0)  # 0:不限
+UNLIMITED = 10 ** 9
 
 
 def speak_max_chars() -> int:
-    """一次回答最多读几个字(齿轮设定 → 声音);超过的问要不要接着读。"""
+    """一次回答最多读几个字(齿轮设定 → 声音);超过的问要不要接着读。不限:全部读完。"""
     try:
         value = int(os.environ.get("FRIDAY_SPEAK_MAX", "2000"))
     except ValueError:
         return 2000
-    return value if value in SPEAK_CHOICES else 2000
+    if value not in SPEAK_CHOICES:
+        return 2000
+    return value or UNLIMITED
 
 
 def voice_clean(text: str) -> str:
@@ -1261,12 +1315,17 @@ class WebSession:
         interpreter = getattr(self, "interpreter", None)
         if interpreter is not None and interpreter.active and source in ("web", "voice") and not blocks and not prefix:
             return self._interpret(text, source)
-        if self._leftover and source in ("web", "voice", "ptt") and CONTINUE_READING.match(text.strip()):
+        if (self._leftover and not self._audio_paused and source in ("web", "voice", "ptt")
+                and CONTINUE_READING.match(text.strip())):
             hub.broadcast({"type": "status", "text": "🔊 接着读"})
             if self.speak_leftover():
                 return "好,接着读。"
-        if source != "task":
-            self._leftover = ""  # 问了别的:不接着读了
+        if source != "task" and self._leftover:
+            # 问了别的:不接着读了;告诉 Claude 上一条读到哪里(问“刚才后面说什么”时接得上)
+            spoken = self._spoken_tail
+            self._read_note = (f"[上一条回答语音只读到“……{spoken}”,后面没有读出来,{self._call_me_hint()}只在窗口看得到文字]"
+                               if spoken else "")
+            self._leftover = ""
         quick = self._quick_reply(text) if source != "task" and not prefix and not blocks else None
         if quick:
             hub.broadcast({"type": "status", "text": "⚡ 电脑上直接办好了,没有问 Claude(不花钱)"})
@@ -1289,6 +1348,13 @@ class WebSession:
             return None
         hub.broadcast({"type": "thinking", "source": source})
         stream = self._new_stream() if speak else None
+        notes = self._read_note
+        self._read_note = ""
+        if stream is not None:
+            limit = speak_max_chars()
+            notes += (f"[这条回答会读出来,一次最多读 {limit} 字:先说重点;内容很长时先给精简版,再问要不要听详细的]"
+                      if limit < UNLIMITED else "[这条回答会读出来:先说重点,不要太长]")
+        prefix = notes + prefix
 
         def on_text(delta):
             hub.broadcast({"type": "delta", "text": delta})
@@ -1441,7 +1507,35 @@ class WebSession:
 
     _speech_until = 0.0
     _leftover = ""
+    _spoken_tail = ""  # 截断前最后读到的几个字
+    _read_note = ""  # 下一个问 Claude 的问题前面要加的说明
     _speak_waiting = False
+    _audio_paused = False
+
+    @staticmethod
+    def _call_me_hint() -> str:
+        return os.environ.get("FRIDAY_CALL_ME") or "老板"
+
+    def set_speech_rate(self, faster: bool | None = None, rate: float | None = None) -> str:
+        """“读快一点 / 读慢一点 / 正常速度”:回答和读文章同一个速度,马上生效,存起来下次也是。"""
+        import friday_reader
+
+        if rate is None:
+            rate = friday_reader.step_rate(friday_reader.speech_rate(), faster)
+        os.environ["FRIDAY_SPEECH_RATE"] = f"{rate:g}"
+        env_file = getattr(self, "env_file", None)
+        if env_file:
+            from friday_discord import save_env_value
+
+            _quietly(lambda: save_env_value(Path(env_file), "FRIDAY_SPEECH_RATE", f"{rate:g}"))
+        reader = getattr(self, "reader", None)
+        if reader is not None:
+            reader.rate = rate
+            if reader.active:
+                reader._event(kind="rate")
+        self.hub.broadcast({"type": "speech_rate", "rate": rate})
+        print(f"朗读速度改成 {rate:g} 倍(回答和读文章都用,已存进设定)", flush=True)
+        return f"好,朗读速度改成 {rate:g} 倍。回答和读文章都一样,下次开星期五也是这个速度。"
 
     def _new_stream(self, voice: str | None = None):
         """每次回答一个新的朗读流;上一次还没读完的就不读了。voice:换一个声音读(口译时读外语)。"""
@@ -1468,10 +1562,12 @@ class WebSession:
             stream = self._stream
             if stream is not None and stream.leftover.strip():
                 self._leftover = stream.leftover
+                self._spoken_tail = stream.last_spoken[-20:]
             self.hub.broadcast({"type": "audio_end", "turn": turn})
 
         self._speech_until = time.time()
         self._leftover = ""
+        self._audio_paused = False
         self._stream = friday_web.SpeechStream(
             synthesize, publish, max_chars=speak_max_chars(), on_end=ended,
             measure=lambda text: len(voice_clean(text)),
@@ -2374,7 +2470,9 @@ def settings_state(session, meter=None) -> dict:
         "call_me": os.environ.get("FRIDAY_CALL_ME") or getattr(session, "call_me", "") or DEFAULT_CALL_ME,
         "voice": voice_key,
         "voices": voices,
-        "speak_max": speak_max_chars(),
+        "speak_max": int(os.environ.get("FRIDAY_SPEAK_MAX", "2000")) if os.environ.get("FRIDAY_SPEAK_MAX", "2000").isdigit() else 2000,
+        "speech_rate": __import__("friday_reader").speech_rate(),
+        "speech_rates": list(__import__("friday_reader").RATES),
         "rate": meter.rate if meter is not None else None,
         "autostart": friday_app.autostart_enabled(),
         "google": session.google_account.status() if getattr(session, "google_account", None) else None,
@@ -2453,6 +2551,17 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         if ctx is not None:
             ctx.greeting = persona.greeting
         done.append(f"称呼改成“{name}”,点 ↺ 开新话题后生效")
+    if "speech_rate" in payload:
+        import friday_reader
+
+        try:
+            rate = float(payload["speech_rate"])
+        except (TypeError, ValueError):
+            return {"error": "选项不对"}
+        if rate not in friday_reader.RATES:
+            return {"error": "选项不对"}
+        session.env_file = getattr(session, "env_file", None) or env
+        done.append(session.set_speech_rate(rate=rate))
     if "speak_max" in payload:
         try:
             value = int(payload["speak_max"])
@@ -2462,7 +2571,7 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
             return {"error": "选项不对"}
         save_env_value(env, "FRIDAY_SPEAK_MAX", str(value))
         os.environ["FRIDAY_SPEAK_MAX"] = str(value)
-        done.append(f"一次最多读 {value} 字,超过的会问你要不要接着读")
+        done.append(f"一次最多读 {value} 字,超过的会问你要不要接着读" if value else "回答全部读完,不限字数")
     if "voice" in payload:
         key = str(payload["voice"]).strip().lower()
         if key not in voice_module.EDGE_VOICES:
@@ -4556,6 +4665,7 @@ def start_reader(session, ctx) -> None:
 
     reader = friday_reader.Reader()
     reader.on_change = session.hub.broadcast
+    reader.on_rate = lambda rate: session.set_speech_rate(rate=rate)  # 读文章时改的速度:回答也一样、存起来
     ctx.reader = session.reader = reader
 
     def start(title: str, paras: list[str]) -> str:
@@ -5113,6 +5223,14 @@ def start_selfcheck(session, toolbox, data_dir: str) -> None:
             raise RuntimeError(session.startup_error or "没有 Claude 钥匙")
         assistant.client.models.list(limit=1)  # 只问有哪些模型:不花钱
 
+    def speech():
+        synthesize = getattr(session, "synthesize", None)
+        if synthesize is None:
+            return skip
+        audio = synthesize("星期五朗读测试:Pavilion、Jalan Alor,一共 1.5 公里。")  # 中英夹杂、数字(免费)
+        if not audio:
+            raise RuntimeError("朗读声音合成不出来(微软的朗读服务连不上?)")
+
     def discord():
         bridge = getattr(session, "discord", None)
         if bridge is None:
@@ -5123,7 +5241,7 @@ def start_selfcheck(session, toolbox, data_dir: str) -> None:
 
     checker = friday_selfcheck.SelfCheck(os.path.join(data_dir, "friday_selfcheck.json"), {
         "天气": weather, "Spotify": spotify, "开程序": open_apps, "提醒": reminders, "Google": google,
-        "记忆": memory, "Claude 钥匙": claude, "Discord": discord})
+        "记忆": memory, "Claude 钥匙": claude, "Discord": discord, "朗读": speech})
     session.selfcheck = toolbox.selfcheck = session.quick.selfcheck = checker
     auto = getattr(session, "autoupdate", None)
     if auto is not None and auto.state.get("note"):  # 昨晚刚自动更新完:等大家都连上了再试
@@ -5673,6 +5791,7 @@ def run_web(args) -> None:
 
     toolbox.scenes = session.quick.scenes = friday_scenes.Scenes(os.path.join(data_dir, "friday_scenes.json"))
     session.quick.on_say = lambda text: session.speak(text, interrupt=True) if session.speak_enabled else None
+    session.quick.extra.insert(0, SpeechControls(session))
     if getattr(session, "care", None) is not None:  # 电脑使用时间(只在 Windows 上有)
         import friday_screentime
 

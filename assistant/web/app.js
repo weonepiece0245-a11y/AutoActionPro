@@ -404,6 +404,18 @@ function handle(ev) {
       showFocus(ev); break;
     case "reader":
       readerEvent(ev); break;
+    case "speech_rate":
+      speechRate = ev.rate || 1;
+      if (speaking && !readerPlaying) { audioEl.defaultPlaybackRate = speechRate; audioEl.playbackRate = speechRate; }
+      break;
+    case "audio_pause":
+      if (speaking && !readerPlaying) { audioEl.pause(); audioPaused = true; stopBargeWatch(); }
+      break;
+    case "audio_resume":
+      if (audioPaused) { audioPaused = false; audioEl.play().catch(() => {}); }
+      break;
+    case "stop_audio":
+      audioPaused = false; stopSpeaking(); break;
     case "sleeptimer":
       showSleepTimer(ev); break;
     case "meeting":
@@ -843,7 +855,12 @@ function fillSettings() {
   const s = settingsState;
   if (!s) return;
   $("setCallMe").value = s.call_me || "";
-  if (s.speak_max) $("setSpeakMax").value = String(s.speak_max);
+  if (s.speak_max !== undefined) $("setSpeakMax").value = String(s.speak_max);
+  if (s.speech_rate) {
+    speechRate = s.speech_rate;
+    if (!$("setSpeechRate").options.length) for (const r of s.speech_rates || []) $("setSpeechRate").append(new Option(r === 1 ? "正常" : `${r} 倍`, String(r)));
+    $("setSpeechRate").value = String(s.speech_rate);
+  }
   const voice = $("setVoice");
   if (!voice.options.length) {
     for (const [key, desc] of s.voices || []) {
@@ -1561,6 +1578,7 @@ $("saveCallMe").onclick = () => saveSetting({ call_me: $("setCallMe").value.trim
 $("setCallMe").onkeydown = (e) => { if (e.key === "Enter") $("saveCallMe").click(); };
 $("setVoice").onchange = (e) => saveSetting({ voice: e.target.value });
 $("setSpeakMax").onchange = (e) => saveSetting({ speak_max: e.target.value });
+$("setSpeechRate").onchange = (e) => saveSetting({ speech_rate: e.target.value });
 $("previewVoice").onclick = async () => {
   ensureAudio();
   const name = ($("setCallMe").value || "老板").trim();
@@ -2031,6 +2049,8 @@ function rms(an) {
 }
 // 回答是一句一句合成的,按顺序排队播放;新问题的语音来了,旧的就不读了
 const audioQueue = [];
+let speechRate = 1;  // 朗读速度(齿轮设定 / “读快一点”),回答和读文章一样
+let audioPaused = false;
 let audioTurn = null;
 let ignoreTurn = -1;  // 被打断的那次回答,后面陆续到的语音也不读了
 let levelLoop = false;
@@ -2054,8 +2074,9 @@ function playNext() {
   const url = audioQueue.shift();
   if (!url) { speaking = false; orbState.level = 0; stopBargeWatch(); refreshMode(); maybeFollowUp(); return; }
   ensureAudio();
-  speaking = true; refreshMode();
+  speaking = true; audioPaused = false; refreshMode();
   audioEl.src = `${url}?t=${encodeURIComponent(token)}`;
+  audioEl.defaultPlaybackRate = speechRate; audioEl.playbackRate = speechRate;
   audioEl.play().then(() => {
     startBargeWatch();
     if (levelLoop) return;
@@ -2089,7 +2110,7 @@ function stopReaderLocal() {
   if (readerPlaying) {
     readerPlaying = false;
     audioEl.pause();
-    audioEl.playbackRate = 1;
+    audioEl.playbackRate = speechRate;
     speaking = false; orbState.level = 0; stopBargeWatch(); refreshMode();
   }
   reader = null;

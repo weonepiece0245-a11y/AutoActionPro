@@ -12270,6 +12270,7 @@ class StartupDoctorTest(TempDirTest):
 
 
 import friday_receipts  # noqa: E402
+import friday_reader  # noqa: E402
 import friday_parcels  # noqa: E402
 
 
@@ -12734,6 +12735,88 @@ class LongSpeechTest(TempDirTest):
         session._leftover = "还剩一点"
         session.ask("今天天气怎么样", source="web")  # 问了别的:不接着读
         self.assertEqual(session._leftover, "")
+
+    def test_retry_then_skip(self):
+        calls, logs, sent = [], [], []
+
+        def flaky(text):
+            calls.append(text)
+            return None if len(calls) == 1 else b"mp3"
+        stream = friday_web.SpeechStream(flaky, sent.append, log=logs.append)
+        stream.feed("第一句。")
+        stream.finish()
+        self.wait(stream)
+        self.assertEqual(len(calls), 2)  # 失败先再试一次
+        self.assertEqual(sent, [b"mp3"])
+        dead = friday_web.SpeechStream(lambda t: None, sent.append, log=logs.append)
+        dead.feed("一。")
+        dead.finish()
+        self.wait(dead)
+        self.assertTrue(any("跳过一段" in line for line in logs))
+
+    def test_voice_controls_and_speed(self):
+        session, events = self.make_session()
+        env = Path(self.tmp, ".env10")
+        env.write_text("", encoding="utf-8")
+        session.env_file = env
+        session.quick = friday_quick.QuickCommands(SimpleNamespace())
+        controls = app.SpeechControls(session)
+        session.quick.extra.insert(0, controls)
+        with mock.patch.dict(os.environ, {"FRIDAY_SPEECH_RATE": "1"}):
+            self.assertIn("1.15 倍", session.quick.handle("读快一点"))
+            self.assertTrue(session.quick.silent)
+            self.assertEqual(os.environ["FRIDAY_SPEECH_RATE"], "1.15")
+            self.assertIn("FRIDAY_SPEECH_RATE=1.15", env.read_text(encoding="utf-8"))  # 关掉再开也记得
+            self.assertEqual(events[-1], {"type": "speech_rate", "rate": 1.15})
+            self.assertIn("1 倍", session.quick.handle("正常速度"))
+            reader = friday_reader.Reader()
+            self.assertEqual(reader.rate, 1.0)
+            os.environ["FRIDAY_SPEECH_RATE"] = "1.3"
+            self.assertEqual(friday_reader.Reader().rate, 1.3)  # 读文章也用同一个速度
+            got = []
+            reader.on_rate = got.append
+            reader.rate = 1.3
+            reader.speed(True)
+            self.assertEqual(got, [1.5])
+        self.assertIsNone(session.quick.handle("暂停"))  # 没在读:交给别的(例如暂停音乐)
+        stream = session._new_stream()
+        stream.feed("很长的回答。")
+        stream.finish()
+        self.wait(stream)
+        session._speech_until = time.time() + 30
+        self.assertIn("先停一下", session.quick.handle("暂停"))
+        self.assertEqual(events[-1], {"type": "audio_pause"})
+        self.assertIn("接着读", session.quick.handle("继续"))
+        self.assertEqual(events[-1], {"type": "audio_resume"})
+        self.assertIn("不读了", session.quick.handle("别读了"))
+        self.assertEqual(events[-1], {"type": "stop_audio"})
+        self.assertTrue(stream.cancelled)
+
+    def test_claude_told_about_reading(self):
+        class FakeAssistant:
+            exchanges = []
+
+            def __init__(self):
+                self.asked = []
+
+            def ask(self, text, on_text, on_status):
+                self.asked.append(text)
+                return "好"
+        session, events = self.make_session()
+        session.assistant = FakeAssistant()
+        with mock.patch.dict(os.environ, {"FRIDAY_SPEAK_MAX": "800"}):
+            session.ask("介绍一下吉隆坡", source="voice", speak=True)
+        self.assertIn("这条回答会读出来,一次最多读 800 字", session.assistant.asked[-1])
+        session._leftover = "后面的内容"
+        session._spoken_tail = "先去逛街,再去吃饭。"
+        session.ask("刚才后面说什么", source="web")
+        self.assertIn("上一条回答语音只读到“……先去逛街,再去吃饭。”", session.assistant.asked[-1])
+        session.ask("今天几号呢", source="web")
+        self.assertNotIn("上一条回答语音", session.assistant.asked[-1])  # 只说一次
+        with mock.patch.dict(os.environ, {"FRIDAY_SPEAK_MAX": "0"}):
+            self.assertEqual(app.speak_max_chars(), app.UNLIMITED)
+            session.ask("讲个故事", source="voice", speak=True)
+        self.assertIn("这条回答会读出来:先说重点", session.assistant.asked[-1])
 
     def test_speak_max_setting(self):
         session, _ = self.make_session()

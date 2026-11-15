@@ -177,6 +177,24 @@ def load_file(path: str | Path) -> tuple[str, list[str]]:
     raise ValueError("这种文件读不了(可以读网页、PDF、Word .docx、文字文件)")
 
 
+def speech_rate() -> float:
+    import os
+
+    try:
+        rate = float(os.environ.get("FRIDAY_SPEECH_RATE", "1"))
+    except ValueError:
+        return 1.0
+    return rate if rate in RATES else 1.0
+
+
+def step_rate(rate: float, faster: bool | None) -> float:
+    if faster is None:
+        return 1.0
+    index = min(range(len(RATES)), key=lambda i: abs(RATES[i] - rate))
+    index = min(len(RATES) - 1, index + 1) if faster else max(0, index - 1)
+    return RATES[index]
+
+
 class Reader:
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -185,8 +203,9 @@ class Reader:
         self.parts: list[str] = []
         self.pos = 0
         self.state = "idle"  # idle / reading / paused / done
-        self.rate = 1.0
+        self.rate = speech_rate()  # 跟回答的朗读同一个速度(齿轮设定 / “读快一点”)
         self.turn = 0
+        self.on_rate = lambda rate: None  # 改了速度:存起来、回答的朗读也跟着变
         self.on_change = lambda event: None  # 告诉窗口(开始、暂停、停止、改速度)
         self.new_turn = lambda: 0  # 要一个新的朗读编号(跟回答的朗读用同一套)
 
@@ -264,13 +283,16 @@ class Reader:
         self._event()
         return "好,从头再读。"
 
-    def speed(self, faster: bool) -> str:
-        index = min(range(len(RATES)), key=lambda i: abs(RATES[i] - self.rate))
-        index = min(len(RATES) - 1, index + 1) if faster else max(0, index - 1)
-        self.rate = RATES[index]
+    def speed(self, faster: bool | None) -> str:
+        """faster:True 快一点、False 慢一点、None 回到正常。"""
+        self.rate = step_rate(self.rate, faster)
+        try:
+            self.on_rate(self.rate)
+        except Exception:
+            pass
         if self.active:
             self._event(kind="rate")
-        return f"好,速度改成 {self.rate:g} 倍。"
+        return f"好,朗读速度改成 {self.rate:g} 倍(回答和读文章都一样,下次开星期五也是这个速度)。"
 
     def status(self) -> str:
         if not self.active:
