@@ -2,6 +2,7 @@
 
 用 齿轮设定 → 连接的应用 里已经填好的 Steam 钥匙和个人资料;个人资料的“游戏详情”要公开才读得到愿望单。
 价格是马来西亚区(马币),每 6 小时看一次。同一次打折只提醒一次;折扣更大了会再说。存在 friday_wishlist.json。
+可以设“至少几折才提醒”(齿轮设定 → 游戏 → Steam),免得一直被小折扣吵。
 """
 
 from __future__ import annotations
@@ -18,6 +19,22 @@ STORE = "https://store.steampowered.com/api/appdetails"
 CHECK_EVERY = 6 * 3600
 BATCH = 50
 MAX_NAMES = 15  # 每次最多查几个新游戏的名字(打折的才查)
+
+
+MIN_CHOICES = (0, 20, 30, 50, 70)
+
+
+def min_discount() -> int:
+    """至少打几 % 折才提醒(0 = 有折扣就提醒)。"""
+    try:
+        value = int(os.environ.get("FRIDAY_WISHLIST_MIN", "0"))
+    except ValueError:
+        return 0
+    return value if value in MIN_CHOICES else 0
+
+
+def enabled() -> bool:
+    return os.environ.get("FRIDAY_WISHLIST", "on").strip().lower() not in ("off", "0", "false", "no")
 
 
 def country() -> str:
@@ -76,7 +93,7 @@ class Wishlist:
     def name(self, appid: int) -> str:
         key = str(appid)
         if key not in self.names:
-            query = urllib.parse.urlencode({"appids": appid, "cc": country(), "l": "schinese"})
+            query = urllib.parse.urlencode({"appids": appid, "cc": country(), "l": "english"})  # 和游戏库一样用英文名
             try:
                 data = (self.fetch(f"{STORE}?{query}").get(key) or {}).get("data") or {}
                 self.names[key] = str(data.get("name") or f"游戏 {appid}")[:60]
@@ -93,6 +110,7 @@ class Wishlist:
         prices = self.prices(ids)
         sales = []
         looked = 0
+        self.unnamed = 0
         for appid in ids:
             price = prices.get(appid) or {}
             pct = int(price.get("discount_percent") or 0)
@@ -100,6 +118,7 @@ class Wishlist:
                 continue
             if str(appid) not in self.names:
                 if looked >= MAX_NAMES:
+                    self.unnamed += 1  # 名字下次再查
                     continue
                 looked += 1
             sales.append({"appid": appid, "name": self.name(appid), "pct": pct,
@@ -116,22 +135,24 @@ class Wishlist:
 
     @staticmethod
     def _line(sale: dict) -> str:
-        price = f" {sale['final']}" if sale["final"] else ""
+        price = f" → {sale['final']}" if sale["final"] else ""
         was = f"(原价 {sale['initial']})" if sale["initial"] else ""
-        return f"{sale['name']} -{sale['pct']}%{price}{was}"
+        return f"• {sale['name']}:-{sale['pct']}%{price}{was}"
 
     def check(self) -> str | None:
-        """定时看:有新打折(或折扣更大了)返回要说的话。"""
+        """定时看:有新打折(或折扣更大了)、而且够设定的折扣,返回要说的话。"""
         sales = self.refresh()
-        new = [s for s in sales if s["pct"] > self.told.get(str(s["appid"]), 0)]
+        floor = min_discount()
+        new = [s for s in sales if s["pct"] >= floor and s["pct"] > self.told.get(str(s["appid"]), 0)]
         if not new:
             return None
         with self.lock:
             for s in new:
                 self.told[str(s["appid"])] = s["pct"]
             self._save()
-        lines = "、".join(self._line(s) for s in new[:6]) + ("……" if len(new) > 6 else "")
-        return f"Steam 愿望单有 {len(new)} 个游戏在打折:{lines}。"
+        lines = "\n".join(self._line(s) for s in new[:5])
+        more = f"\n……还有 {len(new) - 5} 个,说“愿望单打折”看全部。" if len(new) > 5 else ""
+        return f"🛒 Steam 愿望单有 {len(new)} 个游戏新打折:\n{lines}{more}"
 
     def due(self) -> bool:
         return self.clock() - self.checked >= CHECK_EVERY
@@ -140,6 +161,11 @@ class Wishlist:
         sales = self.refresh()
         if not sales:
             return f"愿望单里 {getattr(self, 'total', 0)} 个游戏,现在都没打折。有打折我会告诉你。"
-        lines = "\n".join("• " + self._line(s) for s in sales[:12])
+        lines = "\n".join(self._line(s) for s in sales[:12])
         more = f"\n还有 {len(sales) - 12} 个。" if len(sales) > 12 else ""
-        return f"愿望单里在打折的({len(sales)} 个):\n{lines}{more}"
+        later = f"\n(另外 {self.unnamed} 个也在打折,名字下次再查)" if getattr(self, "unnamed", 0) else ""
+        return f"愿望单 {getattr(self, 'total', 0)} 个游戏里,在打折的有 {len(sales)} 个(折扣大的在前):\n{lines}{more}{later}"
+
+    def state(self) -> dict:
+        return {"on": enabled(), "min": min_discount(), "total": getattr(self, "total", 0),
+                "sales": len(self.sales), "checked": self.checked}

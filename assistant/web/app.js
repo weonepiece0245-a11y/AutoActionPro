@@ -1159,11 +1159,23 @@ function fillSettings() {
     const dl = hl.downloads;
     $("downloadsNote").textContent = dl ? `下载文件夹:${dl.files} 个文件,${dl.gb}GB${dl.messy ? " ⚠ 有点乱" : ""}` : "下载文件夹";
   }
+  const stm2 = s.steam;
+  if (stm2) {
+    $("steamKey").placeholder = stm2.key ? `已设置 ${stm2.key}(要换才填)` : "32 位";
+    if (document.activeElement !== $("steamId")) $("steamId").value = stm2.id || "";
+    const parts = [];
+    if (stm2.connected) parts.push(stm2.persona ? `✓ 已连上 Steam:${stm2.persona}` : "✓ Steam 钥匙和个人资料都填好了");
+    else parts.push("还没连 Steam:填下面的钥匙和个人资料(开游戏不用钥匙也能用)");
+    if (stm2.installed != null) parts.push(`这台电脑装了 ${stm2.installed} 个 Steam 游戏`);
+    if (stm2.wishlist && stm2.wishlist.total) parts.push(`愿望单 ${stm2.wishlist.total} 个,在打折 ${stm2.wishlist.sales} 个`);
+    $("steamStatus").textContent = parts.join(" · ");
+    $("setWishlist").checked = !stm2.wishlist || stm2.wishlist.on;
+    $("setWishlist").disabled = $("setWishlistMin").disabled = $("wishlistNow").disabled = !stm2.connected;
+    if (stm2.wishlist) $("setWishlistMin").value = String(stm2.wishlist.min);
+  }
   const ap = s.apps;
   $("appsGroup").hidden = !ap;
   if (ap) {
-    $("steamKey").placeholder = ap.steam_key ? `已设置 ${ap.steam_key}(要换才填)` : "32 位";
-    if (document.activeElement !== $("steamId")) $("steamId").value = ap.steam_id || "";
     if (document.activeElement !== $("spotifyClient")) $("spotifyClient").value = ap.spotify_client || "";
     $("spotifyNote").textContent = ap.spotify_connected
       ? "✓ Spotify 已连好:可以说“放周杰伦的晴天”“放我的歌单 开车”“现在放的是什么歌”。"
@@ -2054,6 +2066,10 @@ $("photoSort").onclick = () => {
   if (!confirm(`把${folder ? "“" + folder + "”" : "“图片”文件夹"}最上层的照片和视频,按拍摄月份分进“2026-11”这样的子文件夹?整理错了可以撤销。`)) return;
   saveSetting({ sort_photos: folder }, 6000);
 };
+$("steamTest").onclick = () => saveSetting({ steam_test: true }, 8000);
+$("setWishlist").onchange = (e) => saveSetting({ wishlist_on: e.target.checked });
+$("setWishlistMin").onchange = (e) => saveSetting({ wishlist_min: Number(e.target.value) });
+$("wishlistNow").onclick = () => saveSetting({ wishlist_now: true }, 9000);
 $("steamSave").onclick = () => {
   const change = { steam_id: $("steamId").value.trim() };
   if ($("steamKey").value.trim()) change.steam_key = $("steamKey").value.trim();

@@ -311,10 +311,12 @@ def steam_library_dirs(steam_root: Path) -> list[Path]:
 
 
 def steam_games(steam_root: Path | None) -> list[tuple[str, str]]:
-    """返回 [(appid, 游戏名)]。"""
+    """装了的 Steam 游戏 [(appid, 游戏名)];运行库、工具、壁纸这类不算,同一个游戏只算一次。"""
+    import friday_steam
+
     if steam_root is None:
         return []
-    games = []
+    games, seen = [], set()
     for lib in steam_library_dirs(steam_root):
         for manifest in sorted((lib / "steamapps").glob("appmanifest_*.acf")):
             try:
@@ -323,9 +325,10 @@ def steam_games(steam_root: Path | None) -> list[tuple[str, str]]:
                 continue
             appid = re.search(r'"appid"\s+"(\d+)"', text)
             name = re.search(r'"name"\s+"([^"]+)"', text)
-            if appid and name:
+            if appid and name and appid.group(1) not in seen and not friday_steam.is_tool(name.group(1)):
+                seen.add(appid.group(1))
                 games.append((appid.group(1), name.group(1)))
-    return games
+    return sorted(games, key=lambda g: g[1].lower())
 
 
 def best_match(names: list[str], query: str) -> int | None:
@@ -783,8 +786,11 @@ class Computer:
     def _do_open_game(self, pc, value, approve, **_):
         if not value:
             raise ValueError("请在 value 里写游戏名")
+        import friday_steam
+
         games = steam_games(pc.steam_root())
-        index = best_match([name for _, name in games], value)
+        names = [name for _, name in games]
+        index = friday_steam.best(names, value)  # 挑最像的(也认中文叫法:绝地求生、老头环……)
         if index is not None:
             appid, name = games[index]
             pc.open(f"steam://rungameid/{appid}")
@@ -792,8 +798,16 @@ class Computer:
         result = self._do_open_app(pc, value, approve)
         if result.startswith("已打开"):
             return result
-        steam_list = "、".join(name for _, name in games[:30]) or "(没有找到 Steam 游戏)"
-        return f"没找到“{value}”。Steam 里装了:{steam_list}"
+        if not games:
+            return f"没找到“{value}”(这台电脑上没找到装了的 Steam 游戏)。"
+        close = friday_steam.suggestions(names, value)
+        if close:
+            hint = f"你是说 {'、'.join(close)} 吗?"
+        elif len(names) <= 6:  # 游戏不多:直接列出来
+            hint = f"有:{'、'.join(names)}。"
+        else:
+            hint = "可以说完整一点的名字。"
+        return f"没找到“{value}”。Steam 装了 {len(games)} 个游戏,{hint}"
 
     def _do_open_url(self, pc, value, approve, **_):
         if not value.lower().startswith(("http://", "https://")):

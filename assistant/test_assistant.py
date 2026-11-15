@@ -2183,6 +2183,27 @@ class ComputerTest(TempDirTest):
         self.assertIn("Dota 2", result)
         self.assertIn("没找到", result)
 
+    def test_open_game_picks_best_and_skips_tools(self):
+        root = self.make_steam()
+        lib = root / "steamapps"
+        for appid, name in (("228980", "Steamworks Common Redistributables"), ("1493710", "Proton Experimental"),
+                            ("431960", "Wallpaper Engine"), ("578080", "PUBG: BATTLEGROUNDS"),
+                            ("373300", "Dota 2 Workshop Tools")):
+            (lib / f"appmanifest_{appid}.acf").write_text('"AppState"\n{\n "appid" "%s"\n "name" "%s"\n}' % (appid, name))
+        (Path(self.tmp) / "Games" / "SteamLibrary" / "steamapps" / "appmanifest_570.acf").write_text(
+            '"AppState"\n{\n "appid" "570"\n "name" "Dota 2"\n}')  # 同一个游戏在两个库
+        names = [n for _, n in pcmod.steam_games(root)]
+        self.assertEqual(names, ["Apex Legends", "Dota 2", "PUBG: BATTLEGROUNDS"])
+        pc = self.make(steam=root, outputs={"Get-StartApps": (3, "")})
+        self.assertEqual(pc.do("open_game", "绝地求生"), "已通过 Steam 启动 PUBG: BATTLEGROUNDS")
+        self.assertEqual(pc.do("open_game", "dota"), "已通过 Steam 启动 Dota 2")
+        result = pc.do("open_game", "Apex Legend")
+        self.assertEqual(result, "已通过 Steam 启动 Apex Legends")
+        missing = pc.do("open_game", "Pubg Battlegroundz")
+        self.assertIn("你是说 PUBG: BATTLEGROUNDS 吗", missing)
+        self.assertNotIn("Steamworks", missing)
+        self.assertIn("装了 3 个游戏", pc.do("open_game", "zzzz"))
+
     def test_best_match(self):
         names = ["Dota 2", "Dota Underlords", "Apex Legends"]
         self.assertEqual(pcmod.best_match(names, "dota 2"), 0)
@@ -6196,7 +6217,7 @@ class WishlistTest(TempDirTest):
         w = self.make({10: self.price(40, "RM 120.00", "RM 200.00"), 20: self.price(0, "RM 199.00", "RM 199.00"), 30: None})
         with mock.patch.dict(os.environ, {"FRIDAY_STEAM_CC": "my"}):
             text = w.check()
-        self.assertEqual(text, "Steam 愿望单有 1 个游戏在打折:艾尔登法环 -40% RM 120.00(原价 RM 200.00)。")
+        self.assertEqual(text, "🛒 Steam 愿望单有 1 个游戏新打折:\n• 艾尔登法环:-40% → RM 120.00(原价 RM 200.00)")
         self.assertTrue(any("cc=my" in str(c) for c in self.calls))
         self.assertIsNone(w.check())  # 同一次打折不重复
         self.prices[10] = self.price(60, "RM 80.00", "RM 200.00")
@@ -6206,13 +6227,23 @@ class WishlistTest(TempDirTest):
         self.prices[10] = self.price(30, "RM 140.00", "RM 200.00")
         again = self.make(self.prices)  # 重开星期五也记得
         self.assertIn("-30%", again.check())  # 新的一次打折:再提醒
-        name_lookups = [c for c in self.calls if "l=schinese" in str(c)]
-        self.assertEqual(name_lookups, [])  # 名字记住了,不用再查
+        name_lookups = [c for c in self.calls if "l=english" in str(c)]
+        self.assertEqual(name_lookups, [])  # 重开后名字记住了,不用再查(查名字用英文,和游戏库一样)
+
+    def test_min_discount_and_many_sales(self):
+        w = self.make({10: self.price(25, "RM 150.00", "RM 200.00"), 20: self.price(60, "RM 79.60", "RM 199.00"), 30: None})
+        with mock.patch.dict(os.environ, {"FRIDAY_WISHLIST_MIN": "50"}):
+            text = w.check()
+        self.assertIn("赛博朋克 2077:-60%", text)
+        self.assertNotIn("艾尔登", text)  # 没到 -50%:不吵你
+        with mock.patch.dict(os.environ, {"FRIDAY_WISHLIST_MIN": "0"}):
+            self.assertIn("艾尔登法环:-25%", w.check())  # 门槛降了:这时才说
+        self.assertEqual(w.state()["sales"], 2)
 
     def test_describe_and_quick(self):
         w = self.make({10: self.price(40, "RM 120.00", "RM 200.00"), 20: self.price(75, "RM 49.75", "RM 199.00"), 30: None})
         text = w.describe()
-        self.assertTrue(text.startswith("愿望单里在打折的(2 个)"))
+        self.assertTrue(text.startswith("愿望单 3 个游戏里,在打折的有 2 个"))
         self.assertLess(text.index("赛博朋克"), text.index("艾尔登"))  # 折扣大的在前
         quick = friday_quick.QuickCommands(SimpleNamespace())
         quick.wishlist = w
@@ -6227,6 +6258,31 @@ class WishlistTest(TempDirTest):
         with self.assertRaises(ValueError) as e:
             w.check()
         self.assertIn("公开", str(e.exception))
+
+    def test_steam_settings_start_wishlist(self):
+        import friday_steam
+
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.quick = friday_quick.QuickCommands(SimpleNamespace())
+        session.data_dir = self.tmp
+        toolbox = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m.json")), lambda a: True)
+        env = os.path.join(self.tmp, ".env")
+        started = []
+        with mock.patch.dict(os.environ, {"FRIDAY_STEAM_KEY": "", "FRIDAY_STEAM_ID": ""}), \
+                mock.patch.object(friday_steam.Steam, "profile", return_value="Boss"), \
+                mock.patch.object(friday_steam.Steam, "recent", return_value="最近两周在 Steam 上玩了 3 小时:\n• Apex"), \
+                mock.patch.object(app, "start_wishlist", side_effect=lambda s, t, d: started.append(d)):
+            result = app.apply_settings({"steam_key": "A" * 32, "steam_id": "76561198000000001"}, session, toolbox, env)
+            self.assertIn("Steam 连好了(Boss)", result["message"])
+            self.assertEqual(started, [self.tmp])  # 刚连上就开始看愿望单
+            state = app.steam_state(session, toolbox)
+            self.assertEqual((state["connected"], state["key"]), (True, "…AAAA"))
+            self.assertNotIn("A" * 32, json.dumps(state))
+            app.apply_settings({"wishlist_min": 50, "wishlist_on": False}, session, toolbox, env)
+            import friday_wishlist
+
+            self.assertEqual((friday_wishlist.min_discount(), friday_wishlist.enabled()), (50, False))
+            self.assertIn("error", app.apply_settings({"wishlist_min": 45}, session, toolbox, env))
 
     def test_gaming_tool(self):
         toolbox = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m.json")), lambda a: True, local_tools=True)
@@ -9962,21 +10018,33 @@ class SteamTest(unittest.TestCase):
         steam = self.make({
             "ResolveVanityURL": {"response": {"success": 1, "steamid": "76561198000000001"}},
             "GetRecentlyPlayedGames": {"response": {"games": [{"name": "Dota 2", "playtime_2weeks": 600},
+                                                                {"name": "Wallpaper Engine", "playtime_2weeks": 9000},
                                                                 {"name": "Apex Legends", "playtime_2weeks": 90}]}},
             "GetOwnedGames": {"response": {"games": [{"name": "Apex Legends", "playtime_forever": 30000, "playtime_2weeks": 90},
-                                                      {"name": "Dota 2", "playtime_forever": 90000}]}},
-            "GetFriendList": {"friendslist": {"friends": [{"steamid": "1"}, {"steamid": "2"}, {"steamid": "3"}]}},
+                                                      {"name": "Dota 2", "playtime_forever": 90000},
+                                                      {"name": "Steamworks Common Redistributables", "playtime_forever": 0},
+                                                      {"name": "PUBG: BATTLEGROUNDS", "playtime_forever": 1200}]}},
+            "GetFriendList": {"friendslist": {"friends": [{"steamid": str(i)} for i in range(1, 6)]}},
             "GetPlayerSummaries": {"response": {"players": [
                 {"personaname": "阿明", "personastate": 1, "gameextrainfo": "Dota 2"},
+                {"personaname": "小华", "personastate": 1, "gameextrainfo": "Dota 2"},
+                {"personaname": "Kumar", "personastate": 1, "gameextrainfo": "Apex Legends"},
                 {"personaname": "Ali", "personastate": 3}, {"personaname": "睡觉的", "personastate": 0}]}},
         })
         with mock.patch.dict(os.environ, {"FRIDAY_STEAM_KEY": "A" * 32, "FRIDAY_STEAM_ID": "boss_vanity"}):
-            self.assertIn("Dota 2 10 小时", steam.recent())
+            recent = steam.recent()
+            self.assertIn("• Dota 2:10 小时", recent)
+            self.assertNotIn("Wallpaper", recent)  # 壁纸软件不算游戏
             self.assertIn("Apex Legends 你一共玩了 500 小时", steam.game_time("apex"))
+            self.assertIn("PUBG: BATTLEGROUNDS", steam.game_time("绝地求生"))  # 中文叫法
             self.assertIsNone(steam.game_time("不存在的游戏"))
+            top = steam.top()
+            self.assertIn("有 3 个游戏", top)  # 运行库不算
+            self.assertTrue(top.index("Dota 2") < top.index("Apex"))
             friends = steam.friends()
-        self.assertIn("阿明(Dota 2)", friends)
-        self.assertIn("Ali(离开)", friends)
+        self.assertIn("• 在玩 Dota 2:阿明、小华", friends)  # 同一个游戏放一起
+        self.assertIn("• 在玩 Apex Legends:Kumar", friends)
+        self.assertIn("在线没在玩:Ali", friends)
         self.assertNotIn("睡觉的", friends)
         self.assertEqual(sum("ResolveVanityURL" in u for u in self.urls), 1)  # 只解析一次
 

@@ -305,6 +305,20 @@
       <div class="set-note">说“游戏体检”可以检查 Windows 的游戏设定。全屏运行的程序(看视频的浏览器、播放器除外)和 Apex、Dota 2 等都算游戏。程序是正常关闭的,有没保存的内容会先问你;Discord 这类关窗口只会缩到右下角。msedge 也是星期五的窗口,关掉后星期五仍在后台。</div>
     </div>
 
+    <div class="set-group" data-cat="game" id="steamGroup">
+      <h3>Steam</h3>
+      <div class="set-note" id="steamStatus">还没连 Steam。</div>
+      <div class="set-row"><label for="steamKey">Steam 网页 API 钥匙</label>
+        <span class="set-ctl"><input class="mini-input" id="steamKey" type="password" autocomplete="off" placeholder="32 位"></span></div>
+      <div class="set-row"><label for="steamId">Steam 个人资料(网址或 17 位数字 ID)</label>
+        <span class="set-ctl"><input class="mini-input" id="steamId" autocomplete="off"><button type="button" class="mini-btn" id="steamSave">保存</button><button type="button" class="mini-btn" id="steamTest">测试连接</button></span></div>
+      <div class="set-note" id="steamNote">钥匙在 steamcommunity.com/dev/apikey 免费申请(网域名称随便填,例如 localhost)。Steam 个人资料的“游戏详情”和“好友列表”要设成公开。钥匙只存在这台电脑,不要发给任何人。</div>
+      <div class="set-row"><label for="setWishlist">愿望单打折提醒(每 6 小时看一次,电脑和手机都会收到)</label><input type="checkbox" class="switch" id="setWishlist"></div>
+      <div class="set-row sub"><label for="setWishlistMin">至少打几折才提醒</label>
+        <span class="set-ctl"><select class="mini-select" id="setWishlistMin"><option value="0">有折扣就提醒</option><option value="20">-20% 以上</option><option value="30">-30% 以上</option><option value="50">-50% 以上</option><option value="70">-70% 以上</option></select><button type="button" class="mini-btn" id="wishlistNow">现在看愿望单</button></span></div>
+      <div class="set-note">可以说:“开 绝地求生 / Apex / 老头环”(中文叫法也认得)、“我最近玩了什么”“玩最久的游戏”“Dota 2 玩了多久”“哪些好友在线”“愿望单有什么在打折”。</div>
+    </div>
+
     <div class="set-group" data-cat="game" id="partyGroup" hidden>
       <h3>一键开黑(说“开黑”开始,说“不玩了”恢复)</h3>
       <div class="set-row"><label for="partyApps">要打开的程序(逗号分开)</label><input class="mini-input wide" id="partyApps" placeholder="Discord, Steam"></div>
@@ -474,11 +488,6 @@
 
     <div class="set-group" id="appsGroup" hidden data-cat="apps">
       <h3>连接的应用</h3>
-      <div class="set-row"><label for="steamKey">Steam 网页 API 钥匙</label>
-        <span class="set-ctl"><input class="mini-input" id="steamKey" type="password" autocomplete="off" placeholder="32 位"></span></div>
-      <div class="set-row"><label for="steamId">Steam 个人资料(网址或 17 位数字 ID)</label>
-        <span class="set-ctl"><input class="mini-input" id="steamId" autocomplete="off"><button type="button" class="mini-btn" id="steamSave">保存</button></span></div>
-      <div class="set-note" id="steamNote">钥匙在 steamcommunity.com/dev/apikey 免费申请(网域名称随便填,例如 localhost)。Steam 个人资料的“游戏详情”和“好友列表”要设成公开。钥匙只存在这台电脑,不要发给任何人。</div>
       <div class="set-row"><label for="spotifyClient">Spotify Client ID</label>
         <span class="set-ctl"><input class="mini-input" id="spotifyClient" autocomplete="off"><button type="button" class="mini-btn" id="spotifySave">保存</button><button type="button" class="mini-btn" id="spotifyLogin">登录 Spotify</button></span></div>
       <div class="set-note" id="spotifyNote"></div>

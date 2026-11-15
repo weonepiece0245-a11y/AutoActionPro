@@ -2822,6 +2822,7 @@ def settings_state(session, meter=None) -> dict:
         "health": health_state(session),
         "defender": defender_state(session),
         "apps": apps_state(session),
+        "steam": steam_state(session, getattr(getattr(session, "assistant", None), "toolbox", None)),
         "floatorb": {"on": session.floatorb.running} if getattr(session, "floatorb", None) is not None else None,
         "telegram": telegram_state(session) if getattr(session, "quick", None) is not None else None,
         "sleep_timer": session.quick.sleep_timer.state() if getattr(getattr(session, "quick", None), "sleep_timer", None) else None,
@@ -3085,12 +3086,49 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         if friday_steam.configured():
             toolbox.steam = session.quick.steam = friday_steam.Steam()
             try:
-                done.append("Steam 连好了:" + toolbox.steam.recent())
+                name = toolbox.steam.profile()
+                done.append(f"Steam 连好了({name})。" + toolbox.steam.recent().splitlines()[0])
             except ValueError as e:
                 done.append(f"Steam 设好了,但现在读不到:{e}")
+            if getattr(session, "data_dir", None):
+                start_wishlist(session, toolbox, session.data_dir)  # 刚连上:愿望单提醒也开始
         else:
             toolbox.steam = session.quick.steam = None
             done.append("Steam 设定已保存(钥匙和个人资料都填了才会连)")
+    if payload.get("steam_test"):
+        steam = getattr(toolbox, "steam", None)
+        if steam is None:
+            return {"error": "还没连 Steam:先填钥匙和个人资料"}
+        try:
+            done.append(f"✓ 连得上 Steam({steam.profile()})。" + steam.recent().splitlines()[0])
+        except ValueError as e:
+            return {"error": str(e)}
+    if "wishlist_on" in payload or "wishlist_min" in payload:
+        import friday_wishlist
+
+        if "wishlist_on" in payload:
+            on = bool(payload["wishlist_on"])
+            save_env_value(env, "FRIDAY_WISHLIST", "on" if on else "off")
+            os.environ["FRIDAY_WISHLIST"] = "on" if on else "off"
+            done.append("愿望单打折会提醒你" if on else "不再提醒愿望单打折")
+        if "wishlist_min" in payload:
+            try:
+                floor = int(payload["wishlist_min"])
+            except (TypeError, ValueError):
+                return {"error": "选项不对"}
+            if floor not in friday_wishlist.MIN_CHOICES:
+                return {"error": "选项不对"}
+            save_env_value(env, "FRIDAY_WISHLIST_MIN", str(floor))
+            os.environ["FRIDAY_WISHLIST_MIN"] = str(floor)
+            done.append(f"愿望单打 -{floor}% 以上才提醒" if floor else "愿望单有折扣就提醒")
+    if payload.get("wishlist_now"):
+        wishlist = getattr(session, "wishlist", None)
+        if wishlist is None or getattr(wishlist, "steam", None) is None:
+            return {"error": "还没连 Steam"}
+        try:
+            done.append(wishlist.describe())
+        except ValueError as e:
+            return {"error": str(e)}
     if "telegram_token" in payload:
         import friday_telegram
 
@@ -5228,6 +5266,40 @@ def start_virus_scan(session, kind: str) -> str:
     return session.defender.start(kind, done, _call_me(session))
 
 
+_STEAM_INSTALLED: dict = {"at": 0.0, "count": None}
+
+
+def steam_installed_count() -> int | None:
+    """这台电脑装了几个 Steam 游戏(5 分钟看一次;不是 Windows 返回 None)。"""
+    if os.name != "nt":
+        return None
+    if time.time() - _STEAM_INSTALLED["at"] > 300:
+        import friday_pc
+
+        try:
+            import winreg
+
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as key:
+                root = Path(winreg.QueryValueEx(key, "SteamPath")[0])
+            _STEAM_INSTALLED["count"] = len(friday_pc.steam_games(root))
+        except OSError:
+            _STEAM_INSTALLED["count"] = None
+        _STEAM_INSTALLED["at"] = time.time()
+    return _STEAM_INSTALLED["count"]
+
+
+def steam_state(session, toolbox) -> dict:
+    """齿轮设定 → 游戏 → Steam(钥匙只显示最后 4 位)。"""
+    import friday_steam
+
+    key = os.environ.get("FRIDAY_STEAM_KEY", "").strip()
+    steam = getattr(toolbox, "steam", None) or getattr(getattr(session, "quick", None), "steam", None)
+    wishlist = getattr(session, "wishlist", None)
+    return {"key": ("…" + key[-4:]) if key else "", "id": os.environ.get("FRIDAY_STEAM_ID", "").strip(),
+            "connected": friday_steam.configured(), "persona": getattr(steam, "persona", "") if steam else "",
+            "installed": steam_installed_count(), "wishlist": wishlist.state() if wishlist is not None else None}
+
+
 def apps_state(session) -> dict | None:
     """齿轮设定 → 连接的应用(钥匙只显示最后 4 位)。"""
     if getattr(session, "spotify", None) is None:
@@ -5598,9 +5670,14 @@ def start_folder_backup(session, toolbox, data_dir: str, interval: float = 600) 
 
 
 def start_wishlist(session, toolbox, data_dir: str) -> None:
-    """Steam 愿望单打折提醒:每 6 小时看一次,有新打折就说(也推到手机)。"""
+    """Steam 愿望单打折提醒:每 6 小时看一次,有新打折就说(也推到手机)。设定里刚连上 Steam 也会开始。"""
     import friday_wishlist
 
+    existing = getattr(session, "wishlist", None)
+    if existing is not None:  # 已经在看了:换成新的 Steam 连线就好
+        existing.steam = toolbox.steam
+        toolbox.wishlist = session.quick.wishlist = existing
+        return
     wishlist = friday_wishlist.Wishlist(toolbox.steam, os.path.join(data_dir, "friday_wishlist.json"))
     toolbox.wishlist = session.quick.wishlist = session.wishlist = wishlist
 
@@ -5608,11 +5685,11 @@ def start_wishlist(session, toolbox, data_dir: str) -> None:
         time.sleep(600)
         while True:
             def check() -> None:
-                if os.environ.get("FRIDAY_WISHLIST", "on") == "off" or not wishlist.due():
+                if not friday_wishlist.enabled() or not wishlist.due() or wishlist.steam is None:
                     return
                 text = wishlist.check()
                 if text:
-                    announce(session, text, "🛒", "Steam 愿望单有游戏在打折")
+                    announce(session, text, "🛒", text.splitlines()[0].lstrip("🛒 "))
             try:
                 check()
             except ValueError as e:
@@ -5703,6 +5780,8 @@ def start_connected_apps(session, toolbox, ctx, data_dir: str, port: int) -> Non
     toolbox.news = session.quick.news = friday_news.News()
     if friday_steam.configured():
         toolbox.steam = session.quick.steam = friday_steam.Steam()
+        steam = toolbox.steam
+        threading.Thread(target=lambda: _quietly(steam.profile), daemon=True, name="friday-steam-name").start()
         start_wishlist(session, toolbox, data_dir)
     import friday_diary
     import friday_shopping
