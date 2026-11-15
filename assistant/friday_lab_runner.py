@@ -97,7 +97,20 @@ def install(mode: str, workdir: str) -> None:
     sys.addaudithook(hook)
 
 
+def _utf8_output() -> None:
+    """输出一律用 UTF-8、一行一行送出去。
+
+    用 -E 开(不读环境变量,比较安全),PYTHONIOENCODING 也会被忽略:Windows 上默认不是 UTF-8,
+    印到 ✅、❌ 这种字就当场出错;输出也会攒在一起最后才送,实验窗口就没办法边跑边看。"""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+        except (AttributeError, ValueError):
+            pass
+
+
 def main(argv: list[str]) -> int:
+    _utf8_output()
     mode, workdir = argv[0], argv[1]
     os.chdir(workdir)
     here = _norm(os.path.dirname(os.path.abspath(__file__)))
@@ -113,9 +126,29 @@ def main(argv: list[str]) -> int:
     if mode == "selftest":
         sys.path.insert(0, workdir)
         install("selftest", workdir)
+        import traceback
         import unittest
 
-        suite = unittest.defaultTestLoader.loadTestsFromName("test_assistant")
+        try:
+            suite = unittest.defaultTestLoader.loadTestsFromName("test_assistant")
+        except BaseException:  # noqa: BLE001  测试档案本身载入不了:把原因印出来
+            traceback.print_exc(file=sys.stdout)
+            print("\n@@LOADFAIL")
+            return 1
+
+        def flatten(item):
+            if isinstance(item, unittest.TestSuite):
+                for sub in item:
+                    yield from flatten(sub)
+            else:
+                yield item
+
+        broken = [t for t in flatten(suite) if type(t).__name__ == "_FailedTest"]
+        if broken:  # unittest 把载入失败包成一个“失败的测试”:当成没跑起来
+            for test in broken:
+                print(getattr(test, "_exception", test))
+            print("\n@@LOADFAIL")
+            return 1
         result = unittest.TextTestRunner(stream=sys.stdout, verbosity=1).run(suite)
         print(f"\n@@RESULT ran={result.testsRun} failures={len(result.failures)} errors={len(result.errors)}")
         for test, _ in result.failures + result.errors:

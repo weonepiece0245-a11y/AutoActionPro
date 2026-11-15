@@ -13133,6 +13133,22 @@ class CodeLabTest(TempDirTest):
             server.shutdown()
             server.server_close()
 
+    def test_output_is_utf8_and_line_by_line(self):
+        record = self.make().run_code("import sys\nprint(sys.stdout.encoding, sys.stdout.line_buffering, '✅')", "编码")
+        self.assertEqual(record["output"].strip(), "utf-8 True ✅")  # 用 -E 开也一样(Windows 不是 UTF-8 时会出错)
+
+    def test_self_test_when_tests_cannot_load(self):
+        app_dir = Path(self.tmp, "app2")
+        app_dir.mkdir()
+        (app_dir / "calc.py").write_text("x = 1\n", encoding="utf-8")
+        (app_dir / "test_assistant.py").write_text("import not_installed_lib_zz\n", encoding="utf-8")
+        lab = self.make(app_dir=app_dir)
+        record = lab.self_test([{"file": "calc.py", "old": "x = 1", "new": "x = 2"}], "试")
+        self.assertFalse(record["ok"])
+        self.assertIn("测试环境的问题", record["error"])
+        self.assertIn("not_installed_lib_zz", record["error"])  # 看得到原因
+        self.assertIsNone(lab.baseline)  # 没跑起来的对照不留着
+
     def test_env_has_no_keys(self):
         with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-secret", "FRIDAY_DISCORD_TOKEN": "x"}):
             env = friday_lab.safe_env()

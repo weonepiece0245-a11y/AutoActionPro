@@ -412,7 +412,9 @@ class Lab:
         result = {"ran": int(found.group(1)) if found else 0, "failed": failed, "seconds": round(time.monotonic() - started),
                   "output": _clip(out, 6000)}
         if not found:
-            result["error"] = "测试没跑起来(程序可能有语法错误)"
+            tail = "\n".join(line for line in out.strip().splitlines()[-15:] if "@@LOADFAIL" not in line)
+            reason = "测试档案载入不了" if "@@LOADFAIL" in out else "测试没跑完就停了"
+            result["error"] = f"测试没跑起来({reason})" + (f",最后的输出:\n{tail[-1500:]}" if tail else "")
         return result
 
     @staticmethod
@@ -443,8 +445,14 @@ class Lab:
             step("① 复制一份没改过的星期五,跑全部测试当对照(第一次要几分钟)…")
             base_root = self.folder / "selftest" / "base"
             self._copy_app(base_root)
-            self.baseline = {**self._run_tests(base_root), "version": version}
-            step(f"   对照组:跑了 {self.baseline.get('ran', 0)} 个测试,本来就过不了 {len(self.baseline.get('failed') or [])} 个(这台电脑的环境)")
+            base = self._run_tests(base_root)
+            self.baseline = {**base, "version": version} if base.get("ran") else None  # 没跑起来的不留着用
+            step(f"   对照组:跑了 {base.get('ran', 0)} 个测试,本来就过不了 {len(base.get('failed') or [])} 个(这台电脑的环境)")
+            if not base.get("ran"):  # 连没改过的都跑不起来:不是改坏的,是测试环境的问题
+                step("   对照组没跑起来,这次比不了")
+                return self._finish_self_test(run_id, started, title, edits, [], {
+                    "ran": 0, "failed": [], "output": base.get("output", ""),
+                    "error": "没改过的副本也跑不起来,是测试环境的问题,不是这次的修改:" + base.get("error", "")}, set())
         else:
             step("① 对照组用上次的结果(程序没变过)")
         root = self.folder / "selftest" / "changed"
@@ -456,7 +464,13 @@ class Lab:
         except ValueError as e:
             step(f"② 改不进去:{e}")
             changed, after = [], {"ran": 0, "failed": [], "error": str(e), "output": ""}
-        before_failed = set(self.baseline.get("failed") or [])
+        return self._finish_self_test(run_id, started, title, edits, changed, after, set(self.baseline.get("failed") or []))
+
+    def _finish_self_test(self, run_id: str, started: float, title: str, edits: list[dict], changed: list[str],
+                          after: dict, before_failed: set) -> dict:
+        def step(text: str) -> None:
+            self._emit({"phase": "out", "run": run_id, "text": f"[{round(time.monotonic() - started)} 秒] {text}\n"})
+
         new_failures = [t for t in after.get("failed", []) if t not in before_failed]
         fixed = [t for t in before_failed if after.get("ran") and t not in after.get("failed", [])]
         ok = bool(after.get("ran")) and not after.get("error") and not new_failures
@@ -469,7 +483,7 @@ class Lab:
             step(f"   改过的:跑了 {after['ran']} 个测试,用了 {after.get('seconds', 0)} 秒")
         self._emit({"phase": "end", "run": run_id, "kind": "self_test", "ok": ok,
                     "seconds": round(time.monotonic() - started, 1), "error": "", "attempt": 1, "max": MAX_ATTEMPTS,
-                    "summary": self.describe(record).split("。报告存在")[0] + "。真正的星期五没有被改。",
+                    "summary": self.describe(record).split("。报告存在")[0][:2500] + "。真正的星期五没有被改。",
                     "failed": new_failures[:10],
                     "produced": [{"name": Path(record["report"]).name, "image": False, "openable": True,
                                   "run": "reports"}]})
