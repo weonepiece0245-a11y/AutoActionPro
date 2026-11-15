@@ -142,6 +142,11 @@ class Subscriptions:
         name = " ".join(str(name or "").split())[:40]
         if not name:
             raise ValueError("订阅叫什么名字?")
+        if source == "email":
+            import friday_security
+
+            if friday_security.looks_like_instruction(name) or friday_security.looks_like_instruction(cancel_hint):
+                return ""  # 邮件里藏的“指示”:不收
         if cycle not in CYCLES:
             raise ValueError("周期只能是每月、每年、每周、每季")
         currency = re.sub(r"[^A-Za-z]", "", str(currency or "MYR")).upper()[:3] or "MYR"

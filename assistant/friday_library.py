@@ -386,8 +386,15 @@ class Commands:
         return None
 
 
+IC_NUMBER = re.compile(r"(?<!\d)(\d{6})-?(\d{2})-?(\d{4})(?!\d)")  # 马来西亚身份证号码
+CARD_NUMBER = re.compile(r"(?<!\d)(?:\d[ -]?){12,18}(\d{4})(?!\d)")  # 信用卡 / 银行卡号码
+
+
 def hide_private(text: str) -> str:
-    return PRIVATE_LINE.sub(lambda m: m.group(1) + "(已隐藏)", text)
+    """给 Claude 看之前:密码的值遮掉;身份证、卡号只留最后 4 个数字。"""
+    text = PRIVATE_LINE.sub(lambda m: m.group(1) + "(已隐藏)", text)
+    text = CARD_NUMBER.sub(lambda m: "****" + m.group(1), text)
+    return IC_NUMBER.sub(lambda m: "******-**-" + m.group(3), text)
 
 
 def snippet(text: str, words: list[str], size: int = SNIPPET) -> str:

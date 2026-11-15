@@ -120,6 +120,10 @@ class ReceiptInbox:
                 except ValueError:
                     day = self.today().isoformat()
                 mail = new[n - 1]
+                import friday_security
+
+                if friday_security.looks_like_instruction(str(r.get("item") or "")):
+                    continue  # 邮件里藏的“指示”:不收
                 item = {"id": mail["id"], "item": " ".join(str(r.get("item") or mail.get("subject", "")).split())[:40] or "邮件收据",
                         "amount": amount, "currency": currency, "date": day,
                         "category": r.get("category") if r.get("category") in CATEGORIES else "其他",

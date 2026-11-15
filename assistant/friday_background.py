@@ -241,21 +241,33 @@ STATUS_TEXT = {"waiting": "排队中", "running": "正在做", "done": "做完�
 # ======================== 后台用的工具(只能查,不能改) ========================
 
 
-class ReadOnlyTools:
-    """给后台用的工具:上网搜索、读网页、天气、聊天记录、看邮件和日历(只能 list / read)。"""
+MAIL_GOAL = re.compile(r"邮件|邮箱|信箱|email|e-mail|gmail|inbox|日历|行程|calendar", re.I)
 
-    ALLOWED = {"weather", "search_history", "gmail", "calendar", "news", "exchange_rate"}
+
+class ReadOnlyTools:
+    """给后台用的工具:上网搜索、读网页、天气、聊天记录;任务说到邮件 / 日历才给看邮件和日历(只能 list / read)。
+
+    安全:看得到邮件时不给 web_fetch(读任意网页)。不然邮件里藏的“指示”可能骗它把你的资料塞进网址送出去;
+    搜索(web_search)照样能用。
+    """
+
+    BASE = {"weather", "search_history", "news", "exchange_rate"}
+    MAIL = {"gmail", "calendar"}
     READ_ACTIONS = {"gmail": {"list", "read"}, "calendar": {"list"}}
 
-    def __init__(self, toolbox, should_stop: Callable[[], bool] = lambda: False) -> None:
+    def __init__(self, toolbox, should_stop: Callable[[], bool] = lambda: False, goal: str = "") -> None:
         self.toolbox = toolbox
         self.should_stop = should_stop
         self.archive = None
+        self.mail = bool(MAIL_GOAL.search(goal or ""))
+        self.ALLOWED = self.BASE | (self.MAIL if self.mail else set())
 
     def definitions(self) -> list[dict]:
         tools = []
         for tool in self.toolbox.definitions():
             name = tool.get("name")
+            if name == "web_fetch" and self.mail:
+                continue
             if name in ("web_search", "web_fetch") and "input_schema" not in tool:
                 tools.append(tool)
             elif name in self.ALLOWED:

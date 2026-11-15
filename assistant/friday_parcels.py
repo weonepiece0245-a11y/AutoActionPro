@@ -127,6 +127,10 @@ class Parcels:
                 status = p.get("status")
                 if status not in STATUSES:
                     continue
+                import friday_security
+
+                if any(friday_security.looks_like_instruction(str(p.get(k) or "")) for k in ("item", "shop", "courier")):
+                    continue  # 邮件里藏的“指示”:不收
                 item = self._match(p)
                 fresh = item is None
                 if fresh:

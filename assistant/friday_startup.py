@@ -208,7 +208,8 @@ def clean_temp(folder: Path | None, older_days: float = TEMP_DAYS, now: float | 
         return 0, 0
     now = now if now is not None else time.time()
     freed = count = 0
-    for current, dirs, files in os.walk(folder, topdown=False):
+    for current, dirs, files in os.walk(folder, topdown=True):
+        dirs[:] = [d for d in dirs if not _is_link(Path(current) / d)]  # 不跟着捷径 / 连接点跑出临时文件夹
         for name in files:
             path = Path(current) / name
             try:
@@ -220,12 +221,20 @@ def clean_temp(folder: Path | None, older_days: float = TEMP_DAYS, now: float | 
                 count += 1
             except OSError:
                 continue
-        if Path(current) != folder:
+    for current, dirs, files in os.walk(folder, topdown=False):
+        if Path(current) != folder and not _is_link(Path(current)):
             try:
-                Path(current).rmdir()  # 空的子文件夹顺便拿掉
+                Path(current).rmdir()  # 空的子文件夹顺便拿掉(不空的删不掉,跳过)
             except OSError:
                 pass
     return freed, count
+
+
+def _is_link(path: Path) -> bool:
+    try:
+        return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+    except OSError:
+        return True
 
 
 def gb(size: int) -> str:

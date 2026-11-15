@@ -413,6 +413,7 @@ class Assistant:
         on_text: Callable[[str], None],
         on_status: Callable[[str], None] = _ignore,
         images: list[dict] | None = None,
+        note: str = "",
     ) -> str:
         """提问并把回答逐段交给 on_text,返回完整回答文本。
 
@@ -427,14 +428,17 @@ class Assistant:
             self.model = self.router.choose(question, history_empty=not self.messages)
         if self.toolbox is not None:
             self.toolbox.begin_turn()
+        # note:给 Claude 看的说明(例如“这条回答会读出来”),单独一块,不存进聊天记录
+        extra = [{"type": "text", "text": note}] if note else []
         if self.context is not None:
             content: str | list = [
                 {"type": "text", "text": self.context()},
+                *extra,
                 *(images or []),
                 {"type": "text", "text": question},
             ]
-        elif images:
-            content = [*images, {"type": "text", "text": question}]
+        elif images or extra:
+            content = [*extra, *(images or []), {"type": "text", "text": question}]
         else:
             content = question
         self.messages.append({"role": "user", "content": content})
@@ -1211,6 +1215,16 @@ class SpeechControls:
         return reply
 
 
+def _accepts(fn, name: str) -> bool:
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(p.kind == p.VAR_KEYWORD for p in params.values())
+
+
 CJK = "一-鿿"
 
 
@@ -1386,7 +1400,6 @@ class WebSession:
             limit = speak_max_chars()
             notes += (f"[这条回答会读出来,一次最多读 {limit} 字:先说重点;内容很长时先给精简版,再问要不要听详细的]"
                       if limit < UNLIMITED else "[这条回答会读出来:先说重点,不要太长]")
-        prefix = notes + prefix
 
         def on_text(delta):
             hub.broadcast({"type": "delta", "text": delta})
@@ -1395,10 +1408,16 @@ class WebSession:
 
         try:
             on_status = lambda status: hub.broadcast({"type": "status", "text": status})  # noqa: E731
+            extra = {}
+            if notes:  # 说明不存进聊天记录;不认 note 的(旧的或包起来的 ask)就照旧放在问题前面
+                if _accepts(self.assistant.ask, "note"):
+                    extra = {"note": notes}
+                else:
+                    prefix = notes + prefix
             if blocks:
-                result = self.assistant.ask(prefix + (text or "(只发了附件)"), on_text, on_status, images=blocks)
+                result = self.assistant.ask(prefix + (text or "(只发了附件)"), on_text, on_status, images=blocks, **extra)
             else:
-                result = self.assistant.ask(prefix + text, on_text, on_status)
+                result = self.assistant.ask(prefix + text, on_text, on_status, **extra)
         except Exception as e:  # 界面里不能让异常把程序弄崩
             if stream is not None:
                 stream.cancel()
@@ -4357,7 +4376,7 @@ def start_background(session, toolbox: Toolbox, data_dir: str):
         system = friday_background.SYSTEM.format(today=datetime.date.today().isoformat(), call_me=_call_me(session),
                                                  memory=toolbox.memory.as_prompt())
         worker = Assistant(client=assistant.client, model=friday_router.SONNET, effort="high", system=system,
-                           toolbox=friday_background.ReadOnlyTools(toolbox, should_stop))
+                           toolbox=friday_background.ReadOnlyTools(toolbox, should_stop, goal))
         worker.on_usage = assistant.on_usage
 
         def on_text(delta: str) -> None:
