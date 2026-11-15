@@ -13086,5 +13086,89 @@ class CodeLabTest(TempDirTest):
         out = toolbox.run(SimpleNamespace(id="c", name="code_lab", input={"action": "self_test"}), lambda s: None)
         self.assertTrue(out["is_error"])
 
+
+class SnipTest(unittest.TestCase):
+    def test_crop_box(self):
+        import friday_snip
+
+        self.assertEqual(friday_snip.crop_box((50, 80), (10, 20), (100, 100)), (10, 20, 50, 80))
+        self.assertEqual(friday_snip.crop_box((-5, -5), (200, 40), (100, 100)), (0, 0, 100, 40))
+        self.assertIsNone(friday_snip.crop_box((10, 10), (13, 60), (100, 100)))  # 太窄:点错
+
+    def session(self):
+        hub = friday_web.Hub()
+        client, _ = hub.subscribe()
+        session = app.WebSession(None, app.default_persona(), hub)
+        seen = []
+        session._answer = lambda text, source, speak, prefix, blocks: seen.append((text, prefix, blocks)) or "好"
+        return session, client, seen
+
+    def png(self):
+        from PIL import Image
+
+        buffer = io.BytesIO()
+        Image.new("RGB", (40, 30), "white").save(buffer, "PNG")
+        return buffer.getvalue()
+
+    def test_next_question_takes_the_snip(self):
+        session, client, seen = self.session()
+        session.pending_snip = ("框选的画面.png", "image/png", self.png(), time.time())
+        session._ask("这是什么意思", source="voice")
+        self.assertIsNone(session.pending_snip)
+        text, prefix, blocks = seen[0]
+        self.assertEqual(len(blocks), 1)
+        self.assertIn("框选的屏幕画面", prefix)
+        session._ask("再问一次")
+        self.assertEqual(seen[1][2], [])  # 只用一次
+
+    def test_old_or_background_snip_not_used(self):
+        session, client, seen = self.session()
+        session.pending_snip = ("框选的画面.png", "image/png", self.png(), time.time())
+        session._ask("每日简报", source="task")  # 背景工作不拿走
+        self.assertIsNotNone(session.pending_snip)
+        session.pending_snip = ("框选的画面.png", "image/png", self.png(), time.time() - app.SNIP_KEEP_SECONDS - 5)
+        session._ask("你好")
+        self.assertEqual(seen[-1][2], [])
+        self.assertIsNone(session.pending_snip)
+
+    def test_cancel_and_take(self):
+        session, client, seen = self.session()
+        session.pending_snip = ("a.png", "image/png", b"x", time.time())
+        session.speech_signal("snip_cancel")
+        self.assertIsNone(session.pending_snip)
+        out = tempfile.mkdtemp()
+
+        def fake_run(cmd, **kw):
+            Path(cmd[-1]).write_bytes(self.png())
+        with mock.patch("friday_web.focus_window", return_value=True):
+            self.assertTrue(app.take_snip(session, out, run=fake_run))
+        self.assertEqual(session.pending_snip[1], "image/png")
+        events = [e for e in iter(lambda: None if client.empty() else client.get_nowait(), None)]
+        snips = [e for e in events if e["type"] == "snip" and not e.get("clear")]
+        self.assertTrue(snips[0]["thumb"].startswith("data:image/jpeg;base64,"))
+        session.pending_snip = None
+        self.assertFalse(app.take_snip(session, out, run=lambda cmd, **kw: None))  # 取消了
+        self.assertIsNone(session.pending_snip)
+
+    def test_phrase_and_hotkey_settings(self):
+        session, client, seen = self.session()
+        calls = []
+        session.snip = lambda minimize=False: calls.append(minimize)
+        handler = app.SnipCommands(session)
+        self.assertIn("拉一个框", handler.handle("框选屏幕"))
+        self.assertIsNotNone(handler.handle("星期五,帮我截一块屏幕问你"))
+        self.assertIsNone(handler.handle("框选屏幕的快捷键是什么"))
+        for _ in range(50):
+            if len(calls) == 2:
+                break
+            time.sleep(0.02)
+        self.assertEqual(calls, [True, True])
+        env = os.path.join(tempfile.mkdtemp(), ".env")
+        with mock.patch.dict(os.environ, {}, clear=False):
+            result = app.apply_settings({"snip_hotkey": "ctrl+alt+x"}, session, None, env)
+            self.assertEqual(os.environ["FRIDAY_SNIP_HOTKEY"], "ctrl+alt+x")
+            self.assertIn("Ctrl + Alt + X", " ".join(result.get("done", [])) + str(result))
+            self.assertIn("error", app.apply_settings({"snip_hotkey": "ctrl+z"}, session, None, env))
+
 if __name__ == "__main__":
     unittest.main()

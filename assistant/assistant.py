@@ -1225,6 +1225,70 @@ def _accepts(fn, name: str) -> bool:
     return name in params or any(p.kind == p.VAR_KEYWORD for p in params.values())
 
 
+SNIP_KEEP_SECONDS = 180  # 框好的画面等你问多久
+
+
+def take_snip(session, data_dir: str, minimize: bool = False, run=subprocess.run) -> bool:
+    """框选屏幕:开一个小程序让你拉框;框好了存起来,下一个问题(打字或说话)带着它问。"""
+    import base64 as _b64
+    import io as _io
+
+    import friday_web
+
+    if os.name != "nt" and run is subprocess.run:
+        session.hub.broadcast({"type": "error", "text": "框选屏幕只能在 Windows 上用"})
+        return False
+    if minimize:
+        friday_web.minimize_window()
+        time.sleep(0.4)  # 等窗口缩下去再冻住画面
+    out = Path(data_dir) / "friday_snip.png"
+    try:
+        out.unlink()
+    except OSError:
+        pass
+    try:
+        run([sys.executable, str(Path(SCRIPT_DIR) / "friday_snip.py"), str(out)], timeout=90,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"框选屏幕没成功:{e}", flush=True)
+    if not out.is_file():
+        if minimize:
+            friday_web.focus_window()
+        return False
+    data = out.read_bytes()
+    session.pending_snip = ("框选的画面.png", "image/png", data, time.time())
+    thumb = ""
+    try:
+        from PIL import Image
+
+        image = Image.open(_io.BytesIO(data))
+        image.thumbnail((360, 200))
+        buffer = _io.BytesIO()
+        image.convert("RGB").save(buffer, "JPEG", quality=80)
+        thumb = "data:image/jpeg;base64," + _b64.b64encode(buffer.getvalue()).decode()
+    except Exception:
+        pass
+    friday_web.focus_window()
+    session.hub.broadcast({"type": "snip", "thumb": thumb})
+    session.hub.broadcast({"type": "status", "text": "✂ 框好了:直接问吧(打字或说话都可以;3 分钟内有效)"})
+    return True
+
+
+class SnipCommands:
+    """“框选屏幕”“截一块屏幕问你”:开始框选。"""
+
+    SNIP = re.compile(r"^(星期五)?[,，\s]*(帮我)?(框选|框一下|圈一下|截一块|截一下)(一下)?(屏幕|画面)(问你|给你看)?[。!！]?$")
+
+    def __init__(self, session) -> None:
+        self.session = session
+
+    def handle(self, text: str) -> str | None:
+        if not self.SNIP.match(re.sub(r"\s+", "", str(text or ""))) or self.session.snip is None:
+            return None
+        threading.Thread(target=lambda: _quietly(lambda: self.session.snip(True)), daemon=True, name="friday-snip").start()
+        return "好,拉一个框选要问的地方(Esc 取消)。框好了直接问我。"
+
+
 CJK = "一-鿿"
 
 
@@ -1294,6 +1358,13 @@ class WebSession:
              show_user: bool = True, files: list | None = None) -> str | None:
         hub = self.hub
         blocks = []
+        snip = self.pending_snip
+        if snip is not None and source in ("web", "voice", "ptt") and not files:
+            self.pending_snip = None
+            hub.broadcast({"type": "snip", "clear": True})
+            if time.time() - snip[3] <= SNIP_KEEP_SECONDS:  # 框好的画面跟着这个问题一起问
+                files = [snip[:3]]
+                prefix = "[框选的屏幕画面:看图回答;没说要做什么就解释画面上的内容,外文就翻译]" + prefix
         if files:
             import friday_images
 
@@ -1593,6 +1664,14 @@ class WebSession:
             self.pause_speech(window_says=True)
         elif what == "speech_resumed":
             self.resume_speech()
+        elif what == "snip" and self.snip is not None:
+            threading.Thread(target=lambda: _quietly(lambda: self.snip(True)), daemon=True, name="friday-snip").start()
+        elif what == "snip_cancel":
+            self.pending_snip = None
+            self.hub.broadcast({"type": "snip", "clear": True})
+
+    snip = None  # 框选屏幕:(要不要先把星期五的窗口缩起来) -> 有没有框到
+    pending_snip = None  # 框好的画面:(名字, 类型, 内容, 时间);下一个问题带着它
 
     @staticmethod
     def _call_me_hint() -> str:
@@ -2235,7 +2314,10 @@ def hotkey_state(session) -> dict | None:
     return {"value": friday_desktop.hotkey_name(), "error": hotkey.error,
             "options": [[key, label] for key, (label, _, _) in friday_desktop.HOTKEYS.items()],
             "ask_value": friday_desktop.ask_hotkey_name(), "ask_error": ask.error if ask is not None else "",
-            "ask_options": [[key, label] for key, (label, _, _) in friday_desktop.ASK_HOTKEYS.items()]}
+            "ask_options": [[key, label] for key, (label, _, _) in friday_desktop.ASK_HOTKEYS.items()],
+            "snip_value": friday_desktop.snip_hotkey_name(),
+            "snip_error": getattr(getattr(session, "snip_hotkey", None), "error", ""),
+            "snip_options": [[key, label] for key, (label, _, _) in friday_desktop.SNIP_HOTKEYS.items()]}
 
 
 def party_state(session) -> dict | None:
@@ -3489,6 +3571,22 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         os.environ["FRIDAY_ASK_HOTKEY"] = name
         done.append("已关闭“选中就问”" if name == "off"
                     else f"选中文字后按 {friday_desktop.ASK_HOTKEYS[name][0]},星期五帮你翻译或解释")
+    if "snip_hotkey" in payload:
+        import friday_desktop
+
+        name = str(payload["snip_hotkey"]).strip().lower()
+        if name not in friday_desktop.SNIP_HOTKEYS and name != "off":
+            return {"error": "没有这个快捷键"}
+        snip_key = getattr(session, "snip_hotkey", None)
+        previous = friday_desktop.snip_hotkey_name()
+        if snip_key is not None and not snip_key.start(name):
+            error = snip_key.error
+            snip_key.start(previous)
+            return {"error": error}
+        save_env_value(env, "FRIDAY_SNIP_HOTKEY", name)
+        os.environ["FRIDAY_SNIP_HOTKEY"] = name
+        done.append("已关闭“框选屏幕”快捷键" if name == "off"
+                    else f"按 {friday_desktop.SNIP_HOTKEYS[name][0]} 框选屏幕问星期五")
     backup = getattr(session, "backup", None)
     if "backup_auto" in payload:
         on = bool(payload["backup_auto"])
@@ -5854,6 +5952,12 @@ def run_web(args) -> None:
             friday_web.show_window(url, profile_dir)
         events.put(("web", {"text": "📋 " + text, "prefix": friday_desktop.ask_prefix(text), "source": "web"}))
 
+    session.snip = lambda minimize=False: take_snip(session, data_dir, minimize)
+    session.quick.extra.append(SnipCommands(session))
+    session.snip_hotkey = friday_desktop.GlobalHotkey(lambda: _quietly(lambda: session.snip(False)),
+                                                      friday_desktop.SNIP_HOTKEYS, hotkey_id=3)
+    if not session.snip_hotkey.start(friday_desktop.snip_hotkey_name()):
+        print(f"“框选屏幕”快捷键没有设置成功:{session.snip_hotkey.error}", flush=True)
     session.ask_hotkey = friday_desktop.GlobalHotkey(ask_selection, friday_desktop.ASK_HOTKEYS, hotkey_id=2)
     if not session.ask_hotkey.start(friday_desktop.ask_hotkey_name()):
         print(f"“选中就问”快捷键没有设置成功:{session.ask_hotkey.error}", flush=True)
@@ -6007,6 +6111,8 @@ def run_web(args) -> None:
                 session.cloud.goodbye()  # 正常关掉:云端马上接手
         session.hotkey.stop()
         session.ask_hotkey.stop()
+        if getattr(session, "snip_hotkey", None) is not None:
+            session.snip_hotkey.stop()
         tray.stop()
         server.shutdown()
         server.server_close()

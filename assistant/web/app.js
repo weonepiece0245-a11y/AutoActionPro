@@ -389,6 +389,8 @@ function handle(ev) {
       busy = false; finishAnswer(ev.text, ev.source); refreshMode(); loadState(); miniLast(ev.text);
       if (ev.source === "voice") { followUpTurn = ev.turn ?? "none"; maybeFollowUp(); }
       break;
+    case "snip":
+      showSnip(ev); break;
     case "audio_end":
       audioEndTurns.add(ev.turn);
       maybeFollowUp(); break;
@@ -601,6 +603,29 @@ function addFiles(list) {
   $("input").focus();
 }
 $("attachBtn").onclick = () => $("attachInput").click();
+$("snipBtn").onclick = () => api("/api/command", { command: "snip" }).catch(() => {});
+
+// 框好的画面:挂在输入框上面,下一个问题带着它问;× 取消
+function showSnip(ev) {
+  const box = $("snipChip");
+  box.replaceChildren();
+  if (ev.clear) { box.hidden = true; return; }
+  const chip = document.createElement("span");
+  chip.className = "attach-chip snip-chip";
+  if (ev.thumb) {
+    const img = document.createElement("img");
+    img.src = ev.thumb; img.alt = "框选的画面";
+    chip.append(img);
+  }
+  chip.append(document.createTextNode("✂ 框选的画面 · 下一个问题会带着它"));
+  const x = document.createElement("button");
+  x.type = "button"; x.textContent = "×"; x.title = "不要这张";
+  x.onclick = () => { box.hidden = true; api("/api/command", { command: "snip_cancel" }).catch(() => {}); };
+  chip.append(x);
+  box.append(chip);
+  box.hidden = false;
+  $("input").focus();
+}
 $("attachInput").onchange = (e) => { addFiles(e.target.files); e.target.value = ""; };
 document.addEventListener("paste", (e) => {
   if (isLocked || !$("settings").hidden) return;
@@ -930,6 +955,19 @@ function fillSettings() {
     $("askHotkeyNote").hidden = !h.ask_error;
     $("askHotkeyNote").textContent = h.ask_error ? "⚠ " + h.ask_error : "";
     $("askHotkeyNote").className = "set-note warn";
+    $("snipHotkeyRow").hidden = !h.snip_options;
+    const snipSelect = $("setSnipHotkey");
+    if (h.snip_options && !snipSelect.options.length) {
+      for (const [key, label] of [...h.snip_options, ["off", "不用"]]) {
+        const opt = document.createElement("option");
+        opt.value = key; opt.textContent = label;
+        snipSelect.append(opt);
+      }
+    }
+    if (h.snip_value) snipSelect.value = h.snip_value;
+    $("snipHotkeyNote").hidden = !h.snip_error;
+    $("snipHotkeyNote").textContent = h.snip_error ? "⚠ " + h.snip_error : "";
+    $("snipHotkeyNote").className = "set-note warn";
   }
   const b = s.budget;
   $("budgetGroup").hidden = !b;
@@ -1633,6 +1671,7 @@ $("setWakeCustom").onkeydown = (e) => { if (e.key === "Enter") $("saveWakeCustom
 $("setWakeSensitivity").onchange = (e) => saveSetting({ wake_sensitivity: e.target.value });
 $("setHotkey").onchange = (e) => saveSetting({ hotkey: e.target.value });
 $("setAskHotkey").onchange = (e) => saveSetting({ ask_hotkey: e.target.value });
+$("setSnipHotkey").onchange = (e) => saveSetting({ snip_hotkey: e.target.value });
 $("setPush").onchange = (e) => saveSetting({ push: e.target.value });
 $("setCareWelcome").onchange = (e) => saveSetting({ care_welcome: e.target.checked });
 $("setCareBreak").onchange = (e) => saveSetting({ care_break: Number(e.target.value) });

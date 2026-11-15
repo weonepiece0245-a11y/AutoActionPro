@@ -131,12 +131,16 @@
   <div class="banner" id="banner" hidden></div>
   <div class="log" id="log" aria-live="polite"></div>
   <div class="attach-list" id="attachList" hidden></div>
+  <div class="attach-list" id="snipChip" hidden></div>
   <form class="inputbar" id="form" autocomplete="off">
     <button type="button" class="icon-btn mic" id="micBtn" title="语音输入(说完停顿 2 秒自动结束)" aria-label="语音输入">
       <svg viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/><path d="M19 11a7 7 0 0 1-14 0M12 18v3"/></svg>
     </button>
     <button type="button" class="icon-btn" id="attachBtn" title="附加图片或文件(也可以直接贴上截图、把文件拖进窗口)" aria-label="附加文件">
       <svg viewBox="0 0 24 24"><path d="M21 12.5l-8.5 8.5a5 5 0 0 1-7-7L14 5.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4L15.5 8.6"/></svg>
+    </button>
+    <button type="button" class="icon-btn" id="snipBtn" title="框选屏幕问星期五(拉一个框,Esc 取消)" aria-label="框选屏幕">
+      <svg viewBox="0 0 24 24"><path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4"/><path d="M9 12h6M12 9v6"/></svg>
     </button>
     <input type="file" id="attachInput" multiple hidden accept="image/*,.pdf,.docx,.txt,.md,.csv,.json,.log">
     <input id="input" type="text" placeholder="对星期五说点什么……(回车发送;可以贴截图、拖文件进来)" maxlength="4000">
@@ -544,6 +548,9 @@
       <div class="set-row" id="askHotkeyRow" hidden><label for="setAskHotkey">选中就问:选中文字后按,帮你翻译或解释</label>
         <select class="mini-select" id="setAskHotkey"></select></div>
       <div class="set-note" id="askHotkeyNote" hidden></div>
+      <div class="set-row" id="snipHotkeyRow" hidden><label for="setSnipHotkey">框选屏幕问:按了拉一个框,下一个问题带着这块画面问</label>
+        <select class="mini-select" id="setSnipHotkey"></select></div>
+      <div class="set-note" id="snipHotkeyNote" hidden></div>
       <div class="set-row" id="quickRow" hidden><label for="setQuick">简单指令不问 Claude(调音量、切歌、几点了、记账、天气、提醒、待办……不花钱)</label><input type="checkbox" class="switch" id="setQuick"></div>
     </div>
 

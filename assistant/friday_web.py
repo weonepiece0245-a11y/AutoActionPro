@@ -626,7 +626,7 @@ def make_handler(ctx: WebContext):
                 return self._json(200 if ok else 404, {"ok": ok})
             if url.path == "/api/command":
                 command = str(data.get("command") or "")
-                if command in ("speech_paused", "speech_resumed"):  # 窗口暂停 / 接着播回答:马上告诉星期五(不排队)
+                if command in ("speech_paused", "speech_resumed", "snip", "snip_cancel"):  # 马上办(不排队)
                     if ctx.speech is not None:
                         ctx.speech(command)
                     return self._json(200, {"ok": True})
@@ -814,6 +814,36 @@ def wait_for_instance(path: Path, timeout: float = 30.0, sleep: Callable[[float]
         if time.monotonic() >= deadline:
             return None
         sleep(0.5)
+
+
+def minimize_window(title: str = WINDOW_TITLE) -> bool:
+    """把星期五的窗口缩到工作列(框选屏幕时不挡住你要框的东西)。只支持 Windows。"""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        found: list = []
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def check(hwnd, _):
+            if user32.IsWindowVisible(hwnd):
+                length = user32.GetWindowTextLengthW(hwnd)
+                if length:
+                    buffer = ctypes.create_unicode_buffer(length + 1)
+                    user32.GetWindowTextW(hwnd, buffer, length + 1)
+                    if buffer.value.startswith(title):
+                        found.append(hwnd)
+            return True
+
+        user32.EnumWindows(check, 0)
+        for hwnd in found:
+            user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
+        return bool(found)
+    except Exception:
+        return False
 
 
 def focus_window(title: str = WINDOW_TITLE) -> bool:

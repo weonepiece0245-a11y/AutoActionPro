@@ -29,6 +29,18 @@ ASK_HOTKEYS = {
     "ctrl+shift+q": ("Ctrl + Shift + Q", MOD_CONTROL | MOD_SHIFT, ord("Q")),
 }
 DEFAULT_ASK_HOTKEY = "ctrl+alt+q"
+# 框选屏幕问星期五
+SNIP_HOTKEYS = {
+    "ctrl+alt+s": ("Ctrl + Alt + S", MOD_CONTROL | MOD_ALT, ord("S")),
+    "ctrl+alt+x": ("Ctrl + Alt + X", MOD_CONTROL | MOD_ALT, ord("X")),
+    "ctrl+shift+x": ("Ctrl + Shift + X", MOD_CONTROL | MOD_SHIFT, ord("X")),
+}
+DEFAULT_SNIP_HOTKEY = "ctrl+alt+s"
+
+
+def snip_hotkey_name() -> str:
+    value = os.environ.get("FRIDAY_SNIP_HOTKEY", "").strip().lower() or DEFAULT_SNIP_HOTKEY
+    return value if value in SNIP_HOTKEYS or value == "off" else DEFAULT_SNIP_HOTKEY
 MAX_SELECTION = 6000
 
 
