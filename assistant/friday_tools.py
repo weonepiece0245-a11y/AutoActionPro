@@ -1101,6 +1101,25 @@ HOME_ENERGY_TOOL = {
     },
 }
 
+BANK_STATEMENT_TOOL = {
+    "name": "bank_statement",
+    "description": (
+        "银行 / 信用卡月结单导入记账:import 读一份月结单 PDF,列出这期每一笔花费,和账本对一对,漏记的放进待确认(不会直接记);"
+        "老板把月结单拖进窗口时用 upload(附件的文件名),电脑上的文件用 path,都不给就找最新的一份(归档的月结单或下载文件夹)。"
+        "list:还有哪些待确认;confirm:记进账本(ids 不给就全部,要先问过老板);dismiss:待确认的都不要了。"
+        "有密码的月结单:请老板在 齿轮设定 → 花费 → 月结单密码 填,不要在聊天里要密码。"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["import", "list", "confirm", "dismiss"]},
+            "path": {"type": "string"}, "upload": {"type": "string", "description": "拖进窗口的附件文件名"},
+            "ids": {"type": "array", "items": {"type": "integer"}},
+        },
+        "required": ["action"],
+    },
+}
+
 VIDEO_SUMMARY_TOOL = {
     "name": "video_summary",
     "description": (
@@ -1291,6 +1310,9 @@ class Toolbox:
         self.subscription_scan = None  # () -> 话:去邮箱找订阅(在后台)
         self.startup_doctor = None  # 开机变慢优化(friday_startup.StartupDoctor)
         self.energy_report = None  # 家里用电:(today / week / month) -> 话
+        self.statements = None  # 月结单导入记账(friday_statement.Statements)
+        self.statement_latest = None  # 找最新的月结单 PDF
+        self.recent_uploads = None  # 刚拖进窗口的附件:() -> [(名字, 内容)]
         self.video_fetch = None  # 影片总结:换掉上网的方式(测试用)
         self.video_titles = None  # 影片总结:现在打开的窗口标题(找“正在看的影片”)
         self.photofind = None  # 照片按时间地点找(friday_photofind.PhotoIndex)
@@ -1362,6 +1384,7 @@ class Toolbox:
             "home_energy": self._home_energy,
             "photo_search": self._photo_search,
             "video_summary": self._video_summary,
+            "bank_statement": self._bank_statement,
             "code_lab": self._code_lab,
         }
         self._specs = {t["name"]: t["input_schema"] for t in self.definitions() if "input_schema" in t}
@@ -1464,6 +1487,8 @@ class Toolbox:
             tools = tools + [PC_STARTUP_TOOL]
         if self.energy_report is not None:
             tools = tools + [HOME_ENERGY_TOOL]
+        if self.statements is not None:
+            tools = tools + [BANK_STATEMENT_TOOL]
         if self.photofind is not None and self.local_tools:
             tools = tools + [PHOTO_SEARCH_TOOL]
         if self.lab is not None and self.local_tools:
@@ -2251,6 +2276,43 @@ class Toolbox:
         period = {"today": "今天", "week": "这周", "month": "这个月"}.get(str(args.get("period") or "month"), "这个月")
         on_status("读插座的用电")
         return self.energy_report(period), False
+
+    def _bank_statement(self, args, on_status):
+        statements = self.statements
+        if statements is None:
+            return "月结单导入没有开", True
+        action = args.get("action")
+        if action == "list":
+            return statements.describe_pending(), False
+        if action == "confirm":
+            ids = [int(i) for i in args.get("ids") or [] if str(i).isdigit()] or None
+            return statements.confirm(ids), False
+        if action == "dismiss":
+            return f"清掉了 {statements.dismiss()} 笔待确认", False
+        if action != "import":
+            return f"不支持的 action:{action}", True
+        data, path = None, None
+        if args.get("upload"):
+            wanted = str(args["upload"]).strip().lower()
+            uploads = list(self.recent_uploads()) if self.recent_uploads is not None else []
+            match = next(((n, d) for n, d in reversed(uploads) if n.lower() == wanted), None) or \
+                next(((n, d) for n, d in reversed(uploads) if n.lower().endswith(".pdf")), None)
+            if match is None:
+                return "找不到刚拖进来的月结单(附件只留 10 分钟),请老板再拖一次", True
+            path, data = match[0], match[1]
+        elif args.get("path"):
+            path = str(args["path"])
+        elif self.statement_latest is not None:
+            found = self.statement_latest()
+            path = str(found) if found else None
+        if not path:
+            return "找不到月结单:请老板把月结单 PDF 拖进窗口,或告诉我在哪里", True
+        on_status("🏦 读月结单(要几十秒)")
+        try:
+            result = statements.import_file(path, data=data)
+        except ValueError as e:
+            return str(e), True
+        return statements.describe_import(result) + "\n(还没记进账本;老板说要记才用 confirm)", False
 
     def _video_summary(self, args, on_status):
         import friday_video

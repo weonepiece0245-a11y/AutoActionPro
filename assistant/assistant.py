@@ -1422,6 +1422,9 @@ class WebSession:
             import friday_images
 
             blocks, problems = friday_images.file_blocks(files)
+            now = time.time()  # 拖进来的 PDF 在记忆体留 10 分钟(月结单导入要用;不存到硬盘)
+            self.recent_uploads = [u for u in self.recent_uploads if now - u[2] < 600][-5:] + \
+                [(name, data, now) for name, mime, data in files if str(name).lower().endswith(".pdf")]
             names = "、".join(name for name, _, _ in files)
             if show_user:
                 hub.broadcast({"type": "user", "text": f"📎 {names}" + (f"\n{text}" if text else ""), "source": source})
@@ -1652,6 +1655,7 @@ class WebSession:
             stream.feed(text)
             stream.finish()
 
+    recent_uploads: list = []  # 拖进窗口的 PDF:(名字, 内容, 时间);每次 _ask 换成新的 list
     callguard = None  # 通话中不出声(friday_callguard.CallGuard)
     _quiet_said = (0.0, "")
 
@@ -2745,6 +2749,9 @@ def settings_state(session, meter=None) -> dict:
         "event_lead": __import__("friday_events").lead_minutes() if google_ready(session) else None,
         "departure": departure_state(session),
         "billfile": billfile_state(session),
+        "statement": {"passwords": len(__import__("friday_statement").passwords()),
+                      "pending": len(session.statements.pending)}
+        if getattr(session, "statements", None) is not None else None,
         "photofind": session.photofind.stats() if getattr(session, "photofind", None) is not None else None,
         "mail_alert": mail_alert_state(session),
         "memtidy": memtidy_state(session),
@@ -3387,6 +3394,12 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
         save_env_value(env, "FRIDAY_EVENT_LEAD", str(lead))
         os.environ["FRIDAY_EVENT_LEAD"] = str(lead)
         done.append(f"日历上的活动开始前 {lead} 分钟提醒你" if lead else "不再提前提醒日历上的活动")
+    if "statement_passwords" in payload:  # 月结单密码:只存在 .env,不回传给窗口
+        value = "|".join(p.strip() for p in str(payload["statement_passwords"] or "").split("\n") if p.strip())[:500]
+        save_env_value(env, "FRIDAY_STATEMENT_PASSWORDS", value)
+        os.environ["FRIDAY_STATEMENT_PASSWORDS"] = value
+        n = len([p for p in value.split("|") if p])
+        done.append(f"月结单密码存好了({n} 个,只存在这台电脑)" if n else "月结单密码清掉了")
     if "bill_file" in payload:
         on = bool(payload["bill_file"])
         save_env_value(env, "FRIDAY_BILL_FILE", "on" if on else "off")
@@ -4260,6 +4273,55 @@ class PhotoCommands:
         if result["total"]:
             show_photos(self.session, result, understood)
         return self.index.describe(result, understood)
+
+
+def start_statements(session, toolbox: Toolbox, data_dir: str):
+    """银行月结单导入记账:读月结单、对账,漏记的等你确认。"""
+    import friday_billfile
+    import friday_library
+    import friday_statement
+
+    assistant = getattr(session, "assistant", None)
+    client = getattr(assistant, "client", None)
+    if toolbox.ledger is None or client is None:
+        return None
+    statements = friday_statement.Statements(
+        os.path.join(data_dir, "friday_statement.json"), toolbox.ledger,
+        friday_statement.haiku_extractor(client, getattr(assistant, "on_usage", None)), hide=friday_library.hide_private)
+    session.statements = toolbox.statements = statements
+
+    def latest():
+        root = friday_billfile.archive_root()
+        folders = [p for p in root.glob("*/月结单") if p.is_dir()] + [Path.home() / "Downloads"]
+        return friday_statement.latest_statement(folders)
+
+    toolbox.statement_latest = latest
+    toolbox.recent_uploads = lambda: [(n, d) for n, d, t in session.recent_uploads if time.time() - t < 600]
+    toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+
+    def start_import() -> str:
+        path = latest()
+        if path is None:
+            return "找不到月结单:把月结单 PDF 拖进窗口跟我说“导入记账”,或放进下载文件夹再叫我。"
+        if statements.busy:
+            return "正在读月结单了,等一下。"
+
+        def job() -> None:
+            try:
+                text = statements.describe_import(statements.import_file(path))
+            except ValueError as e:
+                text = f"月结单 {path.name} 没读成:{e}"
+            except Exception as e:  # noqa: BLE001
+                text = f"月结单 {path.name} 读到一半出错了:{e}"
+            announce(session, "🏦 " + text, "🏦", text.splitlines()[0])
+
+        threading.Thread(target=job, daemon=True, name="friday-statement").start()
+        return f"好,在读 {path.name}(要几十秒),读好了告诉你哪些漏记了。"
+
+    quick = getattr(session, "quick", None)
+    if quick is not None:
+        quick.extra.append(friday_statement.Commands(statements, start_import))
+    return statements
 
 
 def start_bill_filer(session, toolbox: Toolbox, data_dir: str, interval: float = 10 * 60):
@@ -6367,6 +6429,7 @@ def run_web(args) -> None:
     _startup_step(session, "代码实验室", lambda: start_lab(session, toolbox, data_dir, ctx))
     _startup_step(session, "照片按时间地点找", lambda: start_photo_find(session, toolbox, data_dir, ctx))
     _startup_step(session, "下载的账单自动归档", lambda: start_bill_filer(session, toolbox, data_dir))
+    _startup_step(session, "月结单导入记账", lambda: start_statements(session, toolbox, data_dir))
     toolbox.meter, toolbox.budget = session.meter, getattr(session, "budget", None)
     import friday_scenes
 

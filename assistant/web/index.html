@@ -229,6 +229,13 @@
       <div class="set-note">只有你按“记账”的才会记进账本。每 30 分钟看一次新邮件;读收据正文请最便宜的 Haiku 认,一次大约 RM0.01~0.03。⚠ 是同一天已经有一样金额的账,可能记过了。</div>
     </div>
 
+    <div class="set-group" id="stmtGroup" hidden data-cat="money">
+      <h3>银行月结单导入记账</h3>
+      <div class="set-note" id="stmtNote">把银行或信用卡月结单 PDF 拖进窗口说“导入记账”,或说“导入月结单”(找最新的一份)。星期五对一对账本,漏记的列出来等你确认;薪水、转账、还卡费不算花费。</div>
+      <div class="set-row"><label for="setStmtPw">月结单密码(有密码的才要填;几家银行不一样就用 | 分开)</label>
+        <span class="set-ctl"><input class="mini-input" id="setStmtPw" type="password" autocomplete="off" placeholder="只存在这台电脑"><button type="button" class="mini-btn" id="saveStmtPw">保存</button></span></div>
+    </div>
+
     <div class="set-group" id="subGroup" hidden data-cat="money">
       <h3>订阅管家(每月自动扣款的)</h3>
       <div class="set-row"><span class="set-note" id="subTotal"></span><button type="button" class="mini-btn" id="subScan">去邮箱找</button></div>

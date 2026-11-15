@@ -1532,6 +1532,9 @@ function fillSettings() {
   if (s.brief != null) $("setBrief").checked = s.brief;
   $("eventRow").hidden = s.event_lead === null || s.event_lead === undefined;
   if (s.event_lead != null) $("setEventLead").value = String(s.event_lead);
+  const stm = s.statement;
+  $("stmtGroup").hidden = !stm;
+  if (stm) $("setStmtPw").placeholder = stm.passwords ? `已存 ${stm.passwords} 个(要改就重新填)` : "只存在这台电脑";
   const bf = s.billfile;
   $("billGroup").hidden = !bf;
   if (bf) {
@@ -1941,6 +1944,11 @@ function showCleanup(items) {
 }
 $("photoReindex").onclick = () => saveSetting({ photo_reindex: true });
 $("setBillFile").onchange = (e) => saveSetting({ bill_file: e.target.checked });
+$("saveStmtPw").onclick = () => {  // 多个密码用 | 分开(输入框只有一行)
+  const value = $("setStmtPw").value.split("|").join("\n");
+  $("setStmtPw").value = "";
+  saveSetting({ statement_passwords: value });
+};
 $("billFolderSave").onclick = () => saveSetting({ bill_folder: $("setBillFolder").value.trim() });
 $("billUndo").onclick = () => saveSetting({ bill_undo: true });
 $("photoSort").onclick = () => {

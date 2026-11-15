@@ -90,6 +90,7 @@ assistant/friday_places.json*
 assistant/friday_maildraft.json*
 assistant/friday_photo_index.json*
 assistant/friday_billfile.json*
+assistant/friday_statement.json*
 assistant/friday_snip.png
 
 # 更新前留的旧文件(自动退回上一版用)

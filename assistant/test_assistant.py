@@ -13980,5 +13980,104 @@ class BillFileTest(TempDirTest):
                                                "date": "bad"}, datetime.date(2026, 1, 2))
         self.assertEqual((name, year), ("2026-01 a b c 收据 USD 1,234.50.pdf", "2026"))
 
+
+class StatementTest(TempDirTest):
+    ITEMS = {"bank": "Maybank", "items": [
+        {"date": "2026-10-03", "text": "GRAB*RIDE KL", "amount": 18.5, "kind": "spend", "category": "交通", "name": "Grab 车费"},
+        {"date": "2026-10-05", "text": "SHOPEE MY", "amount": 89.9, "kind": "spend", "category": "购物", "name": "Shopee 网购"},
+        {"date": "2026-10-07", "text": "SALARY OCT", "amount": 5000, "kind": "income", "category": "其他", "name": "薪水"},
+        {"date": "2026-10-09", "text": "PAYMENT - THANK YOU", "amount": 1200, "kind": "transfer", "category": "其他", "name": "还卡"},
+        {"date": "2026-10-12", "text": "TNB BILL", "amount": 120.5, "kind": "spend", "category": "账单", "name": "TNB 电费"}]}
+
+    def setUp(self):
+        super().setUp()
+        import friday_ledger
+        import friday_statement
+
+        self.ledger = friday_ledger.Ledger(os.path.join(self.tmp, "l.json"))
+        self.ledger.add("车费", 18.5, "交通", "2026-10-04")  # 早一天记了,金额一样:算记过
+        self.seen = []
+
+        self.ITEMS = json.loads(json.dumps(StatementTest.ITEMS))  # 每个测试一份
+
+        def extract(text, part, parts):
+            self.seen.append(text)
+            return self.ITEMS
+        self.st = friday_statement.Statements(os.path.join(self.tmp, "s.json"), self.ledger, extract,
+                                              hide=__import__("friday_library").hide_private,
+                                              today=lambda: datetime.date(2026, 11, 16))
+        self.pdf = Path(self.tmp, "Maybank_statement_Oct.pdf")
+        self.pdf.write_bytes(make_pdf(["MAYBANK STATEMENT", "Card 5123 4567 8901 2345", "03/10 GRAB*RIDE KL 18.50"]))
+
+    def test_import_matches_ledger_and_waits_for_confirm(self):
+        result = self.st.import_file(self.pdf)
+        self.assertEqual(len(result["spend"]), 3)  # 薪水、还卡不算
+        self.assertEqual([r["name"] for r in result["recorded"]], ["Grab 车费"])
+        self.assertEqual([r["name"] for r in result["missing"]], ["Shopee 网购", "TNB 电费"])
+        self.assertEqual(len(self.ledger.entries), 1)  # 还没记
+        self.assertNotIn("5123 4567 8901 2345", self.seen[0])  # 卡号先遮掉
+        text = self.st.describe_import(result)
+        self.assertIn("漏记 2 笔", text)
+        self.assertIn("RM228.90", text)
+        self.assertEqual(self.st.import_file(self.pdf)["missing"], [])  # 再导入一次:不重复放
+        self.assertIn("记好了 1 笔", self.st.confirm([result["missing"][1]["id"]]))
+        self.assertEqual(self.ledger.entries[-1]["item"], "TNB 电费")
+        self.assertIn("月结单", self.ledger.entries[-1]["note"])
+        self.assertIn("记好了 1 笔", self.st.confirm())
+        self.assertEqual(self.st.pending, [])
+
+    def test_password_protected_pdf(self):
+        import pypdf
+
+        import friday_statement
+
+        writer = pypdf.PdfWriter(clone_from=pypdf.PdfReader(io.BytesIO(self.pdf.read_bytes())))
+        writer.encrypt("900101")
+        locked = Path(self.tmp, "locked.pdf")
+        with locked.open("wb") as f:
+            writer.write(f)
+        with mock.patch.dict(os.environ, {"FRIDAY_STATEMENT_PASSWORDS": ""}):
+            with self.assertRaises(ValueError) as e:
+                friday_statement.read_pdf(locked)
+            self.assertIn("齿轮设定", str(e.exception))
+            self.assertNotIn("900101", str(e.exception))
+        with mock.patch.dict(os.environ, {"FRIDAY_STATEMENT_PASSWORDS": "wrong|900101"}):
+            self.assertIn("MAYBANK", friday_statement.read_pdf(locked))
+            self.assertIn("MAYBANK", friday_statement.read_pdf(locked.read_bytes()))
+
+    def test_commands_and_tool_with_upload(self):
+        import friday_statement
+
+        started = []
+        cmd = friday_statement.Commands(self.st, lambda: started.append(1) or "好,在读")
+        self.assertEqual(cmd.handle("导入月结单"), "好,在读")
+        result = self.st.import_file(self.pdf)
+        self.assertIn("2 笔", cmd.handle("月结单漏记"))
+        first = result["missing"][0]["id"]
+        self.assertIn("记好了 1 笔", cmd.handle(f"月结单第 {first} 笔记账"))
+        self.assertIn("这 1 笔不记了", cmd.handle("月结单不要了"))
+        self.assertIsNone(cmd.handle("月结单是什么"))
+        toolbox = tools.Toolbox(tools.Memory(os.path.join(self.tmp, "m.json")), lambda a: True)
+        toolbox.statements = self.st
+        toolbox.recent_uploads = lambda: [("别的.pdf", b"x"), ("Oct.pdf", self.pdf.read_bytes())]
+        toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
+        self.ITEMS["items"].append({"date": "2026-10-20", "text": "NEW SHOP", "amount": 33.3, "kind": "spend",
+                                    "category": "餐饮", "name": "新店"})
+        out = toolbox.run(SimpleNamespace(id="c", name="bank_statement", input={"action": "import", "upload": "Oct.pdf"}),
+                          lambda s: None)
+        self.assertIn("漏记 1 笔", out["content"])
+        self.assertIn("还没记进账本", out["content"])
+        self.assertNotIn("TNB", out["content"])  # 说过不要的不再列
+
+    def test_window_keeps_recent_pdf_uploads_in_memory(self):
+        hub = friday_web.Hub()
+        session = app.WebSession(None, app.default_persona(), hub)
+        session._answer = lambda *a: "好"
+        session._ask("导入记账", files=[("Oct.pdf", "application/pdf", self.pdf.read_bytes()),
+                                       ("a.png", "image/png", b"\x89PNG")])
+        self.assertEqual([u[0] for u in session.recent_uploads], ["Oct.pdf"])
+        other = app.WebSession(None, app.default_persona(), hub)
+        self.assertEqual(other.recent_uploads, [])  # 不会共用
+
 if __name__ == "__main__":
     unittest.main()
