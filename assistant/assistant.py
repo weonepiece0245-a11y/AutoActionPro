@@ -2236,7 +2236,9 @@ def mail_alert_state(session) -> dict | None:
     watch = getattr(getattr(getattr(session, "assistant", None), "toolbox", None), "mailwatch", None)
     if watch is None:
         return None
-    return {"senders": watch.senders, "words": watch.words, "important": watch.important}
+    drafter = getattr(session, "maildraft", None)
+    return {"senders": watch.senders, "words": watch.words, "important": watch.important,
+            "draft": drafter.state() if drafter is not None else None}
 
 
 def google_ready(session) -> bool:
@@ -3278,6 +3280,11 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
                         words=split(rules.get("words")) if "words" in rules else None,
                         important=rules.get("important") if "important" in rules else None)
         done.append(watch.describe())
+    if "mail_draft" in payload:
+        on = bool(payload["mail_draft"])
+        save_env_value(env, "FRIDAY_MAIL_DRAFT", "on" if on else "off")
+        os.environ["FRIDAY_MAIL_DRAFT"] = "on" if on else "off"
+        done.append("重要邮件会先拟好回复,放在 Gmail 草稿箱(不会自己寄出)" if on else "不再帮重要邮件拟回复")
     if "event_lead" in payload:
         import friday_events
 
@@ -5634,9 +5641,32 @@ def start_mail_alerts(session, toolbox: Toolbox, data_dir: str, interval: float 
     toolbox.mailwatch = watch
     toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
     list_unread, fetch = friday_mailwatch.gmail_source(google)
+    drafts: queue.Queue = queue.Queue()
+    assistant = getattr(session, "assistant", None)
+    if assistant is not None and getattr(assistant, "client", None) is not None:
+        import friday_maildraft
+
+        session.maildraft = friday_maildraft.Drafter(
+            os.path.join(data_dir, "friday_maildraft.json"), assistant.client, google.mail_body, google.reply_draft,
+            on_usage=getattr(assistant, "on_usage", None))
+
+        def draft_loop() -> None:  # 一封一封慢慢拟,不拖住提醒
+            while True:
+                mail_id, mail = drafts.get()
+                try:
+                    text = session.maildraft.handle(mail_id, mail, _call_me(session))
+                except Exception as e:
+                    print(f"拟邮件回复没成功:{e}", flush=True)
+                    continue
+                if text:
+                    subject = mail.get("subject") or "(无主题)"
+                    announce(session, f"关于「{subject[:40]}」—— {text}", "✉", text)
+
+        threading.Thread(target=draft_loop, daemon=True, name="friday-maildraft").start()
 
     def check() -> None:
-        for text in watch.check(list_unread, fetch):
+        on_match = (lambda mail_id, mail: drafts.put((mail_id, mail))) if getattr(session, "maildraft", None) else None
+        for text in watch.check(list_unread, fetch, on_match=on_match):
             announce(session, text, "📧", text)
 
     def loop() -> None:

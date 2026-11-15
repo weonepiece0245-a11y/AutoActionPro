@@ -113,7 +113,8 @@ class MailWatch:
         return None
 
     # ---------- 检查 ----------
-    def check(self, list_unread: Callable[[], list[str]], fetch: Callable[[str], dict]) -> list[str]:
+    def check(self, list_unread: Callable[[], list[str]], fetch: Callable[[str], dict],
+              on_match: Callable[[str, dict], None] | None = None) -> list[str]:
         """看看有没有新的未读邮件对得上规则;返回要说的话。
 
         list_unread() -> 未读邮件 id;fetch(id) -> {"from", "subject", "snippet", "labels"}。
@@ -139,6 +140,8 @@ class MailWatch:
                 snippet = " ".join(html.unescape(mail.get("snippet", "")).split())[:60]
                 text = f"新邮件({reason}):{_sender_name(mail.get('from', ''))}「{mail.get('subject') or '(无主题)'}」"
                 said.append(text + (f" —— {snippet}……" if snippet else ""))
+                if on_match is not None:
+                    on_match(mail_id, mail)  # 例如:拟一份回复草稿
         if new:
             self.seen = self.seen[-SEEN_KEEP:]
             self._save()

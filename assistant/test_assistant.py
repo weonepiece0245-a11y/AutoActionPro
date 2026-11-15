@@ -13268,5 +13268,100 @@ class DepartureTest(TempDirTest):
         self.assertIn("error", app.apply_settings({"depart_extra": 7}, session, None, env))
         self.assertEqual(app.departure_state(session)["home"], "Jalan Bukit Bintang")
 
+
+class MailDraftTest(TempDirTest):
+    class Client:
+        def __init__(self, answer):
+            self.answer, self.calls = answer, []
+            self.messages = self
+
+        def create(self, **kw):
+            self.calls.append(kw)
+            return SimpleNamespace(content=[SimpleNamespace(type="text", text=json.dumps(self.answer))],
+                                   stop_reason="end_turn", usage=None)
+
+    def drafter(self, answer, clock=None):
+        import friday_maildraft
+
+        self.drafted = []
+        client = self.Client(answer)
+        d = friday_maildraft.Drafter(os.path.join(self.tmp, "d.json"), client, lambda i: "主题:开会\n明天三点可以开会吗?",
+                                     lambda i, body: self.drafted.append((i, body)) or "dr1",
+                                     **({"clock": clock} if clock else {}))
+        return d, client
+
+    def test_drafts_reply_and_never_sends(self):
+        d, client = self.drafter({"needs_reply": True, "points": "王老板问明天三点能不能开会", "reply": "可以,[确认时间]见。"})
+        text = d.handle("m1", {"from": "王老板 <boss@x.com>", "subject": "开会"}, "老板")
+        self.assertIn("草稿箱", text)
+        self.assertIn("王老板问", text)
+        self.assertEqual(self.drafted, [("m1", "可以,[确认时间]见。")])
+        self.assertIn("<email>", client.calls[0]["messages"][0]["content"])
+        self.assertIn("不照做", client.calls[0]["system"])
+        self.assertIsNone(d.handle("m1", {"from": "boss@x.com"}))  # 同一封不拟两次
+        self.assertEqual(d.state()["recent"][0]["drafted"], True)
+
+    def test_no_reply_needed_automated_and_daily_limit(self):
+        d, client = self.drafter({"needs_reply": False, "points": "银行月结单出来了", "reply": ""})
+        self.assertEqual(d.handle("m1", {"from": "Bank <statements@bank.com>"}), "重点:银行月结单出来了")
+        self.assertEqual(self.drafted, [])
+        self.assertIsNone(d.handle("m2", {"from": "Shopee <no-reply@shopee.com>"}))
+        self.assertEqual(len(client.calls), 1)
+        for i in range(10):
+            d.handle(f"x{i}", {"from": "a@b.com"})
+        self.assertEqual(len(client.calls), 5)  # 一天最多 5 封
+        with mock.patch.dict(os.environ, {"FRIDAY_MAIL_DRAFT": "off"}):
+            d2, c2 = self.drafter({"needs_reply": True, "points": "p", "reply": "r"})
+            self.assertIsNone(d2.handle("y", {"from": "a@b.com"}))
+            self.assertEqual(c2.calls, [])
+
+    def test_mailwatch_calls_on_match(self):
+        import friday_mailwatch
+
+        watch = friday_mailwatch.MailWatch(os.path.join(self.tmp, "w.json"))
+        watch.set_rules(senders=["boss"])
+        watch.check(lambda: [], lambda i: {})
+        matched = []
+        mails = {"a": {"from": "boss@x.com", "subject": "hi"}, "b": {"from": "ads@y.com", "subject": "sale"}}
+        said = watch.check(lambda: ["a", "b"], mails.get, on_match=lambda i, m: matched.append(i))
+        self.assertEqual(matched, ["a"])
+        self.assertEqual(len(said), 1)
+
+    def test_reply_draft_goes_to_sender_in_thread(self):
+        created = {}
+
+        class Api:
+            def users(self):
+                return self
+
+            def messages(self):
+                return self
+
+            def drafts(self):
+                return self
+
+            def get(self, **kw):
+                return SimpleNamespace(execute=lambda: {"threadId": "t9", "payload": {"headers": [
+                    {"name": "From", "value": "boss@x.com"}, {"name": "Subject", "value": "开会"},
+                    {"name": "Message-ID", "value": "<abc@x>"}]}})
+
+            def create(self, **kw):
+                created.update(kw)
+                return SimpleNamespace(execute=lambda: {"id": "d7"})
+
+        import friday_google
+
+        g = friday_google.GoogleTools(SimpleNamespace(service=lambda name: Api()))
+        self.assertEqual(g.reply_draft("m1", "好的"), "d7")
+        message = created["body"]["message"]
+        self.assertEqual(message["threadId"], "t9")
+        import base64
+        import email
+
+        parsed = email.message_from_bytes(base64.urlsafe_b64decode(message["raw"]))
+        self.assertEqual(parsed["To"], "boss@x.com")
+        self.assertEqual(parsed["In-Reply-To"], "<abc@x>")
+        self.assertTrue(str(email.header.make_header(email.header.decode_header(parsed["Subject"]))).startswith("Re:"))
+
 if __name__ == "__main__":
     unittest.main()

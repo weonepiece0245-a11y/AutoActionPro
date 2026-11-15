@@ -1394,6 +1394,14 @@ function fillSettings() {
     $("mailWords").value = ml.words.join(", ");
     $("mailImportant").checked = ml.important;
   }
+  const md = ml && ml.draft;
+  $("mailDraftRow").hidden = !md;
+  $("mailDraftNote").hidden = !md || !md.recent.length;
+  if (md) {
+    $("setMailDraft").checked = md.on;
+    $("mailDraftNote").textContent = `今天还可以拟 ${md.left} 封。最近:` +
+      md.recent.map((r) => `${r.time}「${r.subject}」${r.drafted ? "✉ 有草稿" : "(不用回)"}`).join(";");
+  }
   $("weeklyRow").hidden = s.weekly_report === null || s.weekly_report === undefined;
   $("setWeekly").checked = !!s.weekly_report;
   $("quickRow").hidden = s.quick === null || s.quick === undefined;
@@ -1845,6 +1853,7 @@ $("departSave").onclick = () => saveSetting({ depart_home: $("setDepartHome").va
 $("mailSave").onclick = () => saveSetting({ mail_alert: { senders: $("mailSenders").value, words: $("mailWords").value,
                                                            important: $("mailImportant").checked } }, 5000);
 $("mailImportant").onchange = () => $("mailSave").click();
+$("setMailDraft").onchange = (e) => saveSetting({ mail_draft: e.target.checked });
 $("setWeekly").onchange = (e) => saveSetting({ weekly_report: e.target.checked });
 $("setQuick").onchange = (e) => saveSetting({ quick: e.target.checked });
 $("setRemindCalendar").onchange = (e) => saveSetting({ remind_calendar: e.target.checked });

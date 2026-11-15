@@ -887,6 +887,24 @@ class GoogleTools(_MoreGoogleTools):
         sent = api.send(userId="me", body={"raw": raw, "threadId": original.get("threadId")}).execute()
         return f"已回复 {to}(id:{sent.get('id')})"
 
+    def reply_draft(self, msg_id: str, body: str) -> str:
+        """在原来的对话串里存一份回复草稿(收件人是原来的寄件人;不会寄出)。返回草稿 id。"""
+        api = self._gmail().users()
+        original = api.messages().get(userId="me", id=msg_id, format="metadata",
+                                      metadataHeaders=["From", "Reply-To", "Subject", "Message-ID", "References"]).execute()
+        to = _header(original, "Reply-To") or _header(original, "From")
+        subject = _header(original, "Subject")
+        if not subject.lower().startswith("re:"):
+            subject = f"Re: {subject}"
+        message_id = _header(original, "Message-ID")
+        headers = {}
+        if message_id:
+            headers = {"In-Reply-To": message_id,
+                       "References": f"{_header(original, 'References')} {message_id}".strip()}
+        raw = build_raw(to, subject, body, headers=headers)
+        draft = api.drafts().create(userId="me", body={"message": {"raw": raw, "threadId": original.get("threadId")}}).execute()
+        return str(draft.get("id") or "")
+
     def _draft_mail(self, args: dict, confirm: Approver) -> str:
         self._need(args, "to", "subject", "body")
         raw = build_raw(args["to"], args["subject"], args["body"], cc=args.get("cc") or "")
