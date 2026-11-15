@@ -2371,10 +2371,12 @@ def install_whisper(session, env: str) -> str:
         session.hub.broadcast({"type": "mailscan"})
 
     def job() -> None:
+        from friday_discord import save_env_value
+
         WHISPER_INSTALL["busy"] = True
         try:
             text = friday_whisper.install(on_status=status)
-            save_env_value(env, "FRIDAY_STT", "whisper")
+            save_env_value(Path(env), "FRIDAY_STT", "whisper")
             os.environ["FRIDAY_STT"] = "whisper"
             status("🎙 " + text)
         except Exception as e:  # noqa: BLE001

@@ -11638,6 +11638,23 @@ class VocabTest(TempDirTest):
             self.assertEqual(voice.transcribe_detail(b"OGG"), ("用 Google 听的", 0.9))  # 没装好:退回 Google
             self.assertIn("还没装", voice.WHISPER_PROBLEM)
 
+    def test_install_switches_engine_when_done(self):
+        import friday_whisper
+
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        env = os.path.join(self.tmp, ".env")
+        Path(env).write_text("", encoding="utf-8")
+        with mock.patch.object(friday_whisper, "install", return_value="本机语音识别装好了(large-v3-turbo,显卡)。"), \
+                mock.patch.dict(os.environ, {"FRIDAY_STT": "google"}):
+            app.install_whisper(session, env)
+            for _ in range(200):
+                if not app.WHISPER_INSTALL["busy"] and os.environ.get("FRIDAY_STT") == "whisper":
+                    break
+                time.sleep(0.01)
+            self.assertEqual(os.environ["FRIDAY_STT"], "whisper")  # 装好了真的换过去
+            self.assertIn("FRIDAY_STT=whisper", Path(env).read_text(encoding="utf-8"))
+            self.assertIn("装好了", app.WHISPER_INSTALL["note"])
+
     def test_whisper_install_and_simplified(self):
         import friday_whisper
 
