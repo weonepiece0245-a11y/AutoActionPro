@@ -687,6 +687,25 @@ class SettingsTest(unittest.TestCase):
         self.assertTrue(env["FRIDAY_ARGS"].endswith("--no-browser"))
         self.assertEqual(calls[1][0], "remove")
 
+    def test_server_does_not_log_client_disconnects(self):
+        import contextlib
+
+        server = friday_web.QuietServer(("127.0.0.1", 0), friday_web.make_handler(
+            friday_web.WebContext(friday_web.Hub(), queue.Queue(), friday_web.WebApprover(friday_web.Hub()), "tok", 0,
+                                  state=lambda: {})))
+        try:
+            for error, logged in ((ConnectionAbortedError(10053, "aborted"), False), (BrokenPipeError(), False),
+                                  (ConnectionResetError(), False), (ValueError("真的出错"), True)):
+                buffer = io.StringIO()
+                with contextlib.redirect_stderr(buffer):
+                    try:
+                        raise error
+                    except Exception:
+                        server.handle_error(None, ("127.0.0.1", 1))
+                self.assertEqual(bool(buffer.getvalue().strip()), logged, error)  # 对方断开不写;真的错误照写整段
+        finally:
+            server.server_close()
+
     def test_settings_endpoint(self):
         ctx = friday_web.WebContext(friday_web.Hub(), queue.Queue(), friday_web.WebApprover(friday_web.Hub()),
                                     "tok", 0, state=lambda: {})

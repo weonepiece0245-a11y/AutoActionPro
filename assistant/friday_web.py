@@ -730,8 +730,21 @@ def make_handler(ctx: WebContext):
     return Handler
 
 
+class QuietServer(ThreadingHTTPServer):
+    """窗口自己断开连接(关窗口、刷新、请求还没回完就不要了)不是错误,不写进记录;
+    其他错误照样整段写(以前 friday.log 里满是 ConnectionAbortedError 10053,把真的问题埋掉了)。
+    (星期五自己提的改进)"""
+
+    def handle_error(self, request, client_address):
+        import sys
+
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def start_server(ctx: WebContext) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer(("127.0.0.1", ctx.port), make_handler(ctx))
+    server = QuietServer(("127.0.0.1", ctx.port), make_handler(ctx))
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True, name="friday-web").start()
     return server
