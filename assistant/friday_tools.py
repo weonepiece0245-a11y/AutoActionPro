@@ -2279,7 +2279,9 @@ class Toolbox:
             if not isinstance(edits, list) or not edits:
                 return "要给 edits:[{file, old, new}]", True
             title = str(args.get("title") or "自我测试")
-            return lab.start(title, lambda: lab.self_test(edits, title)) + "(要几分钟,跑完我会告诉老板)", False
+            # 实验室里跑不了的相关测试:跑完会请老板批准在实验室外面补跑(每次都问;没人看着的任务不问)
+            ask = None if self.unattended else self.confirm
+            return lab.start(title, lambda: lab.self_test(edits, title, approve=ask)) + "(要几分钟,跑完我会告诉老板)", False
         if action == "recent":
             return lab.summary(), False
         return f"不支持的 action:{action}", True

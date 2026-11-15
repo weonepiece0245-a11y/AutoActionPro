@@ -2,6 +2,7 @@
 
     python -I friday_lab_runner.py strict   <实验室文件夹> <脚本>
     python -I friday_lab_runner.py selftest <星期五副本文件夹>
+    python -I friday_lab_runner.py verify   <星期五副本文件夹> <测试名>...   (经老板批准,不装安全网,只跑点名的测试)
 
 先装一个“审计钩子”(Python 自带的 sys.addaudithook),跑的代码一碰到不该碰的就直接报错:
 - 不能开别的程序(subprocess、os.system……)、不能用 ctypes / 注册表;
@@ -190,14 +191,17 @@ def main(argv: list[str]) -> int:
         namespace = {"__name__": "__main__", "__file__": script}
         exec(compile(code, script, "exec"), namespace)  # noqa: S102
         return 0
-    if mode == "selftest":
+    if mode in ("selftest", "verify"):
         sys.path.insert(0, workdir)
-        install("selftest", workdir)
+        # verify:实验室里跑不了的那几个测试,经老板批准后在实验室外面补跑(不装安全网,只跑点名的测试)
+        if mode == "selftest":
+            install("selftest", workdir)
         import traceback
         import unittest
 
         try:
-            suite = unittest.defaultTestLoader.loadTestsFromName("test_assistant")
+            suite = (unittest.defaultTestLoader.loadTestsFromNames(argv[2:]) if mode == "verify"
+                     else unittest.defaultTestLoader.loadTestsFromName("test_assistant"))
         except BaseException:  # noqa: BLE001  测试档案本身载入不了:把原因印出来
             traceback.print_exc(file=sys.stdout)
             print("\n@@LOADFAIL")

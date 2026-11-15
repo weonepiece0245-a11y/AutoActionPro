@@ -398,10 +398,14 @@ class Lab:
             changed.append(name)
         return changed
 
-    def _run_tests(self, root: Path) -> dict:
+    def _run_tests(self, root: Path, names: list[str] | None = None) -> dict:
+        """跑副本的测试。names:只跑这几个、在实验室外面跑(老板批准过的补测)。"""
         started = time.monotonic()
+        cmd = [self.python, "-E", "-B", str(RUNNER), "selftest", str(root)]
+        if names:
+            cmd = [self.python, "-E", "-B", str(RUNNER), "verify", str(root), *names]
         try:
-            proc = self.run_process([self.python, "-E", "-B", str(RUNNER), "selftest", str(root)], cwd=str(root),
+            proc = self.run_process(cmd, cwd=str(root),
                                     capture_output=True, timeout=SELFTEST_TIMEOUT, env=safe_env(), stdin=subprocess.DEVNULL,
                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             out = _decode(proc.stdout) + _decode(proc.stderr)
@@ -430,8 +434,10 @@ class Lab:
             parts.append("\n".join(lines))
         return "\n\n".join(parts)
 
-    def self_test(self, edits: list[dict], title: str = "") -> dict:
-        """改一份副本、跑全部测试,和没改的比。很慢(几分钟),在后台跑。"""
+    def self_test(self, edits: list[dict], title: str = "", approve: Callable[[str], bool] | None = None) -> dict:
+        """改一份副本、跑全部测试,和没改的比。很慢(几分钟),在后台跑。
+
+        approve:实验室里跑不了的相关测试,问老板要不要在实验室外面补跑(None:不问,例如每周自我检讨)。"""
         title = str(title or "自我测试")[:60]
         run_id = "st-" + self.clock().strftime("%Y%m%d-%H%M%S")
         started = time.monotonic()
@@ -465,7 +471,8 @@ class Lab:
         except ValueError as e:
             step(f"② 改不进去:{e}")
             changed, after = [], {"ran": 0, "failed": [], "error": str(e), "output": ""}
-        return self._finish_self_test(run_id, started, title, edits, changed, after, set(self.baseline.get("failed") or []))
+        return self._finish_self_test(run_id, started, title, edits, changed, after, set(self.baseline.get("failed") or []),
+                                      approve)
 
     @staticmethod
     def related_tests(root: Path, changed: list[str], failed: set) -> list[str]:
@@ -501,8 +508,41 @@ class Lab:
         related = {cls for cls, body in sections.items() if any(p.search(body) for p in patterns)}
         return sorted(t for t in failed if len(t.split(".")) > 2 and t.split(".")[-2] in related)
 
+    def _verify_outside(self, names: list[str], approve: Callable[[str], bool], step) -> dict:
+        """实验室里跑不了的测试:老板批准后,在实验室外面只补跑这几个,没改的副本和改过的副本各跑一次比较。"""
+        shown = "\n".join("  - " + n.split(".", 1)[-1] for n in names[:10]) + (f"\n  ……共 {len(names)} 个" if len(names) > 10 else "")
+        question = (f"在代码实验室外面补跑 {len(names)} 个测试(它们要开程序或用到 Windows 系统组件,实验室里跑不了):\n{shown}\n"
+                    "只跑这几个测试,先跑没改过的副本、再跑改过的副本比较;用的是副本,不会改到真正的星期五,也读不到钥匙。\n"
+                    "注意:实验室外面没有安全网,还没审查过的改动在这几个测试里能开程序、碰到你电脑上的文件。")
+        step(f"④ 有 {len(names)} 个相关测试在实验室里跑不了,问你要不要在实验室外面补跑……")
+        try:
+            allowed = bool(approve(question))
+        except Exception:  # noqa: BLE001  问不了(窗口没开等等):当成没批准
+            allowed = False
+        if not allowed:
+            step("   你没有批准(或窗口没开):不补跑")
+            return {"status": "declined"}
+        step("   补跑:没改过的副本……")
+        base_root = self.folder / "selftest" / "verify-base"
+        self._copy_app(base_root)
+        before = self._run_tests(base_root, names)
+        step("   补跑:改过的副本……")
+        after = self._run_tests(self.folder / "selftest" / "changed", names)
+        if not before.get("ran") or not after.get("ran"):
+            error = after.get("error") or before.get("error") or "没跑起来"
+            step("   补跑没跑起来")
+            return {"status": "error", "error": error[:600]}
+        bf, af = set(before.get("failed") or []), set(after.get("failed") or [])
+        result = {"status": "done",
+                  "passed": [t for t in names if t not in af and t not in bf],
+                  "broke": [t for t in names if t in af and t not in bf],
+                  "env": [t for t in names if t in bf],  # 在外面没改的也过不了:这台电脑的环境
+                  "why": {**(before.get("why") or {}), **(after.get("why") or {})}}
+        step(f"   补跑结果:{len(result['passed'])} 个通过、{len(result['broke'])} 个被改坏、{len(result['env'])} 个连没改的也过不了")
+        return result
+
     def _finish_self_test(self, run_id: str, started: float, title: str, edits: list[dict], changed: list[str],
-                          after: dict, before_failed: set) -> dict:
+                          after: dict, before_failed: set, approve: Callable[[str], bool] | None = None) -> dict:
         def step(text: str) -> None:
             self._emit({"phase": "out", "run": run_id, "text": f"[{round(time.monotonic() - started)} 秒] {text}\n"})
 
@@ -512,12 +552,23 @@ class Lab:
         # 测不到 = 相关的测试改之前、改之后都过不了(改之后通过了的就是修好了,不算)
         still_failing = before_failed & set(after.get("failed", []))
         blind = self.related_tests(self.folder / "selftest" / "changed", changed, still_failing) if ok else []
+        why_new = {t: w for t, w in (after.get("why") or {}).items() if t in new_failures}
+        outside = {}
+        if blind and approve is not None:
+            outside = self._verify_outside(blind[:30], approve, step)
+            if outside.get("status") == "done":
+                new_failures += outside["broke"]
+                why_new.update({t: outside["why"].get(t, "") for t in outside["broke"]})
+                blind = outside["env"]
+                ok = not new_failures
         record = {"kind": "self_test", "time": self.clock().strftime("%Y-%m-%d %H:%M"), "title": str(title or "自我测试")[:60],
                   "ok": ok, "ran": after.get("ran", 0), "baseline_failed": len(before_failed),
                   "new_failures": new_failures[:30], "fixed": fixed[:30], "changed": changed,
                   "error": after.get("error", ""), "output": after.get("output", ""), "blind": blind[:30],
                   "baseline_list": sorted(before_failed)[:80],
-                  "baseline_why": {t: w for t, w in ((self.baseline or {}).get("why") or {}).items() if t in before_failed}}
+                  "baseline_why": {t: w for t, w in ((self.baseline or {}).get("why") or {}).items() if t in before_failed},
+                  "new_why": why_new, "outside": outside.get("status", ""), "verified": outside.get("passed", []),
+                  "outside_error": outside.get("error", "")}
         record["report"] = self._write_report(record, edits)
         if after.get("ran"):
             step(f"   改过的:跑了 {after['ran']} 个测试,用了 {after.get('seconds', 0)} 秒")
@@ -546,10 +597,21 @@ class Lab:
         if record["error"]:
             lines.append(f"问题:{record['error']}")
         if record["new_failures"]:
-            lines += ["", "改了以后多坏掉的:"] + [f"- {t}" for t in record["new_failures"]]
+            why_new = record.get("new_why") or {}
+            lines += ["", "改了以后多坏掉的:"] + [f"- {t}" + (f" —— {why_new[t]}" if why_new.get(t) else "")
+                                                 for t in record["new_failures"]]
+        if record.get("verified"):
+            lines += ["", f"实验室里跑不了、经你批准在实验室外面补测通过的({len(record['verified'])} 个,改之前、改之后都通过):"] + \
+                [f"- {t}" for t in record["verified"]]
+        if record.get("outside") == "declined":
+            lines += ["", "实验室里跑不了的测试:你没有批准在实验室外面补跑(或当时窗口没开),所以测不到。"]
+        elif record.get("outside") == "error":
+            lines += ["", f"实验室外面补跑没跑起来:{record.get('outside_error', '')}"]
         if record.get("blind"):
             lines[3] = "结果:⚠ 没法完全确认(没有多坏掉的,但相关测试本来就跑不了)"
-            lines += ["", "改到的地方,这些相关测试在这台电脑本来就过不了(测不到):"] + [f"- {t}" for t in record["blind"]]
+            head = ("改到的地方,这些相关测试连没改过的副本在实验室外面也过不了(这台电脑的环境,测不到):"
+                    if record.get("outside") == "done" else "改到的地方,这些相关测试在这台电脑本来就过不了(测不到):")
+            lines += ["", head] + [f"- {t}" for t in record["blind"]]
         if record.get("baseline_list"):  # 给帮你升级的人看:哪些测试在这台电脑跑不了、为什么
             why = record.get("baseline_why") or {}
             guarded = [t for t in record["baseline_list"] if "代码实验室" in why.get(t, "")]
@@ -583,10 +645,16 @@ class Lab:
         blind = record.get("blind") or []
         if record["ok"] and blind:
             head = f"⚠ 自我测试「{record['title']}」:"
-            text = head + (f"没有多坏掉的测试,但没法完全确认 —— 改到的地方有 {len(blind)} 个相关测试在这台电脑本来就过不了"
-                           f"(在实验室里跑不了),这部分改得对不对测不到")
+            if record.get("outside") == "done":
+                reason = f"有 {len(blind)} 个相关测试连没改过的副本在实验室外面也过不了(这台电脑的环境)"
+            else:
+                reason = f"改到的地方有 {len(blind)} 个相关测试在实验室里跑不了" + \
+                    ("(你没有批准在实验室外面补跑)" if record.get("outside") == "declined" else "")
+            text = head + f"没有多坏掉的测试,但没法完全确认 —— {reason},这部分改得对不对测不到"
         else:
             text = head + (f"通过了,{record['ran']} 个测试没有多坏掉的" if record["ok"] else f"有 {len(record['new_failures'])} 个测试被改坏了")
+        if record.get("verified"):
+            text += f";实验室里跑不了的 {len(record['verified'])} 个相关测试,经你批准在实验室外面补测也通过了"
         if record["fixed"]:
             text += f";修好了 {len(record['fixed'])} 个"
         if record["new_failures"]:

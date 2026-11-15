@@ -13539,6 +13539,40 @@ class CodeLabTest(TempDirTest):
         self.assertEqual(record["blind"], [])  # 改的地方测得到
         self.assertIn("通过了", friday_lab.Lab.describe(record))
 
+    def test_tests_the_lab_cannot_run_are_rerun_outside_with_approval(self):
+        app_dir = Path(self.tmp, "app7")
+        app_dir.mkdir()
+        (app_dir / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+        (app_dir / "test_assistant.py").write_text(
+            "import subprocess, sys, unittest\nimport calc\n\n"
+            "class CalcTest(unittest.TestCase):\n    def test_add(self):\n"
+            "        subprocess.run([sys.executable, '-c', 'pass'])  # 实验室里开不了程序\n"
+            "        self.assertEqual(calc.add(1, 2), 3)\n", encoding="utf-8")
+        lab = self.make(app_dir=app_dir)
+        asked = []
+        # 批准:实验室外面补跑,改之前、改之后都过 -> 确认了
+        record = lab.self_test([{"file": "calc.py", "old": "a + b", "new": "a + b  # 加法"}], "加注释",
+                               approve=lambda q: asked.append(q) or True)
+        self.assertIn("补跑 1 个测试", asked[0])
+        self.assertIn("CalcTest.test_add", asked[0])
+        self.assertIn("没有安全网", asked[0])  # 老板知道风险
+        self.assertTrue(record["ok"])
+        self.assertEqual((record["blind"], record["verified"]), ([], ["test_assistant.CalcTest.test_add"]))
+        self.assertTrue(friday_lab.Lab.describe(record).startswith("✅"))
+        self.assertIn("补测也通过了", friday_lab.Lab.describe(record))
+        self.assertIn("补测通过的(1 个", Path(record["report"]).read_text(encoding="utf-8"))
+        # 改坏了:实验室里看不出来,补跑抓得到
+        record = lab.self_test([{"file": "calc.py", "old": "a + b", "new": "a - b"}], "改坏", approve=lambda q: True)
+        self.assertFalse(record["ok"])
+        self.assertEqual(record["new_failures"], ["test_assistant.CalcTest.test_add"])
+        self.assertIn("test_assistant.CalcTest.test_add —— AssertionError", Path(record["report"]).read_text(encoding="utf-8"))
+        # 不批准:照旧说测不到,并说明是没批准
+        record = lab.self_test([{"file": "calc.py", "old": "a + b", "new": "a - b"}], "不准", approve=lambda q: False)
+        self.assertTrue(record["ok"])
+        self.assertEqual(record["blind"], ["test_assistant.CalcTest.test_add"])
+        self.assertIn("你没有批准", friday_lab.Lab.describe(record))
+        self.assertIn("你没有批准", Path(record["report"]).read_text(encoding="utf-8"))
+
     def test_related_tests_know_module_aliases(self):
         app_dir = Path(self.tmp, "app5")
         app_dir.mkdir()
