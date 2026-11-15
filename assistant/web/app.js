@@ -1814,10 +1814,32 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("hist
 
 // ---------- 齿轮设定:左边分类、上面搜索 ----------
 const SET_CATS = [
-  ["general", "⚙", "常用"], ["voice", "🔊", "声音"], ["look", "🎨", "外观"], ["remind", "⏰", "提醒"],
-  ["life", "💬", "生活"], ["game", "🎮", "游戏"], ["apps", "🔗", "连接的应用"], ["pc", "🖥", "电脑"],
-  ["backup", "💾", "备份"], ["security", "🔒", "安全"], ["money", "💰", "花费"], ["other", "ℹ", "账号和版本"],
+  ["general", "⚙", "常用"], ["voice", "🔊", "声音"], ["listen", "🎙", "语音识别和唤醒"], ["remind", "⏰", "提醒"],
+  ["mail", "📧", "邮件"], ["money", "💰", "花费"], ["home", "🏠", "家里"], ["game", "🎮", "游戏"],
+  ["life", "🎸", "生活"], ["work", "📋", "工作和资料"], ["pc", "🖥", "电脑"], ["look", "🎨", "外观"],
+  ["apps", "🔗", "连接的应用"], ["backup", "💾", "备份"], ["security", "🔒", "安全"], ["other", "ℹ", "账号和版本"],
 ];
+// 拆开的区块跟着原来那一块显示 / 隐藏(例如“语音识别”跟着“听懂我”)
+function syncFollowers() {
+  document.querySelectorAll("#setPane [data-follow]").forEach((g) => {
+    const lead = $(g.dataset.follow);
+    if (lead && g.hidden !== lead.hidden) g.hidden = lead.hidden;  // 没变就别动(不然会一直触发下面的监看)
+  });
+}
+// 每一类最上面:这一类有哪几块,点一下跳过去
+function buildSetToc() {
+  const toc = $("setToc");
+  const shown = setGroups().filter((g) => !g.classList.contains("set-off") && groupHasContent(g));
+  toc.replaceChildren(...shown.map((g) => {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "set-toc-chip";
+    b.textContent = (g.querySelector("h3")?.textContent || "").replace(/[((].*$/, "");
+    b.onclick = () => g.scrollIntoView({ behavior: "smooth", block: "start" });
+    return b;
+  }));
+  const hide = shown.length < 3 || !!$("setSearch").value;
+  if (toc.hidden !== hide) toc.hidden = hide;
+}
 let setCat = "general";
 try { setCat = localStorage.getItem("friday-set-cat") || "general"; } catch {}
 const setGroups = () => [...document.querySelectorAll("#setPane .set-group")];
@@ -1852,20 +1874,25 @@ function clearSetSearch() {
 }
 function showSetCat() {
   clearSetSearch();
+  syncFollowers();
   $("setEmpty").hidden = true;
   for (const g of setGroups()) g.classList.toggle("set-off", g.dataset.cat !== setCat);
   buildSetNav();
   markFirstGroup();
+  buildSetToc();
   $("setPane").scrollTop = 0;
 }
 function searchSettings(text) {
   const words = text.trim().toLowerCase();
   clearSetSearch();
+  syncFollowers();
   if (!words) { showSetCat(); return; }
   let found = 0;
   for (const g of setGroups()) {
     const title = (g.querySelector("h3")?.textContent || "").toLowerCase();
-    const groupHit = title.includes(words) || (SET_CATS.find(([k]) => k === g.dataset.cat)?.[2] || "").includes(words);
+    const keys = (g.dataset.keys || "").toLowerCase();  // 常见说法(例如“灯”找得到“家里”)
+    const groupHit = title.includes(words) || keys.split(" ").some((k) => k && (k.includes(words) || words.includes(k)))
+      || (SET_CATS.find(([k]) => k === g.dataset.cat)?.[2] || "").includes(words);
     let rows = 0;
     for (const row of g.querySelectorAll(":scope > .set-row, :scope > .set-note, :scope > div:not(.set-row):not(.set-note)")) {
       if (row.hidden) continue;
@@ -1878,12 +1905,17 @@ function searchSettings(text) {
     if (show) found++;
   }
   $("setEmpty").hidden = found > 0;
+  if (!$("setToc").hidden) $("setToc").hidden = true;
   markFirstGroup();
   document.querySelectorAll("#setNav .set-tab").forEach((b) => b.classList.remove("on"));
 }
 $("setSearch").addEventListener("input", (e) => searchSettings(e.target.value));
 $("setSearch").addEventListener("keydown", (e) => { if (e.key === "Escape" && e.target.value) { e.stopPropagation(); e.target.value = ""; showSetCat(); } });
-new MutationObserver(() => { if (!$("settings").hidden && !$("setSearch").value) buildSetNav(); })
+new MutationObserver((records) => {
+  if ($("settings").hidden || records.every((r) => r.target.id === "setToc")) return;
+  syncFollowers();
+  if (!$("setSearch").value) { buildSetNav(); buildSetToc(); }
+})
   .observe($("setPane"), { attributes: true, attributeFilter: ["hidden"], subtree: true });
 
 function openSettings() {
