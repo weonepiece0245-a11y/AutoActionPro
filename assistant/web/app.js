@@ -2967,30 +2967,39 @@ async function startBargeWatch() {
   const an = audioCtx.createAnalyser();
   an.fftSize = 1024;
   audioCtx.createMediaStreamSource(stream).connect(an);
-  const started = performance.now();
-  let baseline = 0.008, loud = 0;
+  // 她自己的声音会从喇叭漏回麦克风:一边听一边学“漏回来有多大”,只有比漏回来的大很多才算你在说话。
+  // (以前只在开头 0.4 秒量一次,语音开头常是静音,量到的几乎是 0,念到大声的地方就以为你在说话,读到一半停下来)
+  let floor = 0.008, leak = 0, echo = 0, heard = 0, loud = 0;
   // 用定时器而不是动画帧:窗口被挡住时动画帧会暂停,定时器还会继续
   const timer = setInterval(() => {
     if (bargeStream !== stream) { clearInterval(timer); return; }
     if (!speaking) { clearInterval(timer); stopBargeWatch(); return; }
     const level = rms(an);
-    if (performance.now() - started < 400) {
-      baseline = Math.max(baseline, level);  // 先量一下她自己的声音从喇叭漏回麦克风有多大
-    } else if (level > Math.max(BARGE_MIN, baseline * BARGE_RATIO)) {
-      if (++loud >= BARGE_FRAMES) {  // 大约 0.2 秒都比她的声音大:是你在说话
+    const out = analyser ? rms(analyser) : 0;
+    echo = Math.max(out, echo * 0.93);  // 她最近约 0.3 秒的音量(房间回音也算进去)
+    if (heard < BARGE_LEARN) {  // 先学:她念了约 0.6 秒以后才开始判断
+      if (echo > 0.02) { heard++; leak = Math.max(leak, level / echo); } else floor = Math.max(floor, level);
+      return;
+    }
+    const limit = Math.max(BARGE_MIN, floor * BARGE_RATIO, Math.min(leak, 4) * echo * BARGE_RATIO);
+    if (level > limit) {
+      if (++loud >= BARGE_FRAMES) {  // 大约 0.25 秒都比她漏回来的声音大很多:是你在说话
         clearInterval(timer);
         bargeStream = null;
         refreshMode();
         pauseSpeaking();
+        addLine("🎙 好像听到你在说话,先停下来听你说(不是你的话:齿轮设定 → 声音 关掉“说话可以打断她”,或戴耳机)");
         listen({ stream, spoke: true });
       }
     } else {
       loud = Math.max(0, loud - 1);
+      if (echo > 0.02) leak = Math.max(leak * 0.9995, level / echo);  // 慢慢跟着调(换音量、换喇叭)
+      else floor = Math.max(floor * 0.999, level);
     }
   }, 30);
 }
 // 门槛:开了回声消除和降噪后,正常说话的音量常常只有 0.03~0.1
-const BARGE_MIN = 0.025, BARGE_RATIO = 1.8, BARGE_FRAMES = 6;
+const BARGE_MIN = 0.025, BARGE_RATIO = 1.8, BARGE_FRAMES = 8, BARGE_LEARN = 20;
 function stopBargeWatch() {
   if (bargeStream) { bargeStream.getTracks().forEach((t) => t.stop()); bargeStream = null; refreshMode(); }
 }
