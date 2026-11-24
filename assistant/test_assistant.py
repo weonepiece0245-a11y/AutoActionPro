@@ -7089,7 +7089,7 @@ class DiscordVoiceTest(unittest.TestCase):
         session = app.WebSession(None, app.default_persona(), friday_web.Hub())
         session.web_approver = friday_web.WebApprover(session.hub)
         seen = []
-        session.ask = lambda q, source, speak: seen.append(session.web_approver("关机")) or "不行"
+        session.ask = lambda q, source, speak, **kw: seen.append(session.web_approver("关机")) or "不行"
         holder = {"done": threading.Event(), "reply": None}
         app.discord_voice_answer(session, ("关机", holder))
         self.assertEqual(seen, [False])  # 频道里有别人:要允许的事一律不做
@@ -12494,6 +12494,9 @@ class FakeRegistry:
 
 class StartupDoctorTest(TempDirTest):
     def make(self, boot=None, checks=None):
+        env = mock.patch.dict(os.environ, {"LOCALAPPDATA": self.tmp})  # 测试的 Temp 当成真正的临时文件夹
+        env.start()
+        self.addCleanup(env.stop)
         approved = friday_startup.APPROVED
         user_startup = Path(self.tmp, "Startup")
         user_startup.mkdir(exist_ok=True)
@@ -13315,7 +13318,8 @@ class AuditNov15Test(TempDirTest):
         old = temp / "old.tmp"
         old.write_text("y", encoding="utf-8")
         os.utime(old, (time.time() - 30 * 86400,) * 2)
-        freed, count = friday_startup.clean_temp(temp)
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": self.tmp}):
+            freed, count = friday_startup.clean_temp(temp)
         self.assertEqual(count, 1)
         self.assertTrue(keep.exists())  # 捷径指到外面的文件:不动
 
@@ -14983,11 +14987,13 @@ class ReviewNov24Test(TempDirTest):
         self.assertEqual(suggest("Discord", r"C:\Users\a\AppData\Local\Discord\Update.exe --processStart Discord.exe")[0], "off")
 
     def test_clean_temp_refuses_a_wrong_temp_setting(self):
-        self.assertTrue(friday_startup.safe_temp(Path(self.tmp, "Temp")))
-        self.assertTrue(friday_startup.safe_temp(Path(tempfile.gettempdir())))
-        self.assertFalse(friday_startup.safe_temp(Path.home()))
-        self.assertFalse(friday_startup.safe_temp(Path(Path(self.tmp).anchor)))
-        self.assertFalse(friday_startup.safe_temp(Path("Temp")))  # 不是完整路径
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": self.tmp, "TEMP": str(Path(self.tmp, "工作"))}):
+            self.assertTrue(friday_startup.safe_temp(Path(self.tmp, "Temp")))  # %LOCALAPPDATA%\Temp
+            self.assertFalse(friday_startup.safe_temp(Path(self.tmp, "工作")))  # TEMP 被设成别的文件夹:不算
+            self.assertFalse(friday_startup.safe_temp(Path(self.tmp, "项目", "temp")))  # 名字叫 temp 也不算
+            self.assertFalse(friday_startup.safe_temp(Path.home()))
+            self.assertFalse(friday_startup.safe_temp(Path(Path(self.tmp).anchor)))
+            self.assertFalse(friday_startup.safe_temp(Path("Temp")))  # 不是完整路径
         work = Path(self.tmp, "工作")
         work.mkdir()
         old = work / "报告.docx"
@@ -15098,6 +15104,134 @@ class ReviewNov24Test(TempDirTest):
         self.assertNotIn("https://www.googleapis.com/auth/drive", gmod.SCOPES)
         self.assertIn("https://www.googleapis.com/auth/drive.readonly", gmod.SCOPES)
         self.assertIn("https://www.googleapis.com/auth/drive.file", gmod.SCOPES)
+
+
+class ReviewNov24bTest(TempDirTest):
+    """外部代码审查第二份(11-24):开机启动、语音频道、速记本。"""
+
+    def test_short_words_still_match_joined_file_names(self):
+        suggest = friday_startup.suggestion
+        for name, command in (("IgfxTray", r"C:\Windows\System32\igfxTray.exe"),
+                              ("MSIAfterburner", r"C:\Program Files (x86)\MSI Afterburner\MSIAfterburner.exe"),
+                              ("AVG UI", r"C:\Program Files\AVG\Antivirus\AVGUI.exe")):
+            self.assertEqual(suggest(name, command)[0], "keep", name)
+        self.assertEqual(suggest("QQ", r"C:\Program Files\Tencent\QQProtect.exe")[0], "off")
+        self.assertEqual(suggest("Helper", r"C:\x\commandline.exe --online")[0], "maybe")  # amd、line 不算
+        self.assertEqual(suggest("Original", r"C:\x\original.exe")[0], "maybe")
+        self.assertEqual(suggest("Operation", r"C:\x\operation.exe")[0], "maybe")
+
+    def test_heavy_and_slow_only_look_at_the_program(self):
+        doctor, registry, _ = StartupDoctorTest.make(
+            self, boot=lambda: {"boot_seconds": 30, "slow": [{"name": "QQ", "file": "qq.exe", "ms": 9000},
+                                                             {"name": "Steam", "file": "steam.exe", "ms": 6200}]})
+        registry.data[("HKCU", friday_startup.RUN)]["Tool"] = r"C:\Users\riotfan\Tools\tool.exe --epic"
+        items = {i["name"]: i for i in doctor.report()["items"]}
+        self.assertFalse(items["Tool"]["heavy"])  # 用户名里有 riot、参数里有 epic:不算吃资源
+        self.assertEqual(items["Tool"]["slow_seconds"], 0)  # qq.exe 不会套到别的程序
+        self.assertEqual(items["Steam"]["slow_seconds"], 6.2)
+        self.assertTrue(items["EpicGamesLauncher"]["heavy"])
+
+    def test_report_survives_when_it_cannot_be_saved(self):
+        doctor, _, _ = StartupDoctorTest.make(self)
+        with mock.patch.object(doctor, "_save", side_effect=OSError("磁盘满了")):
+            self.assertIn("开机会自动启动", doctor.describe())
+
+    def test_powershell_output_that_is_not_an_object(self):
+        for output in ("null", "42", "[1, 2]"):
+            with mock.patch.object(friday_startup, "_powershell", return_value=output):
+                self.assertEqual(friday_startup.boot_info(), {})
+                self.assertEqual(friday_startup.system_checks(), {})
+
+    def test_notes_full_width_punctuation_broken_file_and_sync_failure(self):
+        import friday_notes
+
+        path = Path(self.tmp, "notes.json")
+        path.write_text(json.dumps({"notes": [{"id": 1, "time": "2026-11-20 10:00", "text": "好的"},
+                                              {"text": "没有 id"}, {"id": "2", "time": "x", "text": "id 不是数字"}]},
+                                   ensure_ascii=False), encoding="utf-8")
+        notes = friday_notes.Notes(path, clock=lambda: datetime.datetime(2026, 11, 24, 9, 0))
+        self.assertEqual([n["id"] for n in notes.items], [1])  # 改坏的不载入,笔记本照常能用
+        notes.add("\uff1a买牛奶")
+        self.assertEqual(notes.items[-1]["text"], "买牛奶")  # 全角冒号去掉
+        notes.add("买鸡蛋")
+        self.assertEqual(len(notes.search("牛奶\uff0c鸡蛋")), 0)  # 全角逗号拆成两个字,两个都要有
+        self.assertEqual(len(notes.search("买\uff0c牛奶")), 1)
+
+        def broken(line):
+            raise RuntimeError("Google 过期")
+
+        notes.sync = broken
+        self.assertIn("没抄到 Google 文档", notes.add("开会"))
+        self.assertEqual(notes.items[-1]["text"], "开会")  # 电脑上还是记好了
+
+    def test_wake_model_loads_once(self):
+        import friday_discord_voice as dv
+
+        loads = []
+
+        def loader():
+            loads.append(1)
+            time.sleep(0.05)
+            recognizer = SimpleNamespace(SetWords=lambda on: None, AcceptWaveform=lambda data: None,
+                                         FinalResult=lambda: "{}")
+            return SimpleNamespace(KaldiRecognizer=lambda *a: recognizer), object()
+
+        check = dv.vosk_wake_checker(loader)
+        threads = [threading.Thread(target=check, args=(b"\0" * 320,)) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(loads, [1])
+
+    def test_phrases_are_handled_one_by_one_and_old_watchers_stop(self):
+        import friday_discord_voice as dv
+
+        voice = dv.DiscordVoice(SimpleNamespace(), lambda say: None, None, print)
+        log, busy = [], []
+
+        class Brain:
+            def phrase(self, data):
+                busy.append(1)
+                log.append(("start", data, len(busy)))
+                time.sleep(0.03)
+                busy.pop()
+
+        first = voice._start_workers(Brain())
+        for n in (b"1", b"2", b"3"):
+            voice._handle(Brain(), n)
+        for _ in range(200):
+            if len(log) == 3:
+                break
+            time.sleep(0.01)
+        self.assertEqual([d for _, d, _ in log], [b"1", b"2", b"3"])  # 按顺序
+        self.assertEqual({n for _, _, n in log}, {1})  # 一次只处理一句,不会互相打断
+        second = voice._start_workers(Brain())  # 换频道
+        self.assertTrue(first.is_set())  # 旧的线程停了
+        self.assertFalse(second.is_set())
+        voice.vc = SimpleNamespace(is_connected=lambda: False)
+        self.assertIn("本来就不在", asyncio.run(voice.leave()))
+        self.assertTrue(second.is_set())
+        self.assertIsNone(voice.vc)
+
+    def test_private_answers_in_voice_channel_go_to_dm(self):
+        self.assertEqual(app.split_private("明天下午三点开会"), ("明天下午三点开会", ""))
+        self.assertEqual(app.split_private("这个我私信发给你。【私信】明天 15:00 和陈医生约诊"),
+                         ("这个我私信发给你。", "明天 15:00 和陈医生约诊"))
+        self.assertEqual(app.split_private("【私信】账单 RM300")[0], "这个我私信发给你了。")
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        prompts, sent = [], []
+        session.ask = lambda q, source, speak, prefix="": prompts.append(prefix) or "我私信你。【私信】明天 10:00 看牙医"
+        session.discord = SimpleNamespace(notify_owners=lambda text: sent.append(text) or 1)
+        holder = {"done": threading.Event(), "reply": None}
+        app.discord_voice_answer(session, ("我明天有什么安排", holder))
+        self.assertIn("读给频道里所有人听", prompts[0])
+        self.assertEqual(holder["reply"], "我私信你。")  # 频道里只读这句
+        self.assertIn("明天 10:00 看牙医", sent[0])
+        session.discord = SimpleNamespace(notify_owners=lambda text: 0)  # 私信发不出去:也不读出来
+        holder = {"done": threading.Event(), "reply": None}
+        app.discord_voice_answer(session, ("我明天有什么安排", holder))
+        self.assertNotIn("牙医", holder["reply"])
 
 
 if __name__ == "__main__":

@@ -2740,15 +2740,44 @@ def attach_discord_voice(session, bridge, events: queue.Queue, voice_module) -> 
         voice_module.synthesize_mp3, status)
 
 
+PRIVATE_MARK = "【私信】"
+VOICE_CHANNEL_NOTE = (
+    "[这是在 Discord 语音频道里问的,回答会读给频道里所有人听(朋友可能在旁边)。"
+    "日历和行程细节、邮件内容、账单 / 花费 / 银行、地址电话、记忆里的私事、密码这类私人内容不要读出来:"
+    f"先说一句可以公开的话(例如“这个我私信发给你”),然后写“{PRIVATE_MARK}”,后面接详细内容——"
+    f"“{PRIVATE_MARK}”后面的不会读出来,会私信给老板。没有私人内容就照常简短回答。]")
+
+
+def split_private(reply: str | None) -> tuple[str, str]:
+    """回答 -> (可以在频道里读的, 要私信的)。"""
+    text = str(reply or "")
+    if PRIVATE_MARK not in text:
+        return text, ""
+    spoken, private = text.split(PRIVATE_MARK, 1)
+    return spoken.strip() or "这个我私信发给你了。", private.strip()
+
+
 def discord_voice_answer(session, payload) -> None:
-    """语音频道里问的:回答用声音在频道里读;要你“允许”的事一律不做(频道里有别人)。"""
+    """语音频道里问的:回答用声音在频道里读;要你“允许”的事一律不做(频道里有别人);私人内容改用私信。"""
     question, holder = payload
     approver = getattr(session, "web_approver", None)
     old = approver.remote if approver is not None else None
     if approver is not None:
         approver.remote = lambda request: False
     try:
-        holder["reply"] = session.ask(question, source="discord-voice", speak=False)
+        reply = session.ask(question, source="discord-voice", speak=False, prefix=VOICE_CHANNEL_NOTE)
+        spoken, private = split_private(reply)
+        if private:
+            bridge = getattr(session, "discord", None)
+            sent = 0
+            if bridge is not None:
+                try:
+                    sent = bridge.notify_owners(f"🔒 你在语音频道问的“{question[:60]}”:\n{private}")
+                except Exception:  # noqa: BLE001
+                    sent = 0
+            if not sent:
+                spoken = "这个有私人内容,我不在频道里读。你私信问我,或者回到电脑前看。"
+        holder["reply"] = spoken if reply is not None else None
     finally:
         if approver is not None:
             approver.remote = old

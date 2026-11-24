@@ -27,7 +27,8 @@ class Notes:
         except (OSError, ValueError):
             data = {}
         data = data if isinstance(data, dict) else {}
-        self.items: list[dict] = [n for n in (data.get("notes") or []) if isinstance(n, dict) and n.get("text")]
+        self.items: list[dict] = [n for n in (data.get("notes") or []) if isinstance(n, dict) and n.get("text")
+                                  and isinstance(n.get("id"), int) and isinstance(n.get("time"), str)]  # 被改坏的不载入
         self.doc_id = str(data.get("doc_id", ""))
         self.sync: Callable[[str], None] | None = None  # 抄到 Google 文档(由主程序接上)
 
@@ -38,7 +39,7 @@ class Notes:
         os.replace(temp, self.path)
 
     def add(self, text: str) -> str:
-        text = str(text or "").strip().lstrip(":: ,,").strip()
+        text = str(text or "").strip().lstrip(":： ,，").strip()
         if not text:
             raise ValueError("要记什么?")
         number = max((n["id"] for n in self.items), default=0) + 1
@@ -48,8 +49,8 @@ class Notes:
         if self.sync is not None:
             try:
                 self.sync(f"[{note['time']}] {note['text']}")
-            except Exception:
-                pass  # 抄不过去也没关系,电脑上记好了
+            except Exception:  # noqa: BLE001  电脑上记好了;只是手机上暂时看不到,要说一声
+                return f"记好了(#{number})。(这次没抄到 Google 文档,手机上暂时看不到;Google 登录过期的话重新登录就好)"
         return f"记好了(#{number})。"
 
     def delete(self, key: str = "last") -> str:
@@ -67,7 +68,7 @@ class Notes:
         return f"删掉了 #{note['id']}:{note['text'][:40]}"
 
     def search(self, query: str = "", days: int = 0, limit: int = 10) -> list[dict]:
-        words = [w.lower() for w in re.split(r"[\s,,、]+", str(query or "")) if w]
+        words = [w.lower() for w in re.split(r"[\s,，、]+", str(query or "")) if w]
         cutoff = (self.clock() - datetime.timedelta(days=days)).strftime("%Y-%m-%d") if days else ""
         found = [n for n in self.items if n["time"][:10] >= cutoff and all(w in n["text"].lower() for w in words)]
         return list(reversed(found))[:limit]

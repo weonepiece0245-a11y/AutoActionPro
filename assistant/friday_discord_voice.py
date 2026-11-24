@@ -10,8 +10,11 @@
 from __future__ import annotations
 
 import array
+import asyncio
+import importlib
 import io
 import json
+import queue
 import re
 import threading
 import time
@@ -126,10 +129,13 @@ def vosk_wake_checker(model_loader: Callable[[], object]) -> Callable[[bytes], b
     import friday_wake
 
     state: dict = {}
+    lock = threading.Lock()
 
     def check(mono16k: bytes) -> bool:
         if "model" not in state:
-            state["vosk"], state["model"] = model_loader()
+            with lock:  # 刚进频道连说两句:两句同时到,模型(和第一次安装)只做一次
+                if "model" not in state:
+                    state["vosk"], state["model"] = model_loader()
         recognizer = state["vosk"].KaldiRecognizer(state["model"], 16000,
                                                     json.dumps(friday_wake.grammar(WAKE), ensure_ascii=False))
         recognizer.SetWords(True)
@@ -148,6 +154,7 @@ def load_vosk(on_status: Callable[[str], None]):
         on_status("第一次用语音频道:正在安装离线识别组件……")
         if not friday_wake.pip_install(["vosk"]):
             raise RuntimeError("离线识别组件没装好,检查一下网络")
+        importlib.invalidate_caches()  # 刚装好的:Python 才找得到
         import vosk
     import voice
 
@@ -165,6 +172,7 @@ def ensure_voice_packages(on_status: Callable[[str], None]) -> None:
         on_status("第一次用语音频道:正在安装 Discord 语音组件(一两分钟)……")
         if not friday_wake.pip_install(["PyNaCl", "discord-ext-voice-recv"]):
             raise RuntimeError("Discord 语音组件没装好,检查一下网络")
+        importlib.invalidate_caches()
 
 
 # ======================== 接到 Discord ========================
@@ -183,10 +191,25 @@ class DiscordVoice:
         self.owner_id: int | None = None
         self.segmenter = Segmenter()
         self.running = False
+        self._stop: threading.Event | None = None  # 这次连线的停止信号(换频道 / 退出时旧的线程就停)
+        self.phrases: queue.Queue = queue.Queue()
+
+    def _start_workers(self, brain: VoiceBrain) -> threading.Event:
+        """停掉上一次连线的线程,开这次的:一个看有没有说完的话,一个按顺序处理(回答不会乱序、互相打断)。"""
+        if self._stop is not None:
+            self._stop.set()
+        stop = threading.Event()
+        self._stop = stop
+        self.phrases = queue.Queue()
+        self.running = True
+        threading.Thread(target=lambda: self._watch(brain, stop), daemon=True, name="friday-discord-voice").start()
+        threading.Thread(target=lambda: self._work(stop), daemon=True, name="friday-discord-voice-work").start()
+        return stop
 
     # ---------- 进、出 ----------
     async def join(self, owner_id: int) -> str:
-        ensure_voice_packages(self.on_status)
+        # 第一次要 pip 安装(一两分钟):放到别的线程,不然整个 Discord 机器人会卡住、断线
+        await asyncio.to_thread(ensure_voice_packages, self.on_status)
         from discord.ext import voice_recv
 
         client = self.bridge.client
@@ -202,6 +225,7 @@ class DiscordVoice:
         self.vc = await target.connect(cls=voice_recv.VoiceRecvClient)
         self.owner_id = owner_id
         brain = self.brain_factory(self.say)
+        self.segmenter = Segmenter()  # 上一个频道没说完的不要带过来
         segmenter = self.segmenter
         voice = self
 
@@ -220,15 +244,17 @@ class DiscordVoice:
                 pass
 
         self.vc.listen(Sink())
-        self.running = True
-        threading.Thread(target=lambda: self._watch(brain), daemon=True, name="friday-discord-voice").start()
+        self._start_workers(brain)
         return f"我进 {target.name} 了。叫“星期五”再说问题就行;只听你的声音。说“退出语音”我就走。"
 
     async def leave(self) -> str:
         self.running = False
-        if self.vc is not None and self.vc.is_connected():
-            await self.vc.disconnect(force=True)
-            self.vc = None
+        if self._stop is not None:
+            self._stop.set()
+        self.segmenter = Segmenter()
+        vc, self.vc = self.vc, None
+        if vc is not None and vc.is_connected():
+            await vc.disconnect(force=True)
             return "我退出语音频道了。"
         return "我本来就不在语音频道里。"
 
@@ -238,15 +264,24 @@ class DiscordVoice:
                 and (after_channel is None or after_channel != getattr(self.vc, "channel", None)))
 
     # ---------- 听、说 ----------
-    def _watch(self, brain: VoiceBrain) -> None:
-        while self.running:
+    def _watch(self, brain: VoiceBrain, stop: threading.Event) -> None:
+        while not stop.is_set():
             phrase = self.segmenter.poll()
             if phrase:
                 self._handle(brain, phrase)
-            time.sleep(0.2)
+            stop.wait(0.2)
 
     def _handle(self, brain: VoiceBrain, phrase: bytes) -> None:
-        threading.Thread(target=lambda: self._safe(brain, phrase), daemon=True).start()
+        self.phrases.put((brain, phrase))  # 排队:一句处理完再下一句
+
+    def _work(self, stop: threading.Event) -> None:
+        phrases = self.phrases
+        while not stop.is_set():
+            try:
+                brain, phrase = phrases.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            self._safe(brain, phrase)
 
     def _safe(self, brain: VoiceBrain, phrase: bytes) -> None:
         try:

@@ -14,7 +14,6 @@ import os
 import re
 import struct
 import subprocess
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -77,13 +76,16 @@ def _program_text(name: str, command: str) -> str:
     return " ".join([str(name or "")] + parts[-3:]).lower()
 
 
-# 太短、容易是别的字的一部分(amd -> command、line -> online、origin -> original):要整个字对上
-STRICT_WORDS = {"origin", "opera", "teams", "zoom", "steam", "skype", "medal"}
+# 短的字(5 个字母以内):要在一个字的开头(amd 不算 command、line 不算 online),后面可以接别的字
+# (igfxTray、MSIAfterburner、AVGUI、QQProtect 都认得);这几个连开头也会撞到别的字,要整个字对上
+WHOLE_WORDS = {"origin", "opera", "medal", "line"}
 
 
 def _has_word(text: str, word: str) -> bool:
-    if len(word) <= 5 or word in STRICT_WORDS:
+    if word in WHOLE_WORDS:
         return re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", text) is not None
+    if len(word) <= 5:
+        return re.search(rf"(?<![a-z0-9]){re.escape(word)}", text) is not None
     return word in text
 
 
@@ -177,6 +179,8 @@ def boot_info() -> dict:
         data = json.loads(_powershell(script) or "{}")
     except (ValueError, OSError, subprocess.SubprocessError):
         return {}
+    if not isinstance(data, dict):  # 输出 null、数字、清单:当成没有
+        return {}
     slow = data.get("slow") or []
     if isinstance(slow, dict):
         slow = [slow]
@@ -196,6 +200,8 @@ def system_checks() -> dict:
     try:
         data = json.loads(_powershell(script) or "{}")
     except (ValueError, OSError, subprocess.SubprocessError):
+        return {}
+    if not isinstance(data, dict):
         return {}
     disks = data.get("disks") or []
     if isinstance(disks, dict):
@@ -227,18 +233,25 @@ def temp_size(folder: Path | None, older_days: float = 0, now: float | None = No
     return total, count
 
 
+def temp_whitelist() -> list[Path]:
+    """真正的临时文件夹:%LOCALAPPDATA%\\Temp、%WINDIR%\\Temp(Linux / Mac 是 /tmp)。
+    不能拿 TEMP 设定或 tempfile.gettempdir() 来比:它们读的就是 TEMP,设错了也会“对上”自己。"""
+    found = []
+    for env, sub in (("LOCALAPPDATA", "Temp"), ("WINDIR", "Temp"), ("SYSTEMROOT", "Temp")):
+        if os.environ.get(env):
+            found.append(Path(os.environ[env], sub))
+    if os.name != "nt":
+        found += [Path("/tmp"), Path("/var/tmp")]
+    return found
+
+
 def safe_temp(folder: Path | None) -> bool:
-    """真的是临时文件夹才清:TEMP 被安装程序或人改成 C:\\、用户文件夹、某个工作文件夹时,不能整个清掉。"""
+    """真的是临时文件夹才清:TEMP 被安装程序或人改成 D:\\Work、文档、D:\\项目\\temp 时,不能整个清掉。"""
     if folder is None or not folder.is_absolute():
         return False
     try:
         real = folder.resolve()
-        if real == Path(real.anchor) or real == Path.home().resolve():
-            return False
-        windir = os.environ.get("WINDIR") or os.environ.get("SYSTEMROOT")
-        if windir and real == Path(windir).resolve():
-            return False
-        return real.name.lower() in ("temp", "tmp") or real == Path(tempfile.gettempdir()).resolve()
+        return any(real == allowed.resolve() for allowed in temp_whitelist())
     except OSError:
         return False
 
@@ -329,7 +342,8 @@ class StartupDoctor:
             item["id"] = i
             item["can_toggle"] = item["hive"] == "HKCU"
             item["suggest"], item["why"] = suggestion(item["name"], item["command"])
-            item["heavy"] = any(w in f"{item['name']} {item['command']}".lower() for w in HEAVY)
+            text = _program_text(item["name"], item["command"])
+            item["heavy"] = any(_has_word(text, w) for w in HEAVY)
         return found
 
     def _match(self, name: str) -> list[dict]:
@@ -375,9 +389,10 @@ class StartupDoctor:
             key = str(s.get("file") or s.get("name") or "").lower()
             if key:
                 slow[key] = max(slow.get(key, 0), int(s.get("ms") or 0))
-        for item in items:
-            text = f"{item['name']} {item['command']}".lower()
-            hit = [ms for key, ms in slow.items() if key and (key in text or Path(key).stem in text)]
+        for item in items:  # 开机记录里的程序文件名要和这个程序的文件名一样才算(qq.exe 不会套到别的程序)
+            exe = program_name(item["command"]).lower()
+            hit = [ms for key, ms in slow.items() if key and (key == exe or (len(Path(key).stem) >= 4 and Path(key).stem
+                                                                           == Path(exe).stem) or key == item["name"].lower())]
             item["slow_seconds"] = round(max(hit) / 1000, 1) if hit else 0
         checks = found.get("checks") or {}
         temp_bytes, temp_files = temp_size(self.temp(), TEMP_DAYS, self.clock())
@@ -386,7 +401,10 @@ class StartupDoctor:
                 "last_update": checks.get("last_update", ""), "disks": checks.get("disks") or [],
                 "temp_bytes": temp_bytes, "temp_files": temp_files}
         self.state = {"last": data["time"][:10], "report": data}
-        self._save()
+        try:
+            self._save()
+        except OSError:
+            pass  # 存不下来(硬盘满、被占用)也照样给报告
         return data
 
     def describe(self, data: dict | None = None) -> str:
