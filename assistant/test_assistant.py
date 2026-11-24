@@ -3010,7 +3010,8 @@ class GoogleToolboxTest(TempDirTest):
         toolbox = self.make_toolbox({"events.insert": {"id": "ev1"}, "events.delete": {}})
         toolbox.reminders = daily.Reminders(os.path.join(self.tmp, "r.json"), clock=lambda: datetime.datetime(2026, 11, 10, 9, 0))
         toolbox._specs = {t["name"]: t["input_schema"] for t in toolbox.definitions() if "input_schema" in t}
-        with mock.patch.dict(os.environ, {"FRIDAY_REMIND_CALENDAR": "on", "FRIDAY_TIMEZONE": ""}):
+        with mock.patch.dict(os.environ, {"FRIDAY_REMIND_CALENDAR": "on", "FRIDAY_TIMEZONE": ""}), \
+                mock.patch.object(gmod, "_utc_offset_hours", return_value=8.0):
             result = toolbox.run(tool_use("reminder", {"action": "add", "time": "2026-11-10 21:00", "message": "倒垃圾",
                                                        "repeat": "weekdays"}), lambda t: None)
             self.assertIn("电脑关着也会响", result["content"])
@@ -14955,6 +14956,149 @@ class TutorTest(TempDirTest):
         session.tutor.lang = "ms"
         ctx.transcribe(b"x")
         self.assertEqual(heard, ["zh-CN", "ms-MY"])
+
+
+class ReviewNov24Test(TempDirTest):
+    """外部代码审查(11-24)找到的问题。"""
+
+    def test_turning_off_startup_with_natural_words(self):
+        doctor, registry, _ = StartupDoctorTest.make(self)
+        commands = friday_startup.Commands(doctor)
+        self.assertIn("以后开机不会自动启动了", commands.handle("关掉Steam开机启动"))  # 以前被当成要“开”Steam
+        self.assertTrue(friday_startup.disabled_flag(registry.writes[-1][3]))
+        self.assertIn("以后开机不会自动启动了", commands.handle("不要Discord开机启动"))
+        self.assertIn("本来就不会", commands.handle("关掉Steam的开机启动"))
+        self.assertIn("以后开机会自动启动", commands.handle("让Steam开机启动"))
+        self.assertIn("以后开机会自动启动", commands.handle("恢复开机启动 Discord"))
+        self.assertIsNone(commands.handle("关掉微信开机启动"))  # 没有这个:交给 Claude
+
+    def test_startup_suggestions_ignore_user_folder_and_parts_of_words(self):
+        suggest = friday_startup.suggestion
+        self.assertEqual(suggest("Foo", r"C:\Users\dell\AppData\Local\Foo\foo.exe")[0], "maybe")  # 用户名 dell 不算
+        self.assertEqual(suggest("HelperTool", r"C:\Tools\helper.exe --online --commandline")[0], "maybe")  # line、amd
+        self.assertEqual(suggest("Original", r"C:\x\original.exe")[0], "maybe")  # origin
+        self.assertEqual(suggest("LINE", r"C:\Users\a\AppData\Local\LINE\bin\LineLauncher.exe")[0], "off")
+        self.assertEqual(suggest("AMD Noise Suppression", r"C:\Program Files\AMD\ans.exe")[0], "keep")
+        self.assertEqual(suggest("Steam", r'"C:\Program Files (x86)\Steam\steam.exe" -silent')[0], "off")
+        self.assertEqual(suggest("Discord", r"C:\Users\a\AppData\Local\Discord\Update.exe --processStart Discord.exe")[0], "off")
+
+    def test_clean_temp_refuses_a_wrong_temp_setting(self):
+        self.assertTrue(friday_startup.safe_temp(Path(self.tmp, "Temp")))
+        self.assertTrue(friday_startup.safe_temp(Path(tempfile.gettempdir())))
+        self.assertFalse(friday_startup.safe_temp(Path.home()))
+        self.assertFalse(friday_startup.safe_temp(Path(Path(self.tmp).anchor)))
+        self.assertFalse(friday_startup.safe_temp(Path("Temp")))  # 不是完整路径
+        work = Path(self.tmp, "工作")
+        work.mkdir()
+        old = work / "报告.docx"
+        old.write_text("x", encoding="utf-8")
+        os.utime(old, (time.time() - 90 * 86400,) * 2)
+        self.assertEqual(friday_startup.clean_temp(work), (0, 0))
+        self.assertTrue(old.exists())
+        doctor, _, _ = StartupDoctorTest.make(self)
+        doctor.temp = lambda: work
+        self.assertIn("为了安全这次不清", doctor.clean())
+        self.assertTrue(old.exists())
+
+    def test_google_writes_ask_first(self):
+        account = FakeAccount({"tasks.list": {"items": [{"id": "t1", "title": "交报告"}]}, "tasks.delete": "",
+                               "documents.get": {"title": "周报", "body": {"content": [{"endIndex": 5}]}},
+                               "documents.batchUpdate": {}, "spreadsheets.values.append": {},
+                               "playlistItems.insert": {}})
+        tools = gmod.GoogleTools(account, downloads_dir=lambda: Path(self.tmp))
+        no = mock.Mock(return_value=False)
+        self.assertIn("没有允许", tools.tasks({"action": "delete", "key": "交报告"}, no))
+        self.assertIn("交报告", no.call_args.args[0])
+        self.assertIn("没有允许", tools.docs({"action": "append", "id": "doc1", "content": "加一段"}, no))
+        self.assertIn("没有允许", tools.sheets({"action": "append", "id": "sh1", "rows": [["a", 1]]}, no))
+        self.assertIn("没有允许", tools.youtube({"action": "add_to_playlist", "playlist_id": "p", "video_id": "v"}, no))
+        done = [name for name, _ in account.log]
+        for write in ("tasks.delete", "documents.batchUpdate", "spreadsheets.values.append", "playlistItems.insert"):
+            self.assertNotIn(write, done)
+        yes = mock.Mock(return_value=True)
+        self.assertIn("已删除待办:交报告", tools.tasks({"action": "delete", "key": "交报告"}, yes))
+        self.assertEqual(tools.sheets({"action": "append", "id": "sh1", "rows": [["a", 1]]}, yes), "已添加 1 行")
+
+    def test_upload_never_sends_secrets_and_asks(self):
+        tools = gmod.GoogleTools(FakeAccount({"files.create": {"name": "x"}}), downloads_dir=lambda: Path(self.tmp))
+        token = Path(self.tmp, "google_token.json")
+        token.write_text("{}", encoding="utf-8")
+        asked = mock.Mock(return_value=True)
+        self.assertIn("不能上传", tools.drive({"action": "upload", "path": str(token)}, asked))
+        own = Path(friday_security.ASSISTANT_DIR, "assistant.py")
+        self.assertIn("不能上传", tools.drive({"action": "upload", "path": str(own)}, asked))
+        asked.assert_not_called()  # 根本不会问
+        photo = Path(self.tmp, "照片.jpg")
+        photo.write_bytes(b"jpg")
+        self.assertIn("没有允许", tools.drive({"action": "upload", "path": str(photo)}, mock.Mock(return_value=False)))
+
+    def test_big_drive_files_are_not_read_into_memory(self):
+        big = {"id": "v1", "name": "影片.txt", "mimeType": "text/plain", "size": str(50 * 1024 * 1024)}
+        tools = gmod.GoogleTools(FakeAccount({"files.get": big}))
+        self.assertIn("太大了", tools.drive({"action": "read", "id": "v1"}))
+
+    def test_all_day_event_end_includes_last_day(self):
+        account = FakeAccount({"events.insert": {"id": "e", "summary": "出差", "start": {}, "end": {}}})
+        tools = gmod.GoogleTools(account, clock=lambda: datetime.datetime(2026, 11, 7, 9, 30, tzinfo=TZ))
+        with mock.patch.object(gmod, "local_tz", return_value=TZ):
+            tools.calendar({"action": "add", "title": "出差", "start": "2026-11-07", "end": "2026-11-09"}, None, None)
+            self.assertEqual(account.log[-1][1]["body"]["end"], {"date": "2026-11-10"})  # 9 号也算进去
+            tools.calendar({"action": "add", "title": "一天", "start": "2026-11-07", "end": "2026-11-07"}, None, None)
+            self.assertEqual(account.log[-1][1]["body"]["end"], {"date": "2026-11-08"})
+            with self.assertRaises(ValueError):
+                tools.calendar({"action": "add", "title": "反了", "start": "2026-11-09", "end": "2026-11-07"}, None, None)
+
+    def test_google_login_problems(self):
+        token = Path(self.tmp, "google_token.json")
+        token.write_text("坏掉的", encoding="utf-8")
+        account = gmod.GoogleAccount(os.path.join(self.tmp, "credentials.json"), str(token))
+
+        def broken(path):
+            raise ValueError("bad json")
+
+        modules = {"google": types.ModuleType("google"), "google.auth": types.ModuleType("google.auth"),
+                   "google.auth.transport": types.ModuleType("google.auth.transport"),
+                   "google.auth.transport.requests": SimpleNamespace(Request=lambda: None),
+                   "google.oauth2": types.ModuleType("google.oauth2"),
+                   "google.oauth2.credentials": SimpleNamespace(Credentials=SimpleNamespace(from_authorized_user_file=broken))}
+        with mock.patch.dict(sys.modules, modules):
+            with self.assertRaises(gmod.GoogleNotReady) as ctx:
+                account.credentials()
+        self.assertIn("授权文件坏了", str(ctx.exception))
+
+        class TransportError(Exception):
+            pass
+
+        class Creds:
+            valid, expired, refresh_token = False, True, "r"
+
+            def refresh(self, request):
+                raise TransportError("DNS 失败")
+
+        modules["google.oauth2.credentials"] = SimpleNamespace(
+            Credentials=SimpleNamespace(from_authorized_user_file=lambda path: Creds()))
+        account = gmod.GoogleAccount(os.path.join(self.tmp, "credentials.json"), str(token))
+        with mock.patch.dict(sys.modules, modules):
+            with self.assertRaises(gmod.GoogleNotReady) as ctx:
+                account.credentials()
+        self.assertIn("连不上 Google", str(ctx.exception))
+        self.assertFalse(account.expired)  # 断网不算登录过期
+
+    def test_http_status_and_timezone(self):
+        self.assertEqual(gmod.http_status(SimpleNamespace(resp=SimpleNamespace(status="404"))), 404)
+        self.assertIsNone(gmod.http_status(RuntimeError("id 404abc")))  # 文字里碰巧有 404 不算
+        with mock.patch.dict(os.environ, {"FRIDAY_TIMEZONE": ""}):
+            for hours, name in ((8.0, "Asia/Kuala_Lumpur"), (9.0, "Etc/GMT-9"), (0.0, "Etc/GMT"), (-5.0, "Etc/GMT+5")):
+                with mock.patch.object(gmod, "_utc_offset_hours", return_value=hours):
+                    self.assertEqual(gmod.local_timezone(), name)
+        with mock.patch.dict(os.environ, {"FRIDAY_TIMEZONE": "Asia/Tokyo"}):
+            self.assertEqual(gmod.local_timezone(), "Asia/Tokyo")
+
+    def test_drive_scope_is_read_only_plus_own_files(self):
+        self.assertNotIn("https://www.googleapis.com/auth/drive", gmod.SCOPES)
+        self.assertIn("https://www.googleapis.com/auth/drive.readonly", gmod.SCOPES)
+        self.assertIn("https://www.googleapis.com/auth/drive.file", gmod.SCOPES)
+
 
 if __name__ == "__main__":
     unittest.main()

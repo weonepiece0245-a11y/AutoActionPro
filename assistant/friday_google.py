@@ -33,7 +33,8 @@ SERVICE_SCOPES = {
         "https://www.googleapis.com/auth/contacts.readonly",  # 只读通讯录
         "https://www.googleapis.com/auth/contacts.other.readonly",  # 只读“其他联系人”(和你通过邮件的人)
     ],
-    "drive": ["https://www.googleapis.com/auth/drive"],
+    # 云端硬盘:全部只能读;只能改 / 删星期五自己传上去的文件(上传、备份)。下次重新登录 Google 时生效
+    "drive": ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/drive.file"],
     "docs": ["https://www.googleapis.com/auth/documents"],
     "sheets": ["https://www.googleapis.com/auth/spreadsheets"],
     "youtube": ["https://www.googleapis.com/auth/youtube"],
@@ -134,8 +135,14 @@ class GoogleAccount:
 
         creds = None
         if self.token_file.exists() and not force:
-            creds = Credentials.from_authorized_user_file(str(self.token_file))
-            if interactive and self.missing_scopes():
+            try:
+                creds = Credentials.from_authorized_user_file(str(self.token_file))
+            except (ValueError, KeyError, OSError, TypeError):  # 写到一半断电、被改坏
+                creds = None
+                if not interactive:
+                    self.expired = True
+                    raise GoogleNotReady("Google 授权文件坏了,请在齿轮设定里点“重新登录 Google”。") from None
+            if creds is not None and interactive and self.missing_scopes():
                 creds = None  # 加了新功能,重新登录授权一次
         if creds and creds.valid:
             return creds
@@ -145,8 +152,10 @@ class GoogleAccount:
                 self._save(creds)
                 self.expired = False
                 return creds
-            except Exception:  # 授权被撤销或过期(测试模式的应用 7 天过期),需要重新登录
-                self.expired = True
+            except Exception as e:  # noqa: BLE001
+                if _network_error(e):  # 断网、DNS、超时:不是登录过期,不要叫老板重新登录
+                    raise GoogleNotReady("现在连不上 Google(网络有问题?),等一下再试。") from None
+                self.expired = True  # 授权被撤销或过期(测试模式的应用 7 天过期),需要重新登录
                 if not interactive:
                     raise GoogleNotReady(EXPIRED_HINT) from None
         if not interactive:
@@ -173,7 +182,9 @@ class GoogleAccount:
             pass
 
     def _save(self, creds) -> None:
-        self.token_file.write_text(creds.to_json(), encoding="utf-8")
+        temp = self.token_file.with_name(self.token_file.name + ".tmp")  # 先写暂存再换:断电也不会留下半个文件
+        temp.write_text(creds.to_json(), encoding="utf-8")
+        os.replace(temp, self.token_file)
 
     def service(self, name: str):
         """API 客户端。Google 用的连接库不能几个线程同时用(会出 SSL record layer failure 这类错),
@@ -203,6 +214,27 @@ class GoogleAccount:
 
 
 # ======================== 时间 ========================
+
+
+def _network_error(error: BaseException) -> bool:
+    """刷新授权时是断网(而不是授权被撤销)。google-auth 断网时丢 TransportError。"""
+    names = {cls.__name__ for cls in type(error).__mro__}
+    return bool(names & {"TransportError", "ConnectionError", "Timeout", "TimeoutError"}) or (
+        isinstance(error, OSError) and not names & {"RefreshError"})
+
+
+def http_status(error: BaseException) -> int | None:
+    """Google API 错误的 HTTP 状态码(404、410……);不是 HTTP 错误就 None。"""
+    status = getattr(getattr(error, "resp", None), "status", None)
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _asked(approve, action: str) -> bool:
+    """会改动 / 删掉 / 传出去的事先问老板;程序内部直接叫(没有 approve)就照做。"""
+    return approve is None or bool(approve(action))
 
 
 def local_tz():
@@ -340,6 +372,36 @@ def _unique_path(folder: Path, name: str) -> Path:
     return path
 
 
+MAX_READ_BYTES = 5 * 1024 * 1024  # 直接读(给星期五看)最多 5MB;再大就下载
+
+
+def _inside(path: Path, folder: Path) -> bool:
+    try:
+        path.resolve().relative_to(folder.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _download_to(request, path: Path) -> None:
+    """云端硬盘的文件分块下载到 path(每块 8MB);失败把下载一半的文件删掉。"""
+    try:
+        from googleapiclient.http import MediaIoBaseDownload
+    except ImportError:  # 测试用的假 API:没有分块下载,就整个读
+        data = request.execute()
+        path.write_bytes(data if isinstance(data, bytes) else str(data).encode())
+        return
+    try:
+        with open(path, "wb") as handle:
+            downloader = MediaIoBaseDownload(handle, request, chunksize=8 * 1024 * 1024)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
 def _need_args(args: dict, *names: str) -> None:
     missing = [n for n in names if not str(args.get(n) or "").strip()]
     if missing:
@@ -384,6 +446,8 @@ class _MoreGoogleTools:
             if action == "done":
                 api.patch(tasklist=tasklist, task=target["id"], body={"status": "completed"}).execute()
                 return f"已完成:{target.get('title')}"
+            if not _asked(approve, f"删除 Google Tasks 待办:{target.get('title')}"):
+                return "老板没有允许,待办没有删"
             api.delete(tasklist=tasklist, task=target["id"]).execute()
             return f"已删除待办:{target.get('title')}"
         raise ValueError(f"不支持的 action:{action}")
@@ -414,7 +478,7 @@ class _MoreGoogleTools:
         try:
             task = self.account.service("tasks").tasks().get(tasklist="@default", task=task_id).execute()
         except Exception as e:  # noqa: BLE001
-            return True if getattr(getattr(e, "resp", None), "status", None) in (404, 410) else None
+            return True if http_status(e) in (404, 410) else None
         return task.get("status") == "completed" or bool(task.get("deleted"))
 
     @staticmethod
@@ -482,6 +546,9 @@ class _MoreGoogleTools:
         if action == "read":
             meta = self._drive_meta(files, args)
             mime = meta.get("mimeType", "")
+            size = int(meta.get("size") or 0)
+            if size > MAX_READ_BYTES and mime not in GOOGLE_EXPORTS:
+                return f"“{meta['name']}”有 {size / 1024 / 1024:.0f}MB,太大了不直接读;可以用 download 下载到电脑"
             if mime in GOOGLE_EXPORTS:
                 data = files.export(fileId=meta["id"], mimeType=GOOGLE_EXPORTS[mime][0]).execute()
             elif mime.startswith(TEXT_MIMES):
@@ -502,17 +569,27 @@ class _MoreGoogleTools:
             elif mime.startswith("application/vnd.google-apps"):
                 return f"“{name}”这种 Google 格式不能下载"
             else:
-                data = files.get_media(fileId=meta["id"]).execute()
+                data = None  # 一般文件:一块一块写进文件,不整个放进记忆体(几 GB 的影片也不会卡死)
             folder = self.downloads_dir()
             folder.mkdir(parents=True, exist_ok=True)
             path = _unique_path(folder, name)
-            path.write_bytes(data if isinstance(data, bytes) else str(data).encode())
+            if data is None:
+                _download_to(files.get_media(fileId=meta["id"]), path)
+            else:
+                path.write_bytes(data if isinstance(data, bytes) else str(data).encode())
             return f"已下载到 {path}"
         if action == "upload":
             _need_args(args, "path")
             path = Path(os.path.expandvars(os.path.expanduser(str(args["path"]))))
             if not path.is_file():
                 raise ValueError(f"找不到文件 {path}")
+            import friday_security
+
+            if friday_security.is_secret_path(path) or _inside(path, friday_security.ASSISTANT_DIR):
+                return ("这个文件不能上传:钥匙、密码、授权文件,还有星期五自己文件夹里的东西(记忆、对话、设定)都不往外传。"
+                        "要传报告的话,先存到“下载”再传。")
+            if not _asked(approve, f"把电脑上的文件上传到 Google 云端硬盘:{path}"):
+                return "老板没有允许,没有上传"
             try:
                 from googleapiclient.http import MediaFileUpload
             except ImportError as e:
@@ -544,6 +621,8 @@ class _MoreGoogleTools:
             _need_args(args, "id", "content")
             doc_id = file_id(str(args["id"]))
             doc = api.get(documentId=doc_id).execute()
+            if not _asked(approve, f"在 Google 文档“{doc.get('title', '')}”末尾加内容({len(str(args['content']))} 个字)"):
+                return "老板没有允许,文档没有改"
             end = doc["body"]["content"][-1]["endIndex"] - 1
             api.batchUpdate(documentId=doc_id, body={"requests": [
                 {"insertText": {"location": {"index": max(1, end)}, "text": "\n" + args["content"]}}]}).execute()
@@ -576,6 +655,8 @@ class _MoreGoogleTools:
             _need_args(args, "id")
             if not rows:
                 raise ValueError("append 需要 rows")
+            if not _asked(approve, f"往 Google 表格(id:{file_id(str(args['id']))})加 {len(rows)} 行"):
+                return "老板没有允许,表格没有改"
             self._append(api, file_id(str(args["id"])), rows, args.get("range") or "A1")
             return f"已添加 {len(rows)} 行"
         raise ValueError(f"不支持的 action:{action}")
@@ -623,6 +704,8 @@ class _MoreGoogleTools:
             return "你的播放列表:\n" + "\n".join(f"{p['snippet']['title']} | id:{p['id']}" for p in items)
         if action == "add_to_playlist":
             _need_args(args, "playlist_id", "video_id")
+            if not _asked(approve, f"把 YouTube 影片 {args['video_id']} 加进你的播放列表"):
+                return "老板没有允许,没有加"
             yt.playlistItems().insert(part="snippet", body={"snippet": {
                 "playlistId": args["playlist_id"],
                 "resourceId": {"kind": "youtube#video", "videoId": args["video_id"]}}}).execute()
@@ -737,6 +820,12 @@ class GoogleTools(_MoreGoogleTools):
             end, end_all_day = parse_when(args["end"])
             if end_all_day != all_day:
                 raise ValueError("start 和 end 要么都写具体时间,要么都只写日期")
+            if end < start:
+                raise ValueError("结束比开始还早,请确认一下日期")
+            if all_day:  # “7 号到 9 号出差”:9 号也要算进去;Google 的全天结束日不包含那一天
+                end = end + datetime.timedelta(days=1)
+            elif end == start:
+                end = start + datetime.timedelta(hours=1)
         else:
             end = start + datetime.timedelta(days=1) if all_day else start + datetime.timedelta(hours=1)
         if all_day:
@@ -854,9 +943,7 @@ class GoogleTools(_MoreGoogleTools):
 
     @staticmethod
     def _need(args: dict, *names: str) -> None:
-        missing = [n for n in names if not (args.get(n) or "").strip()]
-        if missing:
-            raise ValueError(f"缺少参数:{'、'.join(missing)}")
+        _need_args(args, *names)
 
     def _send_mail(self, args: dict, confirm: Approver) -> str:
         self._need(args, "to", "subject", "body")
@@ -998,10 +1085,6 @@ def login(folder: str | os.PathLike | None = None, search: list[Path] | None = N
     return 0
 
 
-if __name__ == "__main__":
-    sys.exit(login(sys.argv[1] if len(sys.argv) > 1 else None))
-
-
 # ---------------- 提醒放进 Google 日历(电脑关机时手机也会响) ----------------
 
 RECURRENCE = {
@@ -1015,8 +1098,22 @@ def remind_calendar_enabled() -> bool:
     return os.environ.get("FRIDAY_REMIND_CALENDAR", "on") != "off"
 
 
+def _utc_offset_hours() -> float:
+    offset = datetime.datetime.now().astimezone().utcoffset() or datetime.timedelta()
+    return offset.total_seconds() / 3600
+
+
 def local_timezone() -> str:
-    return os.environ.get("FRIDAY_TIMEZONE", "").strip() or "Asia/Kuala_Lumpur"
+    """提醒抄到 Google 日历用的时区:设定里写了就用;没写就跟着电脑的时区(和电脑上的提醒一致)。"""
+    custom = os.environ.get("FRIDAY_TIMEZONE", "").strip()
+    if custom:
+        return custom
+    hours = _utc_offset_hours()
+    if hours == 8:
+        return "Asia/Kuala_Lumpur"
+    if hours.is_integer():  # 出差到别的时区:用“Etc/GMT-9”这种(注意 Etc 的正负号是反的)
+        return "Etc/GMT" + (f"{-int(hours):+d}" if hours else "")
+    return "Asia/Kuala_Lumpur"  # 差半小时的地方(印度……):请在设定里写时区
 
 
 class ReminderCalendar:
@@ -1052,6 +1149,9 @@ class ReminderCalendar:
         try:
             self.service().events().delete(calendarId="primary", eventId=event_id, sendUpdates="none").execute()
         except Exception as e:
-            if "404" not in str(e) and "410" not in str(e):  # 已经在日历里删掉了
+            if http_status(e) not in (404, 410):  # 404 / 410:已经在日历里删掉了
                 raise
 
+
+if __name__ == "__main__":
+    sys.exit(login(sys.argv[1] if len(sys.argv) > 1 else None))

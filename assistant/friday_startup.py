@@ -14,6 +14,8 @@ import os
 import re
 import struct
 import subprocess
+import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Callable
@@ -30,6 +32,7 @@ KEEP = ["securityhealth", "windows security", "defender", "realtek", "rtkaud", "
         "igfx", "synaptics", "elan", "touchpad", "logitech", "lghub", "razer", "synapse", "corsair", "icue", "steelseries",
         "bluetooth", "dolby", "nahimic", "waves", "armoury", "asus", "msi", "lenovo", "dell", "hp ", "kaspersky", "avast",
         "avg", "norton", "mcafee", "eset", "bitdefender", "malwarebytes", "friday", "星期五", "tailscale", "wireguard", "openvpn"]
+KEEP = [w.strip() for w in KEEP]
 # 建议关:开机不用马上开,要用时再开(游戏平台、聊天、音乐、更新器……)
 OFF = {
     "steam": "游戏平台", "discord": "聊天", "epicgames": "游戏平台", "epic games": "游戏平台", "eaapp": "游戏平台",
@@ -52,7 +55,7 @@ DISABLE = re.compile(r"^(星期五)?[,，\s]*(把)?(关掉|关闭|停用|不要|
                      r"(?P<n>[A-Za-z0-9一-鿿 .+\-]{2,30}?)(的)?(开机启动|开机自动启动|开机自动开|开机时?自己开)?[。!！]?$"
                      r"|^(星期五)?[,，\s]*开机(时|的时候)?(不要|别|不用)(再)?(自动)?(开|打开|启动|开启)(?P<n3>[A-Za-z0-9一-鿿 .+\-]{2,30}?)(了)?[。!！]?$")
 ENABLE = re.compile(r"^(星期五)?[,，\s]*(恢复|打开|开回|重新打开)(开机启动的?|开机自动启动的?)(?P<n>[A-Za-z0-9一-鿿 .+\-]{2,30}?)[。!！]?$"
-                    r"|^(星期五)?[,，\s]*(让)?(?P<n2>[A-Za-z0-9一-鿿 .+\-]{2,30}?)(恢复|重新)?开机(自动)?启动[。!！]?$")
+                    r"|^(星期五)?[,，\s]*(让)?(?!关|不要|别|停用|取消)(?P<n2>[A-Za-z0-9一-鿿 .+\-]{2,30}?)(恢复|重新)?开机(自动)?启动[。!！]?$")
 CLEAN_TEMP = re.compile(r"^(星期五)?[,，\s]*(帮我)?(清理|清掉|删掉|清除)(一下)?(电脑的?)?(临时文件|暂存文件|temp|垃圾文件)[。!！]?$", re.I)
 
 
@@ -62,13 +65,35 @@ def program_name(command: str) -> str:
     return Path((found.group(1) or found.group(2)) if found else "").name.replace("\\", "/").rsplit("/", 1)[-1]
 
 
+def _program_text(name: str, command: str) -> str:
+    """拿来比对的文字:条目名字 + 程序所在的最后两层文件夹 + 程序文件名。
+    不看完整命令:路径里的用户名(C:\\Users\\dell\\…)、参数(--online)会让建议乱掉。"""
+    found = re.match(r'\s*"([^"]+)"|\s*(\S+)', str(command or ""))
+    parts = [p for p in re.split(r"[\\/]", (found.group(1) or found.group(2)) if found else "") if p]
+    lowered = [p.lower() for p in parts]
+    if "users" in lowered[:-1]:  # 用户文件夹的名字不算
+        cut = lowered.index("users") + 1
+        parts = parts[:cut] + parts[cut + 1:]
+    return " ".join([str(name or "")] + parts[-3:]).lower()
+
+
+# 太短、容易是别的字的一部分(amd -> command、line -> online、origin -> original):要整个字对上
+STRICT_WORDS = {"origin", "opera", "teams", "zoom", "steam", "skype", "medal"}
+
+
+def _has_word(text: str, word: str) -> bool:
+    if len(word) <= 5 or word in STRICT_WORDS:
+        return re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", text) is not None
+    return word in text
+
+
 def suggestion(name: str, command: str) -> tuple[str, str]:
     """(keep / off / maybe, 为什么)。"""
-    text = f"{name} {command}".lower()
-    if any(word in text for word in KEEP):
+    text = _program_text(name, command)
+    if any(_has_word(text, word) for word in KEEP):
         return "keep", "驱动、安全软件或键鼠设定,建议保留"
     for word, kind in OFF.items():
-        if word in text:
+        if _has_word(text, word):
             if kind == "云端硬盘":
                 return "maybe", "云端同步:关了就不会自动同步,看你需不需要"
             return "off", f"{kind}:开机不用马上开,要用时再打开就好"
@@ -202,9 +227,25 @@ def temp_size(folder: Path | None, older_days: float = 0, now: float | None = No
     return total, count
 
 
+def safe_temp(folder: Path | None) -> bool:
+    """真的是临时文件夹才清:TEMP 被安装程序或人改成 C:\\、用户文件夹、某个工作文件夹时,不能整个清掉。"""
+    if folder is None or not folder.is_absolute():
+        return False
+    try:
+        real = folder.resolve()
+        if real == Path(real.anchor) or real == Path.home().resolve():
+            return False
+        windir = os.environ.get("WINDIR") or os.environ.get("SYSTEMROOT")
+        if windir and real == Path(windir).resolve():
+            return False
+        return real.name.lower() in ("temp", "tmp") or real == Path(tempfile.gettempdir()).resolve()
+    except OSError:
+        return False
+
+
 def clean_temp(folder: Path | None, older_days: float = TEMP_DAYS, now: float | None = None) -> tuple[int, int]:
     """删掉临时文件夹里很久没动的文件(正在用的删不掉就跳过)。返回(清了多少字节, 几个文件)。"""
-    if folder is None or not folder.is_dir():
+    if folder is None or not folder.is_dir() or not safe_temp(folder):
         return 0, 0
     now = now if now is not None else time.time()
     freed = count = 0
@@ -320,8 +361,15 @@ class StartupDoctor:
 
     # ---------- 报告 ----------
     def report(self) -> dict:
+        found: dict = {}
+        helpers = [threading.Thread(target=lambda: found.update(boot=self.boot()), daemon=True),
+                   threading.Thread(target=lambda: found.update(checks=self.checks()), daemon=True)]
+        for thread in helpers:
+            thread.start()
         items = self.items()
-        boot = self.boot() or {}
+        for thread in helpers:
+            thread.join()
+        boot = found.get("boot") or {}
         slow = {}
         for s in boot.get("slow") or []:
             key = str(s.get("file") or s.get("name") or "").lower()
@@ -331,7 +379,7 @@ class StartupDoctor:
             text = f"{item['name']} {item['command']}".lower()
             hit = [ms for key, ms in slow.items() if key and (key in text or Path(key).stem in text)]
             item["slow_seconds"] = round(max(hit) / 1000, 1) if hit else 0
-        checks = self.checks() or {}
+        checks = found.get("checks") or {}
         temp_bytes, temp_files = temp_size(self.temp(), TEMP_DAYS, self.clock())
         data = {"time": datetime.datetime.fromtimestamp(self.clock()).strftime("%Y-%m-%d %H:%M"), "items": items,
                 "boot_seconds": boot.get("boot_seconds") or 0, "reboot": checks.get("reboot", False),
@@ -400,7 +448,10 @@ class StartupDoctor:
         return "每月电脑开机检查:\n" + self.describe(data) if worth else None
 
     def clean(self) -> str:
-        freed, count = clean_temp(self.temp(), TEMP_DAYS, self.clock())
+        folder = self.temp()
+        if folder is not None and folder.is_dir() and not safe_temp(folder):
+            return f"临时文件夹的设定看起来不对({folder}),为了安全这次不清。"
+        freed, count = clean_temp(folder, TEMP_DAYS, self.clock())
         if not count:
             return f"临时文件夹里没有超过 {TEMP_DAYS} 天的临时文件,不用清。"
         return f"清掉了 {count} 个临时文件,空出 {gb(freed)}(只清超过 {TEMP_DAYS} 天没用的,正在用的不会动)。"
@@ -419,7 +470,7 @@ class Commands:
             return self.doctor.describe()
         if CLEAN_TEMP.match(text):
             return self.doctor.clean()
-        for pattern, enabled in ((ENABLE, True), (DISABLE, False)):
+        for pattern, enabled in ((DISABLE, False), (ENABLE, True)):  # 先看“关”:“关掉Steam开机启动”不能被当成要开
             found = pattern.match(text)
             if found and ("开机" in text or "自动启动" in text):
                 groups = found.groupdict()
@@ -427,7 +478,7 @@ class Commands:
                 try:
                     return self.doctor.set_enabled(name, enabled)
                 except LookupError:
-                    return None  # 不是开机启动里的:交给 Claude
+                    continue  # 这种说法认不出名字:换下一种;都不是就交给 Claude
                 except ValueError as e:
                     return str(e)
                 except OSError as e:
