@@ -2850,6 +2850,8 @@ def settings_state(session, meter=None) -> dict:
         "security": security_state(session),
         "api_key_tail": api_key_tail(),
         "key_expires": os.environ.get("FRIDAY_KEY_EXPIRES", "").strip(),
+        # 星期五自己的文件夹(给代码审查时不会选错)和最近做的干净副本
+        "app_folder": {"path": SCRIPT_DIR, "review_copy": getattr(session, "review_copy_path", "")},
         "health": health_state(session),
         "defender": defender_state(session),
         "apps": apps_state(session),
@@ -3340,6 +3342,30 @@ def apply_settings(payload: dict, session, toolbox, env_file: str, meter=None, c
             save_env_value(env, key, "on" if on else "off")
             os.environ[key] = "on" if on else "off"
             done.append(on_text if on else off_text)
+    if payload.get("app_folder") in ("open", "review_copy", "open_copy"):
+        action = payload["app_folder"]
+        if action == "review_copy":
+            import friday_reviewcopy
+            import friday_security
+
+            folder = downloads_folder(session, toolbox if toolbox is not None
+                                      else getattr(getattr(session, "assistant", None), "toolbox", None))
+            try:
+                made = friday_reviewcopy.make(SCRIPT_DIR, folder, is_secret=friday_security.is_secret_path)
+            except OSError as e:
+                return {"error": f"副本没做成:{e}"}
+            session.review_copy_path = made["path"]
+            done.append(f"做好了干净副本({made['files']} 个程序文件):{made['path']}。把这个文件夹交给审查工具就好")
+            action = "open_copy"
+        target = SCRIPT_DIR if action == "open" else getattr(session, "review_copy_path", "")
+        if not target or not os.path.isdir(target):
+            return {"error": "还没有做干净副本"}
+        if os.name == "nt":
+            os.startfile(target)  # noqa: S606
+            if payload["app_folder"] == "open":
+                done.append("打开了星期五的文件夹")
+        elif payload["app_folder"] != "review_copy":
+            return {"error": "只能在 Windows 上打开文件夹"}
     if payload.get("lab_open"):
         lab = getattr(session, "lab", None)
         if lab is None:

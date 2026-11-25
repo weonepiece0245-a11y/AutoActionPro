@@ -946,6 +946,12 @@ async function loadState() {
   if (!s || s.error) return;
   if (s.locked) { showLock(); return s; }
   $("versionText").textContent = s.version || "未记录";
+  const appFolder = (s.settings || {}).app_folder;
+  if (appFolder) {
+    $("appDirText").textContent = appFolder.path || "—";
+    $("reviewCopyOpen").hidden = !appFolder.review_copy;
+    if (appFolder.review_copy) $("reviewCopyNote").textContent = "上一份干净副本:" + appFolder.review_copy + "(把这个文件夹交给审查工具)";
+  }
   if (s.settings) settingsState = s.settings;
   if (s.settings && "focus" in s.settings) showFocus(s.settings.focus);
   if (s.settings && "sleep_timer" in s.settings) showSleepTimer(s.settings.sleep_timer);
@@ -2448,6 +2454,20 @@ $("memtidyApply").onclick = () => {
 $("memtidyDismiss").onclick = () => saveSetting({ memtidy_dismiss: true });
 $("discordPair").onclick = () => saveSetting({ discord_pair: true }, 8000);
 $("saveKeyExpires").onclick = () => saveSetting({ key_expires: $("setKeyExpires").value });
+// 星期五的文件夹:复制路径、打开;做一份给代码审查用的干净副本
+$("appDirCopy").onclick = async () => {
+  const path = settingsState?.app_folder?.path || "";
+  toast(path && (await copyText(path)) ? "复制好了:" + path : "复制失败");
+};
+$("appDirOpen").onclick = () => saveSetting({ app_folder: "open" });
+$("reviewCopy").onclick = async () => {
+  $("reviewCopy").disabled = true;
+  $("reviewCopy").textContent = "正在做…";
+  await saveSetting({ app_folder: "review_copy" }, 9000);
+  $("reviewCopy").disabled = false;
+  $("reviewCopy").textContent = "再做一份";
+};
+$("reviewCopyOpen").onclick = () => saveSetting({ app_folder: "open_copy" });
 $("setRain").onchange = (e) => saveSetting({ rain_alert: e.target.value });
 $("setBrief").onchange = (e) => saveSetting({ brief: e.target.checked });
 $("setEventLead").onchange = (e) => saveSetting({ event_lead: Number(e.target.value) });

@@ -674,6 +674,15 @@
       <div class="set-note" id="securityNote"></div>
     </div>
 
+    <div class="set-group" data-cat="other" data-keys="文件夹 程序 位置 路径 代码审查 审查 副本 目录">
+      <h3>星期五的文件夹</h3>
+      <div class="set-row"><span>星期五的程序放在<br><b class="mono app-dir" id="appDirText">—</b></span>
+        <span class="set-ctl"><button type="button" class="mini-btn" id="appDirCopy">复制路径</button><button type="button" class="mini-btn" id="appDirOpen">打开</button></span></div>
+      <div class="set-row"><span>给代码审查用的干净副本<br><small class="set-note">只放程序代码;没有钥匙、密码、记忆、对话、浏览器资料、旧版本副本。做好放在“下载”里并自动打开</small></span>
+        <span class="set-ctl"><button type="button" class="mini-btn" id="reviewCopy">做一份</button><button type="button" class="mini-btn" id="reviewCopyOpen" hidden>打开上一份</button></span></div>
+      <div class="set-note" id="reviewCopyNote">要做代码审查时:按“做一份”,把打开的那个文件夹交给审查工具。不要直接给上面那个文件夹(里面有你的资料和很多旧副本)。</div>
+    </div>
+
     <div class="set-group" data-cat="other" data-keys="版本 钥匙 到期">
       <h3>账号和版本</h3>
       <div class="set-row" id="apiKeyRow" hidden><span>Claude 钥匙 <b class="mono nowrap" id="apiKeyTail">—</b></span><span class="set-note">对照 Console“API 密钥”页里那串的最后 4 个字</span></div>

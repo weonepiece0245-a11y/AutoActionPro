@@ -15234,5 +15234,57 @@ class ReviewNov24bTest(TempDirTest):
         self.assertNotIn("牙医", holder["reply"])
 
 
+class ReviewCopyTest(TempDirTest):
+    def test_clean_copy_has_only_code(self):
+        import friday_reviewcopy
+
+        app_dir = Path(self.tmp, "assistant")
+        for name in ("assistant.py", "friday_tools.py", "README.md", "start.bat", "CHANGES.md", "friday_memory.json",
+                     "friday_vocab.json", ".env", ".env.example", "credentials.json", "google_token.json", "friday.log",
+                     "web/app.js", "web/index.html", "web/vendor/three.min.js", "browser-profile/Default/Cookies",
+                     "friday_lab/selftest/base/friday_tools.py", "_update_backup/files/assistant/assistant.py",
+                     "whisper_models/model.bin", "friday_tutor/练习.md"):
+            path = app_dir / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x", encoding="utf-8")
+        downloads = Path(self.tmp, "Downloads")
+        downloads.mkdir()
+        made = friday_reviewcopy.make(app_dir, downloads, is_secret=friday_security.is_secret_path,
+                                      clock=lambda: datetime.datetime(2026, 11, 25, 9, 0, 0))
+        copy = Path(made["path"])
+        got = sorted(str(p.relative_to(copy)).replace("\\", "/") for p in copy.rglob("*") if p.is_file())
+        self.assertEqual(got, ["CHANGES.md", "README.md", "assistant.py", "friday_tools.py", "start.bat",
+                               "web/app.js", "web/index.html", "这是什么.txt"])
+        self.assertEqual(made["files"], 7)
+        self.assertIn(str(app_dir), (copy / "这是什么.txt").read_text(encoding="utf-8"))
+        # 只留最近 3 份;别的文件夹不动
+        (downloads / "星期五代码审查_我自己的").mkdir()
+        for minute in (1, 2, 3):
+            friday_reviewcopy.make(app_dir, downloads, clock=lambda m=minute: datetime.datetime(2026, 11, 25, 9, m, 0))
+        copies = sorted(p.name for p in downloads.iterdir())
+        self.assertEqual(copies, ["星期五代码审查_20261125-090100", "星期五代码审查_20261125-090200",
+                                  "星期五代码审查_20261125-090300", "星期五代码审查_我自己的"])
+        self.assertEqual(friday_reviewcopy.latest(downloads), str(downloads / "星期五代码审查_20261125-090300"))
+
+    def test_settings_show_folder_and_make_copy(self):
+        session = app.WebSession(None, app.default_persona(), friday_web.Hub())
+        session.downloads_dir = Path(self.tmp)
+        state = app.settings_state(session)
+        self.assertEqual(state["app_folder"], {"path": app.SCRIPT_DIR, "review_copy": ""})
+        env = Path(self.tmp, ".env")
+        env.write_text("", encoding="utf-8")
+        result = app.apply_settings({"app_folder": "review_copy"}, session, SimpleNamespace(), env)
+        copy = Path(session.review_copy_path)
+        self.assertIn("干净副本", result["message"])
+        self.assertIn(str(copy), result["message"])
+        self.assertEqual(copy.parent, Path(self.tmp))
+        self.assertTrue((copy / "assistant.py").is_file())
+        self.assertTrue((copy / "web" / "app.js").is_file())
+        self.assertFalse(any(p.suffix == ".json" for p in copy.rglob("*")))  # 资料一个都没有
+        if os.name != "nt":
+            self.assertIn("Windows", app.apply_settings({"app_folder": "open"}, session, SimpleNamespace(), env)["error"])
+        self.assertEqual(app.settings_state(session)["app_folder"]["review_copy"], str(copy))
+
+
 if __name__ == "__main__":
     unittest.main()
