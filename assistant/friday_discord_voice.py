@@ -22,6 +22,7 @@ import wave
 from typing import Callable
 
 WAKE = "星期五"
+LOAD_RETRY = 600  # 离线识别模型载入失败:10 分钟后才再试
 JOIN_RE = re.compile(r"^(星期五)?[,， ]*(进|来|加入|进入|到)(我的?)?(语音|语音频道|频道|房间|vc|VC)(来|里)?(吧|一下)?$")
 LEAVE_RE = re.compile(r"^(星期五)?[,， ]*(退出|离开|出去|走吧?|滚)(语音|语音频道|频道|vc|VC)?(吧|了)?$")
 GAP_SECONDS = 0.8  # 不说话这么久算一句话说完
@@ -80,10 +81,17 @@ class Segmenter:
         return phrase if len(phrase) >= MIN_PHRASE * STEREO_48K else None
 
 
+WAKE_RE = re.compile(r"星期五|星期5|礼拜五|禮拜五|friday", re.I)  # 识别出来的“星期五”常见写法
+
+
+def has_wake(text: str) -> bool:
+    return WAKE_RE.search(str(text or "")) is not None
+
+
 def strip_wake(text: str) -> str:
     """“星期五,今天天气怎么样” -> “今天天气怎么样”。"""
-    at = text.find(WAKE)
-    rest = text[at + len(WAKE):] if at >= 0 else text
+    found = WAKE_RE.search(text)
+    rest = text[found.end():] if found else text
     return rest.strip(" ,，。.!！?？、:：")
 
 
@@ -112,9 +120,11 @@ class VoiceBrain:
             self.say("手机遥控上锁了。先私信我验证器上的 6 位数字,再叫我。")
             return None
         text = self.transcribe(wav_16k(mono)) or ""
+        if not following and text and not has_wake(text):
+            return None  # 离线听错以为叫了她,识别出来其实没有“星期五”:不把你跟朋友说的话拿去回答
         question = text if following else strip_wake(text)
         if not question:
-            if following or WAKE in text or not text:
+            if following or has_wake(text) or not text:
                 self.follow_until = self.clock() + FOLLOW_SECONDS
                 self.say("我在。")
             return None
@@ -135,7 +145,13 @@ def vosk_wake_checker(model_loader: Callable[[], object]) -> Callable[[bytes], b
         if "model" not in state:
             with lock:  # 刚进频道连说两句:两句同时到,模型(和第一次安装)只做一次
                 if "model" not in state:
-                    state["vosk"], state["model"] = model_loader()
+                    if time.monotonic() - state.get("failed_at", -1e9) < LOAD_RETRY:
+                        return False  # 刚刚才失败过:先不重试
+                    try:
+                        state["vosk"], state["model"] = model_loader()
+                    except Exception:
+                        state["failed_at"] = time.monotonic()
+                        raise
         recognizer = state["vosk"].KaldiRecognizer(state["model"], 16000,
                                                     json.dumps(friday_wake.grammar(WAKE), ensure_ascii=False))
         recognizer.SetWords(True)
@@ -192,6 +208,7 @@ class DiscordVoice:
         self.segmenter = Segmenter()
         self.running = False
         self._stop: threading.Event | None = None  # 这次连线的停止信号(换频道 / 退出时旧的线程就停)
+        self.session = 0  # 第几次连线:旧频道算完的回答,不会在新频道读出来
         self.phrases: queue.Queue = queue.Queue()
 
     def _start_workers(self, brain: VoiceBrain) -> threading.Event:
@@ -209,7 +226,10 @@ class DiscordVoice:
     # ---------- 进、出 ----------
     async def join(self, owner_id: int) -> str:
         # 第一次要 pip 安装(一两分钟):放到别的线程,不然整个 Discord 机器人会卡住、断线
-        await asyncio.to_thread(ensure_voice_packages, self.on_status)
+        try:
+            await asyncio.to_thread(ensure_voice_packages, self.on_status)
+        except RuntimeError as e:
+            return f"进不了语音频道:{e}"
         from discord.ext import voice_recv
 
         client = self.bridge.client
@@ -220,11 +240,18 @@ class DiscordVoice:
                     target = channel
         if target is None:
             return "你现在不在任何语音频道里。先进一个语音频道,再叫我“进语音”。"
-        if self.vc is not None and self.vc.is_connected():
-            await self.vc.disconnect(force=True)
-        self.vc = await target.connect(cls=voice_recv.VoiceRecvClient)
+        self._end_session()  # 旧的连线:线程停掉、没读完的回答作废
+        old, self.vc = self.vc, None
+        if old is not None and old.is_connected():
+            await old.disconnect(force=True)
+        try:
+            self.vc = await target.connect(cls=voice_recv.VoiceRecvClient)
+        except Exception as e:  # noqa: BLE001  没权限、超时、网络
+            self.vc = None
+            return f"进不了 {target.name}:{type(e).__name__}: {e}。看看机器人有没有“连接”和“说话”的权限,或者等一下再试。"
         self.owner_id = owner_id
-        brain = self.brain_factory(self.say)
+        session = self.session
+        brain = self.brain_factory(lambda text: self.say(text, session))
         self.segmenter = Segmenter()  # 上一个频道没说完的不要带过来
         segmenter = self.segmenter
         voice = self
@@ -247,11 +274,15 @@ class DiscordVoice:
         self._start_workers(brain)
         return f"我进 {target.name} 了。叫“星期五”再说问题就行;只听你的声音。说“退出语音”我就走。"
 
-    async def leave(self) -> str:
+    def _end_session(self) -> None:
         self.running = False
         if self._stop is not None:
             self._stop.set()
+        self.session += 1
         self.segmenter = Segmenter()
+
+    async def leave(self) -> str:
+        self._end_session()
         vc, self.vc = self.vc, None
         if vc is not None and vc.is_connected():
             await vc.disconnect(force=True)
@@ -289,16 +320,18 @@ class DiscordVoice:
         except Exception as e:  # noqa: BLE001
             self.on_status(f"语音频道这句没处理好:{type(e).__name__}: {e}")
 
-    def say(self, text: str) -> None:
-        """在语音频道里读出来(大家都听得到)。"""
+    def say(self, text: str, session: int | None = None) -> None:
+        """在语音频道里读出来(大家都听得到)。session:这句是哪一次连线的;换了频道就不读(别的频道可能是别人)。"""
+        if session is not None and session != self.session:
+            return
         audio = self.synthesize(text) if self.synthesize else None
-        if not audio or self.vc is None or self.bridge.loop is None:
+        if not audio or self.vc is None or self.bridge.loop is None or (session is not None and session != self.session):
             return
         import discord
         import imageio_ffmpeg
 
         def play() -> None:
-            if self.vc is None or not self.vc.is_connected():
+            if self.vc is None or not self.vc.is_connected() or (session is not None and session != self.session):
                 return
             if self.vc.is_playing():
                 self.vc.stop()

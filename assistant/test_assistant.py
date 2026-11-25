@@ -15286,5 +15286,84 @@ class ReviewCopyTest(TempDirTest):
         self.assertEqual(app.settings_state(session)["app_folder"]["review_copy"], str(copy))
 
 
+class ReviewNov25Test(TempDirTest):
+    """外部代码审查第三份(11-25):开机启动、语音频道、自我测试的副本。"""
+
+    def test_unquoted_paths_with_spaces(self):
+        self.assertEqual(friday_startup.program_name(r"C:\Program Files\Foo Bar\foo.exe -min"), "foo.exe")
+        self.assertEqual(friday_startup.program_name(
+            r"C:\Users\a\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\Spotify.lnk"), "Spotify.lnk")
+        self.assertEqual(friday_startup.program_name(r'"C:\a b\Steam.exe" -silent'), "Steam.exe")
+        self.assertEqual(friday_startup.program_name(r"rundll32.exe C:\x\y.dll,Run"), "rundll32.exe")
+        self.assertEqual(friday_startup.suggestion("Thing", r"C:\Program Files (x86)\Steam\steam.exe -silent")[0], "off")
+
+    def test_reparse_points_count_as_links(self):
+        folder = Path(self.tmp, "x")
+        folder.mkdir()
+        self.assertFalse(friday_startup._is_link(folder))
+        fake = SimpleNamespace(st_file_attributes=friday_startup.REPARSE_POINT)
+        with mock.patch.object(friday_startup.os, "lstat", return_value=fake):
+            self.assertTrue(friday_startup._is_link(folder))  # 旧版 Python 认不出的连接点也算
+
+    def test_short_or_partial_names_ask_first(self):
+        doctor, registry, _ = StartupDoctorTest.make(self)
+        commands = friday_startup.Commands(doctor)
+        before = len(registry.writes)
+        self.assertIn("你是说「Steam」吗", commands.handle("关掉开机启动的 ste"))
+        self.assertEqual(len(registry.writes), before)  # 没有改
+        self.assertIn("以后开机不会自动启动", commands.handle("关掉开机启动的 Razer"))  # 名字开头、够长:直接办
+
+    def test_voice_ignores_false_wake_and_old_sessions(self):
+        import friday_discord_voice as dv
+
+        asked, said = [], []
+        brain = dv.VoiceBrain(lambda pcm: True, lambda wav: "我们等下去吃饭吧", lambda q: asked.append(q) or "好",
+                              said.append)
+        self.assertIsNone(brain.phrase(b"\0" * 9600))
+        self.assertEqual((asked, said), ([], []))  # 离线以为听到“星期五”,其实没有:不回答
+        brain.transcribe = lambda wav: "星期5,今天天气怎么样"
+        brain.phrase(b"\0" * 9600)
+        self.assertEqual(asked, ["今天天气怎么样"])
+        voice = dv.DiscordVoice(SimpleNamespace(loop=None), lambda say: None, lambda text: b"mp3", print)
+        old = voice.session
+        voice._end_session()  # 换了频道
+        spoken = []
+        voice.synthesize = lambda text: spoken.append(text) or None
+        voice.say("上一个频道的回答", old)
+        self.assertEqual(spoken, [])  # 旧的回答连合成都不做
+        voice.say("这次的", voice.session)
+        self.assertEqual(spoken, ["这次的"])
+
+    def test_wake_model_failure_is_not_retried_every_phrase(self):
+        import friday_discord_voice as dv
+
+        tries = []
+
+        def loader():
+            tries.append(1)
+            raise RuntimeError("断网")
+
+        check = dv.vosk_wake_checker(loader)
+        with self.assertRaises(RuntimeError):
+            check(b"\0" * 320)
+        self.assertFalse(check(b"\0" * 320))  # 10 分钟内不再装、不再下载
+        self.assertEqual(tries, [1])
+
+    def test_self_test_copies_are_removed_afterwards(self):
+        app_dir = Path(self.tmp, "app")
+        app_dir.mkdir()
+        (app_dir / "calc.py").write_text("X = 1\n", encoding="utf-8")
+        (app_dir / "test_assistant.py").write_text(
+            "import unittest\nimport calc\n\nclass T(unittest.TestCase):\n    def test_x(self):\n"
+            "        self.assertEqual(calc.X, 1)\n", encoding="utf-8")
+        Path(self.tmp, "lab", "selftest", "base").mkdir(parents=True)  # 以前留下的旧副本
+        lab = friday_lab.Lab(os.path.join(self.tmp, "lab"), app_dir=app_dir)
+        self.assertFalse(Path(self.tmp, "lab", "selftest").exists())  # 开的时候就清掉
+        record = lab.self_test([{"file": "calc.py", "old": "X = 1", "new": "X = 1  # 注解"}], "试")
+        self.assertTrue(record["ok"])
+        self.assertFalse(Path(self.tmp, "lab", "selftest").exists())  # 跑完就删
+        self.assertTrue(Path(record["report"]).is_file())  # 报告还在
+
+
 if __name__ == "__main__":
     unittest.main()

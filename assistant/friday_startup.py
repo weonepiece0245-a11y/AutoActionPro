@@ -58,17 +58,28 @@ ENABLE = re.compile(r"^(星期五)?[,，\s]*(恢复|打开|开回|重新打开)(
 CLEAN_TEMP = re.compile(r"^(星期五)?[,，\s]*(帮我)?(清理|清掉|删掉|清除)(一下)?(电脑的?)?(临时文件|暂存文件|temp|垃圾文件)[。!！]?$", re.I)
 
 
+_PROGRAM_END = re.compile(r"^\s*(.+?\.(?:exe|com|bat|cmd|lnk|vbs|ps1|url))(?=\s|$)", re.I)
+
+
+def _program_path(command: str) -> str:
+    """命令里的程序路径。有引号看引号;没引号但路径有空格(C:\\Program Files\\Foo\\foo.exe -min、
+    启动文件夹里 ...\\Start Menu\\...\\Spotify.lnk)就找到 .exe / .lnk 为止;都不是才取第一段。"""
+    text = str(command or "")
+    for found in (re.match(r'\s*"([^"]+)"', text), _PROGRAM_END.match(text), re.match(r"\s*(\S+)", text)):
+        if found:
+            return found.group(1)
+    return ""
+
+
 def program_name(command: str) -> str:
     """命令里的程序文件名:"C:\\a b\\Steam.exe" -silent -> Steam.exe。"""
-    found = re.match(r'\s*"([^"]+)"|\s*(\S+)', str(command or ""))
-    return Path((found.group(1) or found.group(2)) if found else "").name.replace("\\", "/").rsplit("/", 1)[-1]
+    return _program_path(command).replace("\\", "/").rsplit("/", 1)[-1]
 
 
 def _program_text(name: str, command: str) -> str:
     """拿来比对的文字:条目名字 + 程序所在的最后两层文件夹 + 程序文件名。
     不看完整命令:路径里的用户名(C:\\Users\\dell\\…)、参数(--online)会让建议乱掉。"""
-    found = re.match(r'\s*"([^"]+)"|\s*(\S+)', str(command or ""))
-    parts = [p for p in re.split(r"[\\/]", (found.group(1) or found.group(2)) if found else "") if p]
+    parts = [p for p in re.split(r"[\\/]", _program_path(command)) if p]
     lowered = [p.lower() for p in parts]
     if "users" in lowered[:-1]:  # 用户文件夹的名字不算
         cut = lowered.index("users") + 1
@@ -262,8 +273,10 @@ def clean_temp(folder: Path | None, older_days: float = TEMP_DAYS, now: float | 
         return 0, 0
     now = now if now is not None else time.time()
     freed = count = 0
+    walked: list[Path] = []
     for current, dirs, files in os.walk(folder, topdown=True):
         dirs[:] = [d for d in dirs if not _is_link(Path(current) / d)]  # 不跟着捷径 / 连接点跑出临时文件夹
+        walked += [Path(current) / d for d in dirs]
         for name in files:
             path = Path(current) / name
             try:
@@ -275,18 +288,25 @@ def clean_temp(folder: Path | None, older_days: float = TEMP_DAYS, now: float | 
                 count += 1
             except OSError:
                 continue
-    for current, dirs, files in os.walk(folder, topdown=False):
-        if Path(current) != folder and not _is_link(Path(current)):
+    # 空的子文件夹顺便拿掉(不空的删不掉,跳过):只删上面真的走进去过的,最深的先删,不会再走进连接点
+    for path in sorted(walked, key=lambda p: len(p.parts), reverse=True):
+        if not _is_link(path):
             try:
-                Path(current).rmdir()  # 空的子文件夹顺便拿掉(不空的删不掉,跳过)
+                path.rmdir()
             except OSError:
                 pass
     return freed, count
 
 
+REPARSE_POINT = 0x400  # Windows 的 FILE_ATTRIBUTE_REPARSE_POINT:捷径、连接点、OneDrive 之类
+
+
 def _is_link(path: Path) -> bool:
+    """捷径或连接点(会跳到别的文件夹)。不只靠 is_junction(Python 3.12 才有),直接看 Windows 的属性。"""
     try:
-        return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+        if path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
+            return True
+        return bool(getattr(os.lstat(path), "st_file_attributes", 0) & REPARSE_POINT)
     except OSError:
         return True
 
@@ -362,6 +382,12 @@ class StartupDoctor:
             names = "、".join(m["name"] for m in matches[:5])
             raise ValueError(f"有好几个对上“{name}”:{names}。说清楚一点是哪一个")
         item = matches[0]
+        key = name.strip().lower().replace(" ", "")
+        exact = item["name"].lower().replace(" ", "") == key
+        starts = len(key) >= 4 and (item["name"].lower().replace(" ", "").startswith(key)
+                                    or Path(program_name(item["command"]).lower()).stem.startswith(key))
+        if not exact and not starts:  # 只对上名字的一小部分(说得很短、听错):先问,不直接改
+            return (f"你是说「{item['name']}」吗?确定的话说“{'恢复' if enabled else '关掉'}开机启动的 {item['name']}”。")
         if item["enabled"] == enabled:
             return f"{item['name']} 本来就{'会' if enabled else '不会'}开机启动。"
         if not item["can_toggle"]:

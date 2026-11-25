@@ -127,6 +127,7 @@ class Lab:
         self.lock = threading.Lock()
         self.busy: str | None = None
         self.baseline: dict | None = None  # 没改过的副本的测试结果(同一版程序只跑一次)
+        shutil.rmtree(self.folder / "selftest", ignore_errors=True)  # 以前的版本留下的副本(现在跑完就删)
         try:
             self.history: list[dict] = json.loads((self.folder / "history.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -438,6 +439,12 @@ class Lab:
         """改一份副本、跑全部测试,和没改的比。很慢(几分钟),在后台跑。
 
         approve:实验室里跑不了的相关测试,问老板要不要在实验室外面补跑(None:不问,例如每周自我检讨)。"""
+        try:
+            return self._self_test(edits, title, approve)
+        finally:  # 副本用完就删(结果已经记下来了):不留一堆旧程序在文件夹里,搜索、代码审查才不会看错
+            shutil.rmtree(self.folder / "selftest", ignore_errors=True)
+
+    def _self_test(self, edits: list[dict], title: str, approve: Callable[[str], bool] | None) -> dict:
         title = str(title or "自我测试")[:60]
         run_id = "st-" + self.clock().strftime("%Y%m%d-%H%M%S")
         started = time.monotonic()
